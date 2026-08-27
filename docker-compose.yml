@@ -29,6 +29,8 @@ services:
       LORELINE_HOST: 0.0.0.0
       LORELINE_ENVIRONMENT: prod
       LORELINE_LOG_JSON: "true"
+      # Unset this to turn Settings > Services off entirely.
+      LORELINE_DOCKER_API: http://docker-proxy:2375
     volumes:
       - ./data:/app/data
     # Real microphone capture needs the host's audio device node passed
@@ -51,6 +53,20 @@ services:
     #   - /run/user/1000/pulse:/run/user/1000/pulse
     # environment:
     #   XDG_RUNTIME_DIR: /run/user/1000
+    restart: unless-stopped
+
+  # Lets Settings > Services list the stack, read container logs, and
+  # start/stop the optional services - without handing the app the raw Docker
+  # socket, which is root-equivalent on the host. Allowlists five endpoints by
+  # exact path and refuses everything else; see deploy/docker-proxy.Caddyfile
+  # for why a path-level allowlist is required here. Not published to the
+  # host - only the app can reach it, over the compose network.
+  docker-proxy:
+    image: caddy:2-alpine
+    command: caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
+    volumes:
+      - ./deploy/docker-proxy.Caddyfile:/etc/caddy/Caddyfile:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
     restart: unless-stopped
 
   # Reverse proxy for reaching the app on standard ports across the LAN, with

@@ -250,6 +250,18 @@ msg_info "Building and starting the stack (first build takes a few minutes)"
 as_root docker compose "${PROFILES[@]}" up -d --build
 msg_ok "Stack is up"
 
+# Create (but don't start) any optional service not selected above, so
+# Settings > Services can start it later. Compose profiles are a client-side
+# concept - the Docker API can only start a container that already exists, so
+# without this the UI would have nothing to act on.
+for profile in local-stt diarization; do
+  case " ${PROFILES[*]} " in
+  *" ${profile} "*) continue ;;
+  esac
+  as_root docker compose --profile "$profile" create >/dev/null 2>&1 || true
+done
+msg_ok "Optional services registered (start them in Settings > Services)"
+
 # --- auto-update timer ------------------------------------------------------
 as_root install -m 0644 "${APP_DIR}/deploy/loreline-update.service" /etc/systemd/system/loreline-update.service
 as_root sed -i "s#^WorkingDirectory=.*#WorkingDirectory=${APP_DIR}#; s#^ExecStart=.*#ExecStart=${APP_DIR}/deploy/update.sh#" \

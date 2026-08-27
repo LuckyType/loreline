@@ -17,6 +17,8 @@ import type {
 	ReprocessJob,
 	ReprocessRequest,
 	RevisionResponse,
+	ServiceLogs,
+	ServiceState,
 	Session,
 	SessionDetail,
 	StartSessionRequest,
@@ -187,4 +189,14 @@ export const api = {
 	getReprocess: (jobId: string) => request<ReprocessJob>(`/api/reprocess/${jobId}`),
 	listReprocess: (sessionId: string) =>
 		request<ReprocessJob[]>(`/api/reprocess?session_id=${sessionId}`),
+
+	// --- services (docker) ---
+	listServices: () => request<ServiceState[]>('/api/system/services'),
+	setServiceRunning: (name: string, running: boolean) =>
+		request<ServiceState>(`/api/system/services/${name}`, {
+			method: 'POST',
+			body: JSON.stringify({ running }),
+		}),
+	serviceLogs: (name: string, tail = 200) =>
+		request<ServiceLogs>(`/api/system/services/${name}/logs?tail=${tail}`),
 }

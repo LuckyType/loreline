@@ -1,0 +1,42 @@
+# Least-privilege Docker API proxy for Settings > Services.
+#
+# Handing the app /var/run/docker.sock directly is root-equivalent on the
+# host, so it goes through here instead. This allowlists the five endpoints
+# the Services page actually uses and refuses everything else - most
+# importantly POST /containers/create, which would otherwise let anything
+# that reaches the web UI start a privileged container bind-mounting the host
+# filesystem and escape.
+#
+# (tecnativa/docker-socket-proxy can't express this: its POST flag is a
+# blanket write gate, so allowing start/stop there also allows create.
+# Verified against a real daemon.)
+#
+# Not published to the host - only reachable from the app over the compose
+# network.
+
+:2375 {
+	# List the stack, inspect one container, read its logs.
+	@read {
+		method GET
+		path /containers/json /containers/*/json /containers/*/logs
+	}
+
+	# Start or stop an already-existing container. Cannot create, delete,
+	# exec into, or reconfigure anything.
+	@lifecycle {
+		method POST
+		path /containers/*/start /containers/*/stop
+	}
+
+	handle @read {
+		reverse_proxy unix//var/run/docker.sock
+	}
+
+	handle @lifecycle {
+		reverse_proxy unix//var/run/docker.sock
+	}
+
+	handle {
+		respond "refused: not allowed by the Loreline docker proxy" 403
+	}
+}

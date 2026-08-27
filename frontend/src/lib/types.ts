@@ -236,3 +236,17 @@ export interface AutostartState {
 export interface RevisionResponse {
 	commit: string | null
 }
+
+export interface ServiceState {
+	name: string
+	container_id: string
+	state: string
+	status: string
+	image: string
+	controllable: boolean
+}
+
+export interface ServiceLogs {
+	name: string
+	logs: string
+}

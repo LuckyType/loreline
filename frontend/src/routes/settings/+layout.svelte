@@ -9,6 +9,7 @@ const tabs = [
 	{ href: '/settings/providers', label: 'Providers' },
 	{ href: '/settings/glossary', label: 'Glossary' },
 	{ href: '/settings/alerts', label: 'Alerting' },
+	{ href: '/settings/services', label: 'Services' },
 ]
 </script>
 

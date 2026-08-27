@@ -12,7 +12,7 @@ import uuid
 from fastapi import APIRouter, Depends, Request
 from fastapi.exceptions import HTTPException
 from pydantic import BaseModel
-from starlette.status import HTTP_404_NOT_FOUND
+from starlette.status import HTTP_404_NOT_FOUND, HTTP_503_SERVICE_UNAVAILABLE
 
 from loreline import __version__
 from loreline.diarization.remote import probe_health
@@ -23,6 +23,7 @@ from loreline.monitoring import (
     overall_status,
 )
 from loreline.secrets import SecretStore
+from loreline.services import DockerUnavailableError, ServiceState
 from loreline.updater import UpdateResult
 from loreline.web.auth import require_auth
 from loreline.web.deps import get_state
@@ -227,3 +228,46 @@ async def delete_alert_channel(request: Request, channel_id: str) -> OkResponse:
 async def test_alert_channel(request: Request, channel_id: str) -> AlertTestResult:
     """Send a test notification to one channel."""
     return AlertTestResult(ok=await get_state(request).alerts.test_channel(channel_id))
+
+
+class ServiceLogs(BaseModel):
+    """Recent container output for one service."""
+
+    name: str
+    logs: str
+
+
+class ServiceAction(BaseModel):
+    """Start or stop a service."""
+
+    running: bool
+
+
+@router.get("/services", dependencies=_auth)
+async def list_services(request: Request) -> list[ServiceState]:
+    """The containers in this compose project, with their current state."""
+    services = get_state(request).services
+    if not services.enabled:
+        return []
+    try:
+        return await services.list_services()
+    except DockerUnavailableError as exc:
+        raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+
+
+@router.post("/services/{name}", dependencies=_auth)
+async def set_service_running(request: Request, name: str, body: ServiceAction) -> ServiceState:
+    """Start or stop one of the optional services."""
+    try:
+        return await get_state(request).services.set_running(name, running=body.running)
+    except DockerUnavailableError as exc:
+        raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+
+
+@router.get("/services/{name}/logs", dependencies=_auth)
+async def service_logs(request: Request, name: str, tail: int = 200) -> ServiceLogs:
+    """Recent stdout/stderr for one service's container."""
+    try:
+        return ServiceLogs(name=name, logs=await get_state(request).services.logs(name, tail=tail))
+    except DockerUnavailableError as exc:
+        raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc

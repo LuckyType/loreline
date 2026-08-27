@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
@@ -28,6 +29,7 @@ from loreline.persistence import (
 )
 from loreline.reprocess import ReprocessManager
 from loreline.secrets import SecretStore
+from loreline.services import ServiceManager
 from loreline.session import SessionManager
 from loreline.session.manager import BackendFactory, CaptureFactory, DiarizerFactory
 from loreline.settings import Settings, get_settings
@@ -69,6 +71,7 @@ class AppState:
     autostart: Autostart
     log_broadcaster: LogBroadcaster
     login_limiter: LoginRateLimiter
+    services: ServiceManager
     started_at: float
 
 
@@ -141,6 +144,12 @@ def _build_state(
         autostart=autostart,
         log_broadcaster=broadcaster,
         login_limiter=LoginRateLimiter(),
+        services=ServiceManager(
+            settings.docker_api,
+            # Scope to this compose project so the UI can only ever see its
+            # own stack, never other containers on the same host.
+            project=os.environ.get("COMPOSE_PROJECT_NAME", "loreline"),
+        ),
         started_at=time.monotonic(),
     )
 

@@ -47,6 +47,13 @@ class Settings(BaseSettings):
         description="Repo/app dir used for git self-update and rollback.",
     )
     systemd_unit: str = Field(default="loreline", description="systemd unit name for autostart.")
+    docker_api: str = Field(
+        default="",
+        description=(
+            "Base URL of a Docker API (the docker-socket-proxy in docker-compose.yml). "
+            "Enables Settings > Services; blank disables it."
+        ),
+    )
     disk_alert_threshold_mb: int = Field(
         default=500,
         description="Free-space floor; below this /healthz reports 'degraded'.",
