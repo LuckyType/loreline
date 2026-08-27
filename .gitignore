@@ -37,3 +37,4 @@ frontend/.svelte-kit/
 
 # Local agent/editor tooling
 .claude/
+CLAUDE.md
