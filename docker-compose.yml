@@ -95,8 +95,17 @@ services:
     profiles: ["local-stt"]
     ports:
       - "8200:8000"
-    environment:
-      - WHISPER__MODEL=Systran/faster-whisper-large-v3
+    # This image ships with NO models, and does not download one on demand:
+    # transcription 404s with "Model '...' is not installed locally" while
+    # GET /v1/models still answers 200 with an empty list - which reads like
+    # the service is fine. Install one once (persists in speaches-hub):
+    #
+    #   curl -X POST http://localhost:8200/v1/models/Systran/faster-whisper-large-v3
+    #
+    # Note WHISPER__MODEL and PRELOAD_MODELS do NOT work here despite
+    # appearing in the upstream docs - this build's settings object has
+    # neither field, so both are silently ignored (verified against the
+    # running container's own config dump).
     volumes:
       - speaches-hub:/home/ubuntu/.cache/huggingface/hub
     restart: unless-stopped
