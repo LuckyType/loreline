@@ -78,7 +78,12 @@ class SttRouter:
         output: dict[str, list[TranscriptEvent]] = {}
         for provider_id, result in zip(backends, results, strict=True):
             if isinstance(result, BaseException):
-                log.warning("stt.compare.error", provider=provider_id, error=str(result))
+                log.warning(
+                    "stt.compare.error",
+                    provider=backends[provider_id].config.name,
+                    provider_id=provider_id,
+                    error=str(result),
+                )
                 output[provider_id] = []
             else:
                 output[provider_id] = result
@@ -90,8 +95,13 @@ class SttRouter:
                 self._collect(self._primary, utterance), timeout=self._config.timeout_s
             )
         except Exception as exc:  # resilience: any backend error triggers fallback
-            log.warning("stt.primary.failed", provider=self._primary.config.id, error=str(exc))
-            await self._notify_failover(f"Primary STT {self._primary.config.id} failed: {exc}")
+            log.warning(
+                "stt.primary.failed",
+                provider=self._primary.config.name,
+                provider_id=self._primary.config.id,
+                error=str(exc),
+            )
+            await self._notify_failover(f"Primary STT {self._primary.config.name} failed: {exc}")
         if self._fallback is None:
             return []
         try:
@@ -99,7 +109,12 @@ class SttRouter:
                 self._collect(self._fallback, utterance), timeout=self._config.timeout_s
             )
         except Exception as exc:  # both backends failed; emit nothing for this utterance
-            log.error("stt.fallback.failed", provider=self._fallback.config.id, error=str(exc))
+            log.error(
+                "stt.fallback.failed",
+                provider=self._fallback.config.name,
+                provider_id=self._fallback.config.id,
+                error=str(exc),
+            )
             return []
 
     async def _notify_failover(self, message: str) -> None:

@@ -1,5 +1,5 @@
 import { writable } from 'svelte/store'
-import type { Health } from './types'
+import type { Health, ProviderConfig } from './types'
 
 export const health = writable<Health | null>(null)
 export const authed = writable<boolean>(true)
@@ -21,4 +21,29 @@ export function formatTime(seconds: number): string {
 	const m = Math.floor(s / 60)
 	const sec = String(s % 60).padStart(2, '0')
 	return `${m}:${sec}`
+}
+
+// Transcript segments and reprocess jobs store a provider *id*, which is a
+// 32-char hex string - unreadable in a table or next to a transcript line.
+// These resolve it to the provider's name, keeping the id only as a fallback
+// for providers that have since been deleted.
+const DIARIZE_SOURCE = 'diarize'
+const REPROCESS_PREFIX = 'reprocess:'
+
+export function providerName(id: string | null | undefined, providers: ProviderConfig[]): string {
+	if (!id) return '-'
+	const match = providers.find((p) => p.id === id)
+	if (match) return match.name
+	// Deleted provider: a short prefix still lets you correlate with the logs.
+	return `${id.slice(0, 8)}…`
+}
+
+// A transcript segment's `source` is a provider id, the diarization tag, or
+// `reprocess:<provider id>` - see loreline.models.
+export function sourceLabel(source: string, providers: ProviderConfig[]): string {
+	if (source === DIARIZE_SOURCE) return 'Diarization'
+	if (source.startsWith(REPROCESS_PREFIX)) {
+		return `${providerName(source.slice(REPROCESS_PREFIX.length), providers)} (re-run)`
+	}
+	return providerName(source, providers)
 }

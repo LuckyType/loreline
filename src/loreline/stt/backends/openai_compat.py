@@ -95,7 +95,11 @@ class OpenAICompatBackend:
             text = mapping.get("text")
             if isinstance(text, str):
                 return text.strip()
-        log.warning("stt.openai_compat.unexpected_payload", provider=self.config.id)
+        log.warning(
+            "stt.openai_compat.unexpected_payload",
+            provider=self.config.name,
+            provider_id=self.config.id,
+        )
         return ""
 
     async def health(self) -> bool:

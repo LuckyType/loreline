@@ -15,9 +15,11 @@ import {
 	TableHeader,
 	TableRow,
 } from '$lib/components/ui/table'
-import type { Session } from '$lib/types'
+import { providerName } from '$lib/stores'
+import type { ProviderConfig, Session } from '$lib/types'
 
 let sessions = $state<Session[]>([])
+let providers = $state<ProviderConfig[]>([])
 let selected = $state<Record<string, boolean>>({})
 let error = $state('')
 let busy = $state(false)
@@ -39,6 +41,14 @@ async function reload() {
 		selected = Object.fromEntries(sessions.map((s) => [s.id, false]))
 	} catch (err) {
 		error = err instanceof ApiError ? err.message : 'failed to load sessions'
+	}
+	// Only used to render provider ids as names. Deliberately outside the try
+	// above and non-fatal: a cosmetic lookup must not fail the session list,
+	// and providerName() already falls back to a short id.
+	try {
+		providers = await api.listProviders()
+	} catch {
+		providers = []
 	}
 }
 
@@ -135,7 +145,9 @@ onMount(reload)
 								{s.status}
 							</Badge>
 						</TableCell>
-						<TableCell class="text-muted-foreground">{s.primary_provider ?? '-'}</TableCell>
+						<TableCell class="text-muted-foreground"
+							>{providerName(s.primary_provider, providers)}</TableCell
+						>
 						<TableCell class="text-muted-foreground">{s.campaign_id ?? '-'}</TableCell>
 						<TableCell
 							><a class="text-primary hover:underline" href="/sessions/{s.id}">Open</a></TableCell

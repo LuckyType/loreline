@@ -5,6 +5,7 @@ import { api, ApiError } from '$lib/api'
 import { confirm } from '$lib/confirm.svelte'
 import ModelPicker from '$lib/ModelPicker.svelte'
 import TranscriptList from '$lib/TranscriptList.svelte'
+import { providerName } from '$lib/stores'
 import { Button } from '$lib/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '$lib/components/ui/card'
 import {
@@ -216,7 +217,7 @@ onDestroy(() => {
 			>
 			<span
 				><span class="text-muted-foreground">Primary:</span>
-				{detail.session.primary_provider ?? '-'}</span
+				{providerName(detail.session.primary_provider, providers)}</span
 			>
 			<span
 				><span class="text-muted-foreground">Diarization:</span>
@@ -345,7 +346,7 @@ onDestroy(() => {
 					<TableBody>
 						{#each jobs as j (j.id)}
 							<TableRow>
-								<TableCell>{j.provider_id}</TableCell>
+								<TableCell>{providerName(j.provider_id, providers)}</TableCell>
 								<TableCell>
 									<Badge
 										variant={j.status === 'error'
@@ -374,7 +375,12 @@ onDestroy(() => {
 				Rename speakers
 			</Button>
 		</CardContent>
-		<TranscriptList events={detail.transcript} names={detail.session.speaker_names} showSource />
+		<TranscriptList
+			events={detail.transcript}
+			names={detail.session.speaker_names}
+			{providers}
+			showSource
+		/>
 	</Card>
 {/if}
 

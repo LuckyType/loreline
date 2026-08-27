@@ -1,15 +1,17 @@
 <script lang="ts">
-import { speakerColor, formatTime } from '$lib/stores'
-import type { TranscriptEvent } from '$lib/types'
+import { speakerColor, formatTime, sourceLabel } from '$lib/stores'
+import type { ProviderConfig, TranscriptEvent } from '$lib/types'
 
 let {
 	events,
 	names = {},
 	showSource = false,
+	providers = [],
 }: {
 	events: TranscriptEvent[]
 	names?: Record<string, string>
 	showSource?: boolean
+	providers?: ProviderConfig[]
 } = $props()
 
 function displaySpeaker(label: string): string {
@@ -29,7 +31,9 @@ function displaySpeaker(label: string): string {
 				</span>
 			{/if}
 			{#if showSource}
-				<span class="shrink-0 text-xs text-muted-foreground">{ev.source}</span>
+				<span class="shrink-0 rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground"
+					>{sourceLabel(ev.source, providers)}</span
+				>
 			{/if}
 			<span class="min-w-0">{ev.text}</span>
 		</div>

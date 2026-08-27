@@ -207,7 +207,12 @@ class GoogleSTTBackend:
         try:
             self._build_client()
         except Exception as exc:  # missing SDK / credentials / endpoint
-            log.warning("google.health.failed", provider=self.config.id, error=str(exc))
+            log.warning(
+                "google.health.failed",
+                provider=self.config.name,
+                provider_id=self.config.id,
+                error=str(exc),
+            )
             return False
         return True
 
