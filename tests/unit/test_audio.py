@@ -30,7 +30,11 @@ def _require_sounddevice() -> Any:
     instead of skipping.
     """
     try:
-        import sounddevice  # noqa: PLC0415
+        # sounddevice ships only with the `audio` extra, which the base CI job
+        # deliberately installs without, so an unresolved import here is
+        # expected rather than a mistake. (Don't start this comment with
+        # "pyright:" - that's reserved for directives and errors out.)
+        import sounddevice  # noqa: PLC0415 # pyright: ignore[reportMissingImports]
     except (ImportError, OSError) as exc:  # pragma: no cover - env-dependent
         pytest.skip(f"sounddevice unavailable: {exc}")
     return sounddevice
