@@ -42,9 +42,23 @@ let diarEndpoint = $state('')
 let error = $state('')
 let busy = $state(false)
 
+// Where the bundled sherpa-onnx diarizer answers on the compose network.
+// Used as the actual default, not just placeholder text - it was previously
+// only a placeholder, so you had to retype the value it was already showing.
+const DEFAULT_DIAR_ENDPOINT = 'http://diarization:8001'
+
 // Validated in the UI rather than only server-side, so the message can sit
 // under the field it's about instead of at the bottom of the card.
 const endpointMissing = $derived(diarMode === 'remote' && !diarEndpoint.trim())
+
+function setDiarMode(mode: string) {
+	diarMode = mode as DiarizationModeKind
+	// Switching to remote with nothing configured: offer the bundled service
+	// rather than an empty box the user has to fill from the placeholder.
+	if (mode === 'remote' && !diarEndpoint.trim()) {
+		diarEndpoint = defaults.diar_endpoint || DEFAULT_DIAR_ENDPOINT
+	}
+}
 
 // Fallback and diarization are collapsed by default. The summary line has to
 // carry enough that folding them away never hides a problem - so it states
@@ -117,6 +131,12 @@ async function load() {
 		defaults = await api.getDefaults()
 		if (defaults.diar_mode) diarMode = defaults.diar_mode as DiarizationModeKind
 		if (defaults.diar_endpoint) diarEndpoint = defaults.diar_endpoint
+		// Saved defaults can say "remote" without an endpoint. Fill in the
+		// bundled service rather than showing an empty box next to a
+		// placeholder the user would have to copy out by hand.
+		if (diarMode === 'remote' && !diarEndpoint.trim()) {
+			diarEndpoint = DEFAULT_DIAR_ENDPOINT
+		}
 	} catch {
 		/* defaults are optional */
 	}
@@ -317,7 +337,8 @@ onDestroy(() => {
 							<Label for="diar">Diarization</Label>
 							<Dropdown
 								id="diar"
-								bind:value={diarMode}
+								value={diarMode}
+								onpick={setDiarMode}
 								options={[
                   { value: 'none', label: 'None' },
                   { value: 'inline', label: 'Inline (from STT)' },
