@@ -78,3 +78,27 @@ def _parse_segments(payload: object) -> list[SpeakerSegment]:
                 SpeakerSegment(start=float(start), end=float(end), speaker=str(speaker))
             )
     return segments
+
+
+_PROBE_TIMEOUT_S = 2.0
+
+
+async def probe_health(endpoint: str, *, client: httpx.AsyncClient | None = None) -> bool:
+    """Return True if a diarization service is reachable at ``endpoint``.
+
+    Hits the service's ``GET /healthz`` (see ``services/diarization``). Kept on
+    a short timeout because ``/api/system/healthz`` calls this while the UI
+    polls it every few seconds - a hung diarizer must not stall the whole
+    health response.
+    """
+    owns = client is None
+    http = client or httpx.AsyncClient(base_url=endpoint, timeout=_PROBE_TIMEOUT_S)
+    try:
+        response = await http.get("/healthz")
+    except httpx.HTTPError:
+        return False
+    else:
+        return response.status_code < HTTPStatus.INTERNAL_SERVER_ERROR
+    finally:
+        if owns:
+            await http.aclose()

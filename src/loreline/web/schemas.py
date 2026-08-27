@@ -61,6 +61,8 @@ class StartSessionRequest(BaseModel):
     device: int | str | None = None
     model: str | None = None
     """Override the primary provider's model for this session (chosen on demand)."""
+    fallback_model: str | None = None
+    """Same, for the fallback provider - it has its own model list."""
     diarization: DiarizationConfig = Field(default_factory=DiarizationConfig)
 
 

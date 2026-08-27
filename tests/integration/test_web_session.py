@@ -183,6 +183,40 @@ async def test_start_overrides_model(session_settings: Settings) -> None:
             await ac.post("/api/session/stop")
 
 
+async def test_start_overrides_fallback_model(session_settings: Settings) -> None:
+    """`fallback_model` overrides the *fallback* provider's model, independently
+    of the primary's - the two providers have separate model lists."""
+    seen: list[str | None] = []
+
+    def factory(config: ProviderConfig, secrets: SecretStore) -> FakeBackend:
+        seen.append(config.model)
+        return FakeBackend(config, secrets)
+
+    app = create_app(
+        session_settings,
+        capture_factory=capture_factory,  # type: ignore[arg-type]
+        backend_factory=factory,  # type: ignore[arg-type]
+        diarizer_factory=lambda _cfg: FakeDiarizer(),
+    )
+    async with LifespanManager(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            primary_id = await _create_provider(ac)
+            fallback_id = await _create_provider(ac)
+            start = await ac.post(
+                "/api/session/start",
+                json={
+                    "primary_provider": primary_id,
+                    "fallback_provider": fallback_id,
+                    "model": "primary-model",
+                    "fallback_model": "fallback-model",
+                },
+            )
+            assert start.status_code == 201
+            assert seen == ["primary-model", "fallback-model"]
+            await ac.post("/api/session/stop")
+
+
 async def test_stop_without_session(session_client: AsyncClient) -> None:
     resp = await session_client.post("/api/session/stop")
     assert resp.status_code == 409

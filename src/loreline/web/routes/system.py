@@ -15,6 +15,7 @@ from pydantic import BaseModel
 from starlette.status import HTTP_404_NOT_FOUND
 
 from loreline import __version__
+from loreline.diarization.remote import probe_health
 from loreline.monitoring import (
     AlertChannel,
     channel_token_secret,
@@ -41,6 +42,26 @@ router = APIRouter(prefix="/api/system", tags=["system"])
 _auth = [Depends(require_auth)]
 _DEFAULTS_KEY = "action_defaults"  # kv_settings key for the per-action default models/mode
 
+# The UI polls /healthz every few seconds; re-probing the diarizer that often
+# would be wasteful (and slow when it's down and every probe waits for a
+# timeout). Cache the verdict briefly - a diarizer coming up or going away is
+# noticed within this window, which is plenty for a status badge.
+_DIARIZER_PROBE_TTL_S = 20.0
+_diarizer_probe: tuple[str, float, bool] | None = None
+
+
+async def _diarizer_status(endpoint: str) -> bool:
+    """Reachability of ``endpoint``, cached for ``_DIARIZER_PROBE_TTL_S``."""
+    global _diarizer_probe  # noqa: PLW0603 - module-level memo, single event loop
+    now = time.monotonic()
+    if _diarizer_probe is not None:
+        cached_endpoint, checked_at, reachable = _diarizer_probe
+        if cached_endpoint == endpoint and now - checked_at < _DIARIZER_PROBE_TTL_S:
+            return reachable
+    reachable = await probe_health(endpoint)
+    _diarizer_probe = (endpoint, now, reachable)
+    return reachable
+
 
 class HealthResponse(BaseModel):
     """Health/status payload for monitoring and the UI status badge."""
@@ -53,6 +74,10 @@ class HealthResponse(BaseModel):
     disk_free_bytes: int = 0
     disk_total_bytes: int = 0
     alerts_enabled: bool = False
+    diarizer_endpoint: str | None = None
+    """The configured remote-diarization endpoint, or null when none is set."""
+    diarizer_reachable: bool | None = None
+    """Whether that endpoint answered; null when no endpoint is configured."""
 
 
 @router.get("/healthz")
@@ -63,6 +88,14 @@ async def healthz(request: Request) -> HealthResponse:
     free, total = disk_usage(state.settings.data_dir)
     threshold = state.settings.disk_alert_threshold_mb * 1024 * 1024
     alert_config = await state.alerts.get_config()
+
+    raw_defaults = await state.settings_repo.get(_DEFAULTS_KEY)
+    defaults = (
+        ActionDefaults.model_validate_json(raw_defaults) if raw_defaults else ActionDefaults()
+    )
+    endpoint = defaults.diar_endpoint or None
+    reachable = await _diarizer_status(endpoint) if endpoint else None
+
     return HealthResponse(
         status=overall_status(
             capture_status=capture_status, disk_free=free, disk_threshold_bytes=threshold
@@ -74,6 +107,8 @@ async def healthz(request: Request) -> HealthResponse:
         disk_free_bytes=free,
         disk_total_bytes=total,
         alerts_enabled=any(c.enabled for c in alert_config.channels),
+        diarizer_endpoint=endpoint,
+        diarizer_reachable=reachable,
     )
 
 

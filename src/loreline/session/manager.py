@@ -174,6 +174,8 @@ class SessionManager:
             if not fallback_cfg.enabled:
                 msg = f"fallback provider {req.fallback_provider!r} is disabled"
                 raise ProviderDisabledError(msg)
+            if req.fallback_model:
+                fallback_cfg = fallback_cfg.model_copy(update={"model": req.fallback_model})
         return primary_cfg, fallback_cfg
 
     def _build_backends(

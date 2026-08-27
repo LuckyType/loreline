@@ -15,6 +15,7 @@ import pytest_asyncio
 from asgi_lifespan import LifespanManager
 from httpx import ASGITransport, AsyncClient
 
+import loreline.web.routes.system as system_route
 from loreline.settings import Settings
 from loreline.updater.process import CommandResult
 from loreline.web.app import create_app
@@ -76,6 +77,43 @@ async def test_healthz_extended(client: AsyncClient) -> None:
     assert body["capture_status"] == "idle"
     assert body["disk_total_bytes"] > 0
     assert body["alerts_enabled"] is False
+    # No diarization endpoint configured -> nothing probed, nothing claimed.
+    assert body["diarizer_endpoint"] is None
+    assert body["diarizer_reachable"] is None
+
+
+async def test_healthz_reports_diarizer_reachability(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Once an endpoint is configured, health says whether it actually answers."""
+    probed: list[str] = []
+
+    async def fake_probe(endpoint: str, **_kwargs: object) -> bool:
+        probed.append(endpoint)
+        return True
+
+    monkeypatch.setattr(system_route, "probe_health", fake_probe)
+    monkeypatch.setattr(system_route, "_diarizer_probe", None)  # drop any cached verdict
+
+    await client.put(
+        "/api/system/defaults",
+        json={
+            "stt_model": "",
+            "diar_mode": "remote",
+            "diar_endpoint": "http://diarization:8001",
+            "summarize_model": "",
+        },
+    )
+
+    body = (await client.get("/api/system/healthz")).json()
+    assert body["diarizer_endpoint"] == "http://diarization:8001"
+    assert body["diarizer_reachable"] is True
+    assert probed == ["http://diarization:8001"]
+
+    # Polled again straight away: served from cache, not re-probed - /healthz is
+    # hit every few seconds by the UI.
+    await client.get("/api/system/healthz")
+    assert probed == ["http://diarization:8001"]
 
 
 async def test_revision(client: AsyncClient) -> None:

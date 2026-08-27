@@ -25,6 +25,7 @@ let providers = $state<ProviderConfig[]>([])
 let primary = $state('')
 let model = $state('')
 let fallback = $state('')
+let fallbackModel = $state('')
 let defaults = $state<ActionDefaults>({
 	stt_model: '',
 	diar_mode: '',
@@ -35,10 +36,15 @@ let defaults = $state<ActionDefaults>({
 // STT providers only - an LLM (openai_chat) provider can't transcribe.
 const sttProviders = $derived(providers.filter((p) => p.kind !== 'openai_chat'))
 const primaryProvider = $derived(providers.find((p) => p.id === primary))
+const fallbackProvider = $derived(providers.find((p) => p.id === fallback))
 let diarMode = $state<DiarizationModeKind>('none')
 let diarEndpoint = $state('')
 let error = $state('')
 let busy = $state(false)
+
+// Validated in the UI rather than only server-side, so the message can sit
+// under the field it's about instead of at the bottom of the card.
+const endpointMissing = $derived(diarMode === 'remote' && !diarEndpoint.trim())
 
 const capturing = $derived($health?.capture_status === 'capturing')
 
@@ -118,6 +124,7 @@ async function start() {
 			primary_provider: primary,
 			fallback_provider: fallback || null,
 			model: model || null,
+			fallback_model: fallbackModel || null,
 			diarization: {
 				mode: diarMode,
 				endpoint: diarMode === 'remote' ? diarEndpoint : null,
@@ -238,6 +245,16 @@ onDestroy(() => {
 							placeholder="None"
 						/>
 					</div>
+					{#if fallbackProvider}
+						<div class="flex flex-col gap-2">
+							<Label for="fallback-model">Fallback model</Label>
+							<ModelPicker
+								id="fallback-model"
+								provider={fallbackProvider}
+								bind:value={fallbackModel}
+							/>
+						</div>
+					{/if}
 					<div class="flex flex-col gap-2">
 						<Label for="diar">Diarization</Label>
 						<Dropdown
@@ -253,11 +270,27 @@ onDestroy(() => {
 					{#if diarMode === 'remote'}
 						<div class="flex flex-col gap-2">
 							<Label for="ep">Diarization endpoint</Label>
-							<Input id="ep" bind:value={diarEndpoint} placeholder="http://diarizer:8001" />
+							<Input
+								id="ep"
+								bind:value={diarEndpoint}
+								placeholder="http://diarization:8001"
+								aria-invalid={endpointMissing || undefined}
+							/>
+							{#if endpointMissing}
+								<span class="text-xs text-destructive">
+									Required for remote diarization - the service's base URL.
+								</span>
+							{:else if $health?.diarizer_endpoint && $health.diarizer_reachable === false}
+								<span class="text-xs text-amber-500">
+									No diarization service answered at {$health.diarizer_endpoint}.
+								</span>
+							{/if}
 						</div>
 					{/if}
 					<div class="flex justify-end">
-						<Button onclick={start} disabled={busy || !primary}>Start session</Button>
+						<Button onclick={start} disabled={busy || !primary || endpointMissing}>
+							Start session
+						</Button>
 					</div>
 				</div>
 			{/if}

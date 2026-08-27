@@ -465,7 +465,7 @@ onMount(async () => {
 					id="def-diar-endpoint"
 					class="max-w-48"
 					bind:value={defaults.diar_endpoint}
-					placeholder="http://diarizer:8001"
+					placeholder="http://diarization:8001"
 					onblur={saveDefaults}
 				/>
 			</div>

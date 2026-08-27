@@ -132,6 +132,8 @@ export interface Health {
 	disk_free_bytes?: number
 	disk_total_bytes?: number
 	alerts_enabled?: boolean
+	diarizer_endpoint?: string | null
+	diarizer_reachable?: boolean | null
 }
 
 export interface InputDevice {
@@ -157,6 +159,7 @@ export interface StartSessionRequest {
 	campaign_id?: string | null
 	device?: number | string | null
 	model?: string | null
+	fallback_model?: string | null
 	diarization?: DiarizationConfig
 }
 
