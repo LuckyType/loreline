@@ -8,11 +8,11 @@ campaign glossary.
 ``google-cloud-speech`` is an optional ``providers`` extra, so it is imported
 lazily - this module must import cleanly in the base environment so the registry
 can load it. Auth (stored in the secret store under the provider's
-``auth_ref``) accepts either a service-account JSON key file's contents, or a
-plain Google Cloud API key - distinguished by whether the stored value parses
-as a service-account JSON object; a bare key is applied via the
-``x-goog-api-key`` header/gRPC metadata (``google.auth.api_key.Credentials``).
-Leave it blank to fall back to Application Default Credentials. The
+``auth_ref``) takes a service-account JSON key file's contents, or is left
+blank to fall back to Application Default Credentials. This API does **not**
+accept API keys - it requires an OAuth2 principal - so a bare key is rejected
+up front rather than failing mid-session; see
+``loreline.stt.backends.gemini`` for the API-key-authenticated option. The
 provider's ``base_url`` carries the GCP **project id** (or a full
 ``projects/.../recognizers/_`` resource); ``language`` should be a BCP-47
 code such as ``de-DE``.
@@ -44,6 +44,13 @@ log = get_logger(__name__)
 _DEFAULT_MODEL = "long"
 _DEFAULT_LOCATION = "global"
 _DEFAULT_MAX_SPEAKERS = 6
+
+_API_KEY_UNSUPPORTED = (
+    "Google Cloud Speech-to-Text v2 does not accept API keys - it requires a "
+    "service account. Paste a service-account JSON key here, leave this blank "
+    "to use Application Default Credentials, or add a Gemini provider instead, "
+    "which does authenticate with a plain API key."
+)
 
 
 def _recognizer_path(target: str | None, *, location: str = _DEFAULT_LOCATION) -> str:
@@ -99,9 +106,12 @@ class GoogleSTTBackend:
             creds = service_account.Credentials.from_service_account_info(info)
             self._client = SpeechAsyncClient(credentials=creds)
         elif self._credential:
-            from google.auth.api_key import Credentials as ApiKeyCredentials  # noqa: PLC0415
-
-            self._client = SpeechAsyncClient(credentials=ApiKeyCredentials(self._credential))
+            # speech.googleapis.com refuses API keys: it wants an OAuth2
+            # principal, so a bare key builds a client fine and then fails at
+            # the first utterance with "API keys are not supported by this
+            # API ... CREDENTIALS_MISSING". Refuse it here instead, where the
+            # provider Test in Settings surfaces it before a session starts.
+            raise ValueError(_API_KEY_UNSUPPORTED)
         else:
             self._client = SpeechAsyncClient()
         return self._client

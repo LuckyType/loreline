@@ -4,6 +4,7 @@ export type ProviderKind =
 	| 'openai_compat'
 	| 'assemblyai'
 	| 'google'
+	| 'gemini'
 	| 'vosk'
 	| 'openai_chat'
 

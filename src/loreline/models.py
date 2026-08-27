@@ -14,7 +14,8 @@ class ProviderKind(StrEnum):
     OPENAI = "openai"
     OPENAI_COMPAT = "openai_compat"  # Speaches / whisper.cpp / any OpenAI-compatible endpoint
     ASSEMBLYAI = "assemblyai"
-    GOOGLE = "google"
+    GOOGLE = "google"  # Cloud Speech-to-Text v2 (gRPC, OAuth2 only)
+    GEMINI = "gemini"  # Gemini API transcription (accepts a plain API key)
     VOSK = "vosk"  # self-hosted vosk-server
     OPENAI_CHAT = "openai_chat"  # LLM chat for summaries (OpenAI / Ollama / LM Studio / vLLM)
 

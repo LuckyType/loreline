@@ -19,7 +19,7 @@ from loreline.audio.wav import pcm_to_wav
 from loreline.logging import get_logger
 from loreline.models import Glossary, ProviderConfig, ProviderKind, TranscriptEvent
 from loreline.secrets import SecretStore
-from loreline.stt.base import glossary_terms
+from loreline.stt.base import error_detail, glossary_terms
 from loreline.stt.registry import register
 
 log = get_logger(__name__)
@@ -85,7 +85,7 @@ class OpenAICompatBackend:
             # "Model 'X' is not installed locally"). Keep it: it's usually the
             # difference between a mystery and an obvious fix.
             raise httpx.HTTPStatusError(
-                f"{response.status_code} from {response.request.url}: {_detail(response)}",
+                f"{response.status_code} from {response.request.url}: {error_detail(response)}",
                 request=response.request,
                 response=response,
             )
@@ -120,22 +120,3 @@ def _factory(  # pyright: ignore[reportUnusedFunction]
 ) -> OpenAICompatBackend:
     api_key = secrets.get(config.auth_ref) if config.auth_ref else None
     return OpenAICompatBackend(config, api_key=api_key)
-
-
-def _detail(response: httpx.Response) -> str:
-    """Best-effort human-readable reason from an error response body."""
-    try:
-        payload: object = response.json()
-    except ValueError:
-        return response.text[:300].strip() or response.reason_phrase
-    if isinstance(payload, dict):
-        mapping = cast("dict[str, object]", payload)
-        for key in ("detail", "message", "error"):
-            value = mapping.get(key)
-            if isinstance(value, str) and value:
-                return value
-            if isinstance(value, dict):
-                nested = cast("dict[str, object]", value).get("message")
-                if isinstance(nested, str) and nested:
-                    return nested
-    return response.text[:300].strip() or response.reason_phrase

@@ -76,16 +76,27 @@ const CATALOG: ProviderMeta[] = [
 		note: 'Streaming transcription.',
 	},
 	{
+		kind: 'gemini',
+		label: 'Google Gemini',
+		hosting: 'cloud',
+		protocol: 'http_batch',
+		apiKey: { label: 'API key', url: 'https://aistudio.google.com/api-keys' },
+		defaultModel: 'gemini-3.5-transcribe',
+		note: 'API key · diarization · word timestamps.',
+	},
+	{
 		kind: 'google',
 		label: 'Google STT v2',
 		hosting: 'cloud',
 		protocol: 'grpc',
 		baseUrl: { label: 'GCP project id', placeholder: 'my-gcp-project' },
 		apiKey: {
-			label: 'API key or service-account JSON (blank = ADC)',
-			url: 'https://aistudio.google.com/api-keys',
+			// Cloud STT v2 rejects API keys outright; only a service account
+			// works here. An AI Studio key belongs on the Gemini entry above.
+			label: 'Service-account JSON (blank = ADC)',
+			url: 'https://console.cloud.google.com/iam-admin/serviceaccounts',
 		},
-		note: 'gRPC streaming · diarization.',
+		note: 'gRPC streaming · diarization · needs a service account.',
 	},
 	{
 		kind: 'openai_compat',

@@ -32,9 +32,9 @@ all STT and diarization run on remote endpoints (cloud APIs or self-hosted LAN s
 ## Features
 
 - **Capture** - continuous recording with Silero VAD utterance chunking.
-- **Pluggable STT** - Deepgram, AssemblyAI, Google STT v2 (gRPC), OpenAI Realtime, and any
-  OpenAI-compatible endpoint (Speaches, whisper.cpp). A primary/fallback router handles
-  failover, and can fan out to several backends at once to compare them.
+- **Pluggable STT** - Deepgram, AssemblyAI, Google Gemini, Google STT v2 (gRPC), OpenAI
+  Realtime, and any OpenAI-compatible endpoint (Speaches, whisper.cpp). A primary/fallback
+  router handles failover, and can fan out to several backends at once to compare them.
 - **Speaker diarization** - inline (from the STT provider), or a self-hosted sherpa-onnx
   service (included), or off.
 - **Sessions** - SQLite persistence with per-session audio, post-session re-processing

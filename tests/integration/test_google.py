@@ -169,12 +169,18 @@ def test_build_client_routes_service_account_json_through_oauth() -> None:
         speech_client.assert_called_once_with(credentials=from_info.return_value)
 
 
-def test_build_client_routes_bare_key_through_api_key_credentials() -> None:
+def test_build_client_rejects_bare_api_key() -> None:
+    # speech.googleapis.com answers a key-authenticated StreamingRecognize with
+    # CREDENTIALS_MISSING, so accepting the key here only defers the failure to
+    # the first utterance of a live session. Fail while it's still testable.
     backend = GoogleSTTBackend(_config(), credential="AIzaSyDaGmWKa4JsXZ-HjGw7ISLan_g9Y5mJEeE")
-    with patch("google.cloud.speech_v2.SpeechAsyncClient") as speech_client:
+    with pytest.raises(ValueError, match="does not accept API keys"):
         backend._build_client()  # pyright: ignore[reportPrivateUsage]
-        (_, kwargs) = speech_client.call_args
-        assert kwargs["credentials"].token == "AIzaSyDaGmWKa4JsXZ-HjGw7ISLan_g9Y5mJEeE"
+
+
+async def test_health_is_false_for_a_bare_api_key() -> None:
+    backend = GoogleSTTBackend(_config(), credential="AIzaSyDaGmWKa4JsXZ-HjGw7ISLan_g9Y5mJEeE")
+    assert await backend.health() is False
 
 
 def test_build_client_falls_back_to_adc_when_blank() -> None:
