@@ -4,7 +4,7 @@ import { api, ApiError } from '$lib/api'
 import { confirm } from '$lib/confirm.svelte'
 import { health, logsWs, speakerColor, formatTime, transcriptWs } from '$lib/stores'
 import { connect, type LiveSocket } from '$lib/ws'
-import { ArrowDownToLine, Filter, Trash2, WrapText } from '@lucide/svelte'
+import { ArrowDownToLine, ChevronDown, Filter, Trash2, WrapText } from '@lucide/svelte'
 import ModelPicker from '$lib/ModelPicker.svelte'
 import LogLine from '$lib/LogLine.svelte'
 import { Button } from '$lib/components/ui/button'
@@ -45,6 +45,30 @@ let busy = $state(false)
 // Validated in the UI rather than only server-side, so the message can sit
 // under the field it's about instead of at the bottom of the card.
 const endpointMissing = $derived(diarMode === 'remote' && !diarEndpoint.trim())
+
+// Fallback and diarization are collapsed by default. The summary line has to
+// carry enough that folding them away never hides a problem - so it states
+// what each is set to, and turns red when something needs attention.
+let advancedOpen = $state(false)
+
+const fallbackSummary = $derived(
+	fallbackProvider ? [fallbackProvider.name, fallbackModel].filter(Boolean).join(' · ') : 'None',
+)
+
+const diarSummary = $derived.by(() => {
+	if (diarMode === 'none') return 'Off'
+	if (diarMode === 'inline') return 'Inline (from STT)'
+	if (endpointMissing) return 'Remote - endpoint missing'
+	if ($health?.diarizer_endpoint && $health.diarizer_reachable === false) {
+		return 'Remote - service not answering'
+	}
+	return `Remote - ${diarEndpoint}`
+})
+
+const advancedProblem = $derived(
+	endpointMissing ||
+		(diarMode === 'remote' && !!$health?.diarizer_endpoint && $health.diarizer_reachable === false),
+)
 
 const capturing = $derived($health?.capture_status === 'capturing')
 
@@ -214,9 +238,11 @@ onDestroy(() => {
 					<Button variant="destructive" onclick={stop} disabled={busy}>Stop session</Button>
 				</div>
 			{:else}
-				<div class="grid grid-cols-[repeat(auto-fit,minmax(190px,1fr))] items-end gap-3">
+				<!-- Essentials inline; fallback + diarization fold away, but the summary
+				     below always states what they're set to so nothing hides silently. -->
+				<div class="grid grid-cols-[1fr_1fr_auto] items-end gap-3">
 					<div class="flex flex-col gap-2">
-						<Label for="primary">Primary provider</Label>
+						<Label for="primary">Transcription provider</Label>
 						<Dropdown
 							id="primary"
 							bind:value={primary}
@@ -233,66 +259,94 @@ onDestroy(() => {
 							defaultModel={defaults.stt_model}
 						/>
 					</div>
-					<div class="flex flex-col gap-2">
-						<Label for="fallback">Fallback (optional)</Label>
-						<Dropdown
-							id="fallback"
-							bind:value={fallback}
-							options={[
-                { value: '', label: 'None' },
-                ...sttProviders.map((p) => ({ value: p.id, label: p.name }))
-              ]}
-							placeholder="None"
-						/>
-					</div>
-					{#if fallbackProvider}
-						<div class="flex flex-col gap-2">
-							<Label for="fallback-model">Fallback model</Label>
-							<ModelPicker
-								id="fallback-model"
-								provider={fallbackProvider}
-								bind:value={fallbackModel}
-							/>
-						</div>
-					{/if}
-					<div class="flex flex-col gap-2">
-						<Label for="diar">Diarization</Label>
-						<Dropdown
-							id="diar"
-							bind:value={diarMode}
-							options={[
-                { value: 'none', label: 'None' },
-                { value: 'inline', label: 'Inline (from STT)' },
-                { value: 'remote', label: 'Remote service' }
-              ]}
-						/>
-					</div>
-					{#if diarMode === 'remote'}
-						<div class="flex flex-col gap-2">
-							<Label for="ep">Diarization endpoint</Label>
-							<Input
-								id="ep"
-								bind:value={diarEndpoint}
-								placeholder="http://diarization:8001"
-								aria-invalid={endpointMissing || undefined}
-							/>
-							{#if endpointMissing}
-								<span class="text-xs text-destructive">
-									Required for remote diarization - the service's base URL.
-								</span>
-							{:else if $health?.diarizer_endpoint && $health.diarizer_reachable === false}
-								<span class="text-xs text-amber-500">
-									No diarization service answered at {$health.diarizer_endpoint}.
-								</span>
-							{/if}
-						</div>
-					{/if}
-					<div class="flex justify-end">
-						<Button onclick={start} disabled={busy || !primary || endpointMissing}>
-							Start session
-						</Button>
-					</div>
+					<Button onclick={start} disabled={busy || !primary || endpointMissing}>
+						Start session
+					</Button>
 				</div>
+
+				<div
+					class="mt-3.5 flex flex-wrap items-center gap-x-2 gap-y-1 border-t border-dashed pt-3 text-xs"
+				>
+					<span
+						class={cn('size-1.5 shrink-0 rounded-full', advancedProblem ? 'bg-destructive' : 'bg-emerald-500')}
+					></span>
+					<span class="text-muted-foreground">Fallback</span>
+					<span class="text-foreground">{fallbackSummary}</span>
+					<span class="text-muted-foreground">·</span>
+					<span class="text-muted-foreground">Diarization</span>
+					<span class={advancedProblem ? 'text-destructive' : 'text-foreground'}
+						>{diarSummary}</span
+					>
+					<Button
+						variant="ghost"
+						size="sm"
+						class="ml-auto h-6 px-2 text-xs"
+						aria-expanded={advancedOpen}
+						onclick={() => (advancedOpen = !advancedOpen)}
+					>
+						{advancedOpen ? 'Done' : 'Edit'}
+						<ChevronDown class={cn('size-3 transition-transform', advancedOpen && 'rotate-180')} />
+					</Button>
+				</div>
+
+				{#if advancedOpen}
+					<div class="mt-3 grid grid-cols-[repeat(auto-fit,minmax(200px,1fr))] items-start gap-3">
+						<div class="flex flex-col gap-2">
+							<Label for="fallback">Fallback provider</Label>
+							<Dropdown
+								id="fallback"
+								bind:value={fallback}
+								options={[
+                  { value: '', label: 'None' },
+                  ...sttProviders.map((p) => ({ value: p.id, label: p.name }))
+                ]}
+								placeholder="None"
+							/>
+						</div>
+						{#if fallbackProvider}
+							<div class="flex flex-col gap-2">
+								<Label for="fallback-model">Fallback model</Label>
+								<ModelPicker
+									id="fallback-model"
+									provider={fallbackProvider}
+									bind:value={fallbackModel}
+								/>
+							</div>
+						{/if}
+						<div class="flex flex-col gap-2">
+							<Label for="diar">Diarization</Label>
+							<Dropdown
+								id="diar"
+								bind:value={diarMode}
+								options={[
+                  { value: 'none', label: 'None' },
+                  { value: 'inline', label: 'Inline (from STT)' },
+                  { value: 'remote', label: 'Remote service' }
+                ]}
+							/>
+						</div>
+						{#if diarMode === 'remote'}
+							<div class="flex flex-col gap-2">
+								<Label for="ep">Diarization endpoint</Label>
+								<Input
+									id="ep"
+									bind:value={diarEndpoint}
+									placeholder="http://diarization:8001"
+									aria-invalid={endpointMissing || undefined}
+								/>
+								{#if endpointMissing}
+									<span class="text-xs text-destructive">
+										Required for remote diarization - the service's base URL.
+									</span>
+								{:else if $health?.diarizer_endpoint && $health.diarizer_reachable === false}
+									<span class="text-xs text-amber-500">
+										No diarization service answered at {$health.diarizer_endpoint}.
+									</span>
+								{/if}
+							</div>
+						{/if}
+					</div>
+				{/if}
 			{/if}
 			{#if error}
 				<p class="mt-2 text-sm text-destructive">{error}</p>
