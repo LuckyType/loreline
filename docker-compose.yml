@@ -1,0 +1,107 @@
+# Production deployment. `deploy/install.sh` installs Docker (if missing) and
+# host audio prerequisites, then runs `docker compose up -d` - this file is
+# the whole stack from there. For a source+systemd deployment instead (no
+# Docker at all), see deploy/install-source.sh and the README's Deployment
+# section.
+#
+# Default services (`docker compose up -d`, no profile) are just `app` +
+# `caddy` - enough to log in and configure cloud STT/LLM providers with no
+# large downloads and no extra host setup. `speaches` (self-hosted STT) and
+# `diarization` (self-hosted diarization) are opt-in via profiles, since both
+# need real setup of their own (a multi-GB model download, or ONNX model
+# files you provide) that a first-run shouldn't be blocked on:
+#   docker compose --profile local-stt up -d
+#   docker compose --profile diarization up -d
+# (`COMPOSE_PROFILES=local-stt,diarization` in .env works too, for a
+# permanent default without typing the flag every time.)
+
+services:
+  app:
+    build: .
+    ports:
+      - "${LORELINE_PORT:-8000}:8000"
+    # deploy/install.sh writes .env (login password, port). Optional so a bare
+    # `docker compose up -d` in a fresh clone still works without one.
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      LORELINE_HOST: 0.0.0.0
+      LORELINE_ENVIRONMENT: prod
+      LORELINE_LOG_JSON: "true"
+    volumes:
+      - ./data:/app/data
+    # Real microphone capture needs the host's audio device node passed
+    # through - Linux hosts only. Docker Desktop on macOS/Windows runs
+    # containers in a Linux VM with no path to the host's native audio
+    # devices (CoreAudio/WASAPI aren't exposed across that boundary at all),
+    # so this can't work there regardless of what's uncommented here - comment
+    # this out there (or on a Linux box with no local mic at all).
+    devices:
+      - /dev/snd:/dev/snd
+    # Bluetooth audio (or any PipeWire/PulseAudio-routed source, e.g. a mic
+    # that only shows up as a "Default Source", not a raw ALSA hw: device)
+    # isn't reachable via /dev/snd at all - it's routed through the host's
+    # userspace audio session. Uncomment both lines below AND run
+    # `deploy/setup-bluetooth-audio.sh` on the host first (pairs the device,
+    # sets up PipeWire for a service-account-style session with no real
+    # login). $XDG_RUNTIME_DIR must match the uid that script's PipeWire
+    # instance actually runs as - it prints the right value at the end.
+    # volumes:
+    #   - /run/user/1000/pulse:/run/user/1000/pulse
+    # environment:
+    #   XDG_RUNTIME_DIR: /run/user/1000
+    restart: unless-stopped
+
+  # Reverse proxy for reaching the app on standard ports across the LAN, with
+  # TLS termination so the login password isn't sent in the clear (see
+  # ./Caddyfile). Optional - the app is equally reachable directly on :8000
+  # without it.
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - app
+    restart: unless-stopped
+
+  # Self-hosted STT (OpenAI-compatible, faster-whisper). On the compose
+  # network the app reaches it at http://speaches:8000/v1; host port 8200
+  # avoids colliding with the app's 8000. First start downloads the model
+  # (a few GB) - opt in with `docker compose --profile local-stt up -d`.
+  speaches:
+    image: ghcr.io/speaches-ai/speaches:latest-cpu
+    profiles: ["local-stt"]
+    ports:
+      - "8200:8000"
+    environment:
+      - WHISPER__MODEL=Systran/faster-whisper-large-v3
+    volumes:
+      - speaches-hub:/home/ubuntu/.cache/huggingface/hub
+    restart: unless-stopped
+
+  # Self-hosted diarization service (sherpa-onnx). Needs real ONNX model
+  # files under ./models (not provided) - opt in with
+  # `docker compose --profile diarization up -d`, then configure a `remote`
+  # diarizer at http://diarization:8001.
+  diarization:
+    build: ./services/diarization
+    profiles: ["diarization"]
+    ports:
+      - "8001:8001"
+    environment:
+      - DIAR_SEGMENTATION_MODEL=/models/sherpa-onnx-pyannote-segmentation-3-0/model.onnx
+      - DIAR_EMBEDDING_MODEL=/models/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx
+    volumes:
+      - ./models:/models:ro
+    restart: unless-stopped
+
+volumes:
+  speaches-hub:
+  caddy-data:
+  caddy-config:

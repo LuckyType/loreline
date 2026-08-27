@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Sync (base + dev)
+        run: uv sync --frozen --no-extra audio --no-extra providers
+
+      - name: Ruff lint
+        run: uv run ruff check --output-format=github .
+
+      - name: Ruff format check
+        run: uv run ruff format --check .
+
+      - name: Pyright
+        run: uv run pyright
+
+      - name: Pytest
+        run: uv run pytest
+
+  audio-tests:
+    # Heavy native deps (numpy/torch/silero) kept off the fast lint job; this job
+    # installs the audio + providers extras and runs the tests that importorskip
+    # without them (real Silero VAD framing, OpenAI Realtime resampler).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Set up Python
+        run: uv python install 3.12
+      # sounddevice's wheel links against the system PortAudio at import time
+      # (it doesn't bundle it on Linux) and silero-vad's onnxruntime needs
+      # OpenMP. Without these the extras install fine but `import sounddevice`
+      # raises OSError, so the capture tests skip instead of actually running.
+      - name: Install native audio libraries
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libportaudio2 libgomp1
+      - name: Sync (with audio + providers extras)
+        run: uv sync --frozen --extra audio --extra providers
+      - name: Pytest (full suite with native + provider extras)
+        run: uv run pytest
+
+  arm64-smoke:
+    # Import/smoke on arm64 (Raspberry Pi target) via QEMU emulation.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - name: Import smoke on linux/arm64
+        run: |
+          docker run --rm --platform linux/arm64 -v "$PWD":/app -w /app \
+            ghcr.io/astral-sh/uv:python3.12-bookworm-slim \
+            bash -c "uv sync --frozen --no-extra audio --no-extra providers && \
+                     uv run loreline version && \
+                     uv run python -c 'import loreline.web.app; print(\"arm64 import ok\")'"
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run check
+      - run: npm run build

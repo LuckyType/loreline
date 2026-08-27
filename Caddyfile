@@ -1,0 +1,35 @@
+# Reverse-proxies the Loreline UI/API onto standard ports for the
+# docker-compose stack. WebSocket upgrades (/ws/transcript, /ws/logs,
+# /ws/audio/level) are proxied automatically - reverse_proxy needs no special
+# config for them.
+#
+# :443 terminates TLS so the LAN login password isn't sent in the clear (the
+# app itself only ever sees plain HTTP from Caddy). `tls internal` self-signs
+# against Caddy's own local CA: browsers will show a "not trusted" warning
+# until a device explicitly trusts that CA (see Caddy's docs on its local
+# CA for how to export/install it). If this box has a real domain with
+# public DNS, replace both addresses below with that hostname and drop
+# `tls internal` - Caddy then gets a real Let's Encrypt certificate
+# automatically instead.
+#
+# :80 stays available with no redirect, so a device that hasn't trusted the
+# internal CA yet isn't locked out of the app entirely.
+#
+# `tls internal` needs a hostname to mint a certificate for. There isn't a
+# fixed one here - this box is reached by whatever LAN IP it happens to have
+# - so `on_demand` tells Caddy to issue a cert for whatever name/IP a client
+# actually connects with, the first time it connects. No `ask` allowlist /
+# rate limiting configured: anything reaching this box is already inside the
+# LAN, unlike a public-facing on-demand-TLS site where an `ask` endpoint
+# guards against strangers flooding cert issuance for junk hostnames.
+
+:443 {
+	tls internal {
+		on_demand
+	}
+	reverse_proxy app:8000
+}
+
+:80 {
+	reverse_proxy app:8000
+}

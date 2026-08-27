@@ -1,0 +1,149 @@
+"""Integration tests for Deepgram and AssemblyAI WS connectors via mocks."""
+
+from __future__ import annotations
+
+from collections.abc import AsyncIterator
+
+from websockets.asyncio.server import ServerConnection, serve
+
+from loreline.audio.chunker import Utterance
+from loreline.models import Glossary, Protocol, ProviderConfig, ProviderKind, TranscriptEvent
+from loreline.stt.backends.assemblyai import AssemblyAIBackend
+from loreline.stt.backends.deepgram import DeepgramBackend
+from mocks.assemblyai_ws import assemblyai_handler
+from mocks.deepgram_ws import deepgram_handler
+
+
+async def _one_utterance() -> AsyncIterator[Utterance]:
+    yield Utterance(pcm=b"\x01\x00" * 1600, start=10.0, end=10.1)
+
+
+async def _two_utterances() -> AsyncIterator[Utterance]:
+    yield Utterance(pcm=b"\x01\x00" * 1600, start=0.0, end=0.1)
+    yield Utterance(pcm=b"\x02\x00" * 1600, start=0.5, end=0.6)
+
+
+def _dg_config(port: int) -> ProviderConfig:
+    return ProviderConfig(
+        id="dg-1",
+        name="Deepgram",
+        kind=ProviderKind.DEEPGRAM,
+        base_url=f"ws://127.0.0.1:{port}",
+        protocol=Protocol.WS,
+    )
+
+
+def _aai_config(port: int) -> ProviderConfig:
+    return ProviderConfig(
+        id="aai-1",
+        name="AssemblyAI",
+        kind=ProviderKind.ASSEMBLYAI,
+        base_url=f"ws://127.0.0.1:{port}",
+        protocol=Protocol.WS,
+    )
+
+
+async def test_deepgram_streaming_with_diarization() -> None:
+    async with serve(deepgram_handler, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        config = ProviderConfig(
+            id="dg-1",
+            name="Deepgram",
+            kind=ProviderKind.DEEPGRAM,
+            base_url=f"ws://127.0.0.1:{port}",
+            protocol=Protocol.WS,
+        )
+        backend = DeepgramBackend(config, api_key="secret")
+        glossary = Glossary(campaign_id="c1", terms=["Drakonia"])
+        events: list[TranscriptEvent] = [
+            e
+            async for e in backend.transcribe(_one_utterance(), session_id="s1", glossary=glossary)
+        ]
+
+    assert len(events) == 1
+    event = events[0]
+    assert event.is_final
+    assert event.source == "dg-1"
+    assert "deepgram mock" in event.text
+    assert event.start_ts == 10.0
+    # inline diarization: distinct speakers, offset applied to word timings.
+    assert {w.speaker for w in event.words} == {"Speaker 0", "Speaker 1"}
+    assert event.words[0].start >= 10.0
+
+
+async def test_assemblyai_streaming_with_diarization() -> None:
+    async with serve(assemblyai_handler, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        config = ProviderConfig(
+            id="aai-1",
+            name="AssemblyAI",
+            kind=ProviderKind.ASSEMBLYAI,
+            base_url=f"ws://127.0.0.1:{port}",
+            protocol=Protocol.WS,
+        )
+        backend = AssemblyAIBackend(config, api_key="secret")
+        events: list[TranscriptEvent] = [
+            e async for e in backend.transcribe(_one_utterance(), session_id="s1")
+        ]
+
+    assert len(events) == 1
+    event = events[0]
+    assert event.is_final
+    assert "assemblyai mock" in event.text
+    assert {w.speaker for w in event.words} == {"Speaker A", "Speaker B"}
+    # ms -> s conversion plus utterance offset.
+    assert event.words[0].start >= 10.0
+
+
+async def test_deepgram_reuses_one_connection() -> None:
+    connections = 0
+
+    async def counting(ws: ServerConnection) -> None:
+        nonlocal connections
+        connections += 1
+        await deepgram_handler(ws)
+
+    async with serve(counting, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        backend = DeepgramBackend(_dg_config(port), api_key="secret")
+        events = [e async for e in backend.transcribe(_two_utterances(), session_id="s1")]
+        await backend.aclose()
+
+    assert len(events) == 2
+    assert connections == 1  # one WebSocket served both utterances (no per-utterance churn)
+
+
+async def test_assemblyai_reuses_one_connection() -> None:
+    connections = 0
+
+    async def counting(ws: ServerConnection) -> None:
+        nonlocal connections
+        connections += 1
+        await assemblyai_handler(ws)
+
+    async with serve(counting, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        backend = AssemblyAIBackend(_aai_config(port), api_key="secret")
+        events = [e async for e in backend.transcribe(_two_utterances(), session_id="s1")]
+        await backend.aclose()
+
+    assert len(events) == 2
+    assert connections == 1
+
+
+async def test_deepgram_health_ok() -> None:
+    async with serve(deepgram_handler, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        assert await DeepgramBackend(_dg_config(port), api_key="secret").health() is True
+
+
+async def test_assemblyai_health_ok() -> None:
+    async with serve(assemblyai_handler, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        assert await AssemblyAIBackend(_aai_config(port), api_key="secret").health() is True
+
+
+async def test_health_false_when_unreachable() -> None:
+    # Nothing is listening on port 1 -> connect refused -> unhealthy.
+    assert await DeepgramBackend(_dg_config(1), api_key="x").health() is False
+    assert await AssemblyAIBackend(_aai_config(1), api_key="x").health() is False

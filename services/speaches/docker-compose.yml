@@ -1,0 +1,18 @@
+# Reference self-hosted STT for Loreline: Speaches (OpenAI-API-compatible,
+# faster-whisper). Run on a LAN x86 box; point a Loreline `openai_compat` provider
+# at http://<host>:8000/v1.
+services:
+  speaches:
+    image: ghcr.io/speaches-ai/speaches:latest-cpu
+    container_name: speaches
+    ports:
+      - "8000:8000"
+    environment:
+      # German-capable multilingual model; swap per accuracy/latency needs.
+      - WHISPER__MODEL=Systran/faster-whisper-large-v3
+    volumes:
+      - speaches-hub:/home/ubuntu/.cache/huggingface/hub
+    restart: unless-stopped
+
+volumes:
+  speaches-hub:

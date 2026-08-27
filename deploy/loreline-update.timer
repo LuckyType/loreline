@@ -1,0 +1,13 @@
+# Not enabled by default - install.sh copies this unit but leaves auto-update
+# off, same as autostart. Enable explicitly if you want it:
+#   sudo systemctl enable --now loreline-update.timer
+[Unit]
+Description=Periodic Loreline Docker deployment update
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

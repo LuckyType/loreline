@@ -1,0 +1,34 @@
+[Unit]
+Description=Loreline tabletop session transcriber
+After=network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=loreline
+Group=loreline
+WorkingDirectory=/opt/loreline
+EnvironmentFile=-/opt/loreline/.env
+# uv/npm both default their cache under $HOME, which ProtectHome=read-only
+# (below) makes unwritable - self-update's `uv sync`/`npm ci`, run as a
+# subprocess of this same sandboxed unit, would otherwise fail outright.
+# Redirecting into APP_DIR keeps the sandbox intact instead of loosening it.
+Environment=UV_CACHE_DIR=/opt/loreline/.cache/uv
+Environment=npm_config_cache=/opt/loreline/.cache/npm
+ExecStart=/opt/loreline/.venv/bin/loreline run
+Restart=on-failure
+RestartSec=3
+# Hardening
+# NoNewPrivileges is intentionally NOT set: the app shells out to `sudo
+# systemctl ...` (see sudoers.d/loreline) for the web-UI autostart toggle and
+# self-update restart, both of which require setuid escalation that
+# NoNewPrivileges blocks - enabling it silently breaks both features.
+ProtectSystem=full
+# read-only, not full "true": uv installs the service user's managed Python
+# interpreter under ~/.local/share/uv/ (the venv's own executable symlinks
+# there) - fully hiding /home breaks exec with a bare "Permission denied".
+ProtectHome=read-only
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

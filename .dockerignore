@@ -1,0 +1,35 @@
+# Keeps the build context small and avoids accidentally baking host-only
+# artifacts into the image (e.g. a locally-built frontend/build from a
+# previous host `npm run build` - the frontend-builder stage produces its own).
+
+.git
+.github
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+.pyright/
+
+# Local data / secrets (never ship into an image)
+.env
+data/
+*.local
+
+# Frontend build artifacts (rebuilt by the frontend-builder stage) + deps
+frontend/node_modules/
+frontend/build/
+frontend/.svelte-kit/
+
+# Vendored/local diarization model weights
+models/
+
+# OS / editor / tooling
+.DS_Store
+.playwright-mcp/

@@ -1,0 +1,175 @@
+<script lang="ts">
+import '../app.css'
+import { onMount, onDestroy } from 'svelte'
+import { page } from '$app/stores'
+import { goto } from '$app/navigation'
+import { api, ApiError } from '$lib/api'
+import { health, authed, transcriptWs, logsWs } from '$lib/stores'
+import { Button } from '$lib/components/ui/button'
+import { Badge } from '$lib/components/ui/badge'
+import ConfirmDialog from '$lib/ConfirmDialog.svelte'
+import type { Snippet } from 'svelte'
+
+let { children }: { children: Snippet } = $props()
+
+let timer: ReturnType<typeof setInterval> | null = null
+
+const nav = [
+	{ href: '/', label: 'Dashboard' },
+	{ href: '/sessions', label: 'History' },
+	{ href: '/settings', label: 'Settings' },
+]
+
+function isActiveNavItem(href: string): boolean {
+	return href === '/' ? $page.url.pathname === '/' : $page.url.pathname.startsWith(href)
+}
+
+async function poll() {
+	try {
+		const h = await api.health()
+		health.set(h)
+		authed.set(true)
+	} catch (err) {
+		if (err instanceof ApiError && err.status === 401) {
+			authed.set(false)
+			if ($page.url.pathname !== '/login') goto('/login')
+		}
+	}
+}
+
+async function logout() {
+	await api.logout()
+	authed.set(false)
+	goto('/login')
+}
+
+onMount(() => {
+	poll()
+	timer = setInterval(poll, 5000)
+})
+onDestroy(() => timer && clearInterval(timer))
+
+const healthColor = $derived(
+	$health == null ? 'bg-amber-500' : $health.status === 'ok' ? 'bg-emerald-500' : 'bg-red-500',
+)
+
+function gib(bytes: number | undefined): string {
+	if (!bytes) return '-'
+	return `${(bytes / 1024 ** 3).toFixed(1)} GiB`
+}
+
+function hms(seconds: number | undefined): string {
+	const t = Math.max(0, Math.round(seconds ?? 0))
+	const h = Math.floor(t / 3600)
+	const m = Math.floor((t % 3600) / 60)
+	const s = t % 60
+	return `${h}h ${m}m ${s}s`
+}
+</script>
+
+{#if $page.url.pathname === '/login'}
+	{@render children()}
+{:else}
+	<div class="flex min-h-screen flex-col">
+		<header class="flex items-center gap-4 border-b bg-card px-5 py-3">
+			<div class="flex items-baseline gap-2">
+				<strong>Loreline</strong>
+				<span class="text-muted-foreground">{$health?.version ?? ''}</span>
+			</div>
+			{#if $health?.capture_status === 'capturing'}
+				<Badge variant="secondary" class="gap-2">
+					<span class="size-2 rounded-full bg-emerald-500"></span>
+					Capturing…
+				</Badge>
+			{/if}
+			<div class="flex-1"></div>
+			<div class="group/health relative flex items-center">
+				<button
+					class="flex items-center rounded-md p-2 hover:bg-accent"
+					onclick={poll}
+					title="Service health - click to refresh"
+					aria-label="Service health - click to refresh"
+				>
+					<span class="size-3 rounded-full {healthColor}"></span>
+				</button>
+				<div
+					class="invisible absolute top-full right-0 z-30 mt-1.5 hidden w-60 rounded-lg border bg-popover p-3 text-sm shadow-lg group-hover/health:visible group-hover/health:block focus-within/health:visible focus-within/health:block"
+				>
+					<div class="mt-0 mb-1 text-xs font-medium tracking-wider text-muted-foreground uppercase">
+						Client
+					</div>
+					<div class="flex items-center justify-between gap-6">
+						<span class="text-muted-foreground">Service</span
+						><strong>{$health?.status ?? '-'}</strong>
+					</div>
+					<div class="flex items-center justify-between gap-6">
+						<span class="text-muted-foreground">Version</span><span>{$health?.version ?? '-'}</span>
+					</div>
+					<div class="flex items-center justify-between gap-6">
+						<span class="text-muted-foreground">Capture</span
+						><span>{$health?.capture_status ?? '-'}</span>
+					</div>
+					<div class="flex items-center justify-between gap-6">
+						<span class="text-muted-foreground">Uptime</span
+						><span>{hms($health?.uptime_seconds)}</span>
+					</div>
+					<div class="flex items-center justify-between gap-6">
+						<span class="text-muted-foreground">Disk free</span>
+						<span>{gib($health?.disk_free_bytes)} / {gib($health?.disk_total_bytes)}</span>
+					</div>
+					<div class="flex items-center justify-between gap-6">
+						<span class="text-muted-foreground">Alerts</span>
+						<span>{$health?.alerts_enabled ? 'on' : 'off'}</span>
+					</div>
+
+					<div
+						class="mt-2.5 mb-1 text-xs font-medium tracking-wider text-muted-foreground uppercase"
+					>
+						Transcription
+					</div>
+					<div class="flex items-center justify-between gap-6">
+						<span class="text-muted-foreground">Transcript stream</span>
+						<span class="flex items-center gap-1.5">
+							<span
+								class="size-2 rounded-full {$transcriptWs ? 'bg-emerald-500' : 'bg-red-500'}"
+							></span>{$transcriptWs ? 'connected' : 'offline'}
+						</span>
+					</div>
+
+					<div
+						class="mt-2.5 mb-1 text-xs font-medium tracking-wider text-muted-foreground uppercase"
+					>
+						Logs
+					</div>
+					<div class="flex items-center justify-between gap-6">
+						<span class="text-muted-foreground">Log stream</span>
+						<span class="flex items-center gap-1.5">
+							<span class="size-2 rounded-full {$logsWs ? 'bg-emerald-500' : 'bg-red-500'}"></span>
+							{$logsWs ? 'live' : 'offline'}
+						</span>
+					</div>
+				</div>
+			</div>
+			<Button variant="outline" size="sm" onclick={logout}>Logout</Button>
+		</header>
+		<div class="grid flex-1 grid-cols-[200px_1fr]">
+			<nav class="flex flex-col gap-1 border-r bg-card p-3">
+				{#each nav as item (item.href)}
+					<a
+						href={item.href}
+						class="rounded-lg px-3 py-2 hover:bg-accent {isActiveNavItem(item.href)
+              ? 'bg-accent font-medium'
+              : ''}"
+					>
+						{item.label}
+					</a>
+				{/each}
+			</nav>
+			<main class="overflow-auto p-6">
+				{@render children()}
+			</main>
+		</div>
+	</div>
+{/if}
+
+<ConfirmDialog />

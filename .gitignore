@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+.pyright/
+
+# Env / secrets / data
+.env
+data/
+*.local
+
+# Per-host compose tweaks written by deploy/install.sh (e.g. disabling the
+# /dev/snd passthrough on a box with no microphone).
+docker-compose.override.yml
+
+# Local diarization model weights (mounted read-only into the diarization
+# service by docker-compose.yml; fetched per services/diarization/README.md,
+# not vendored in the repo).
+models/
+
+# Node / frontend
+node_modules/
+frontend/build/
+frontend/.svelte-kit/
+
+# OS
+.DS_Store
+
+# Tooling artifacts
+.playwright-mcp/
+
+# Local agent/editor tooling
+.claude/
