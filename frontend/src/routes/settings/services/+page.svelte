@@ -1,9 +1,17 @@
 <script lang="ts">
+import { ScrollText } from '@lucide/svelte'
 import { onDestroy, onMount } from 'svelte'
-import { api, ApiError } from '$lib/api'
-import { Button } from '$lib/components/ui/button'
+import { ApiError, api } from '$lib/api'
 import { Badge } from '$lib/components/ui/badge'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '$lib/components/ui/card'
+import { Button } from '$lib/components/ui/button'
+import {
+	Card,
+	CardAction,
+	CardContent,
+	CardDescription,
+	CardHeader,
+	CardTitle,
+} from '$lib/components/ui/card'
 import {
 	Table,
 	TableBody,
@@ -12,7 +20,6 @@ import {
 	TableHeader,
 	TableRow,
 } from '$lib/components/ui/table'
-import { ScrollText } from '@lucide/svelte'
 import type { ServiceState } from '$lib/types'
 
 let services = $state<ServiceState[]>([])
@@ -176,13 +183,12 @@ onDestroy(() => timer && clearInterval(timer))
 {#if logsFor}
 	<Card class="mt-4">
 		<CardHeader>
-			<div class="flex items-center justify-between">
-				<CardTitle>Logs - {logsFor}</CardTitle>
-				<div class="flex gap-1">
-					<Button variant="outline" size="sm" onclick={() => showLogs(logsFor)}>Refresh</Button>
-					<Button variant="ghost" size="sm" onclick={() => (logsFor = '')}>Close</Button>
-				</div>
-			</div>
+			<CardTitle>Logs - {logsFor}</CardTitle>
+			<CardDescription>Recent container output, newest last.</CardDescription>
+			<CardAction class="flex gap-1">
+				<Button variant="outline" size="sm" onclick={() => showLogs(logsFor)}>Refresh</Button>
+				<Button variant="ghost" size="sm" onclick={() => (logsFor = '')}>Close</Button>
+			</CardAction>
 		</CardHeader>
 		<CardContent>
 			{#if logsLoading}

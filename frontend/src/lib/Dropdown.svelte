@@ -3,8 +3,8 @@ import { ChevronDown } from '@lucide/svelte'
 import { Button } from '$lib/components/ui/button'
 import { Input } from '$lib/components/ui/input'
 import { Separator } from '$lib/components/ui/separator'
-import { cn } from '$lib/utils'
 import { portal } from '$lib/portal'
+import { cn } from '$lib/utils'
 
 export type DropdownOption = { value: string; label: string }
 
@@ -148,7 +148,7 @@ function pick(v: string) {
 							onclick={() => pick(o.value)}
 						>
 							<span>{o.label}</span>
-							{#if o.value === defaultValue}
+							{#if defaultValue && o.value === defaultValue}
 								<span class="rounded-full border px-1.5 text-xs text-muted-foreground"
 									>default</span
 								>
@@ -175,7 +175,7 @@ function pick(v: string) {
 							onclick={() => pick(o.value)}
 						>
 							<span>{o.label}</span>
-							{#if o.value === defaultValue}
+							{#if defaultValue && o.value === defaultValue}
 								<span class="rounded-full border px-1.5 text-xs text-muted-foreground"
 									>default</span
 								>

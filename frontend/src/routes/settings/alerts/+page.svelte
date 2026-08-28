@@ -1,10 +1,17 @@
 <script lang="ts">
-import { onMount } from 'svelte'
-import { api, ApiError } from '$lib/api'
-import { confirm } from '$lib/confirm.svelte'
 import { Pencil, Plus, Send, Trash2 } from '@lucide/svelte'
+import { onMount } from 'svelte'
+import { ApiError, api } from '$lib/api'
 import { Button } from '$lib/components/ui/button'
-import { Card, CardContent } from '$lib/components/ui/card'
+import {
+	Card,
+	CardAction,
+	CardContent,
+	CardDescription,
+	CardHeader,
+	CardTitle,
+} from '$lib/components/ui/card'
+import { Checkbox } from '$lib/components/ui/checkbox'
 import {
 	Dialog,
 	DialogContent,
@@ -15,8 +22,6 @@ import {
 } from '$lib/components/ui/dialog'
 import { Input } from '$lib/components/ui/input'
 import { Label } from '$lib/components/ui/label'
-import { Checkbox } from '$lib/components/ui/checkbox'
-import Dropdown from '$lib/Dropdown.svelte'
 import {
 	Table,
 	TableBody,
@@ -25,6 +30,8 @@ import {
 	TableHeader,
 	TableRow,
 } from '$lib/components/ui/table'
+import { confirm } from '$lib/confirm.svelte'
+import Dropdown from '$lib/Dropdown.svelte'
 import type { AlertChannel, AlertChannelKind, AlertChannelWrite, AlertLevelKind } from '$lib/types'
 
 interface ChannelMeta {
@@ -188,18 +195,23 @@ onMount(loadChannels)
 </script>
 
 <Card>
-	<CardContent class="flex items-center justify-between py-4">
-		<h2 class="m-0">Push alerts</h2>
-		<Button
-			variant="outline"
-			size="icon-sm"
-			title="Add channel"
-			aria-label="Add channel"
-			onclick={openChannelWizard}
-		>
-			<Plus />
-		</Button>
-	</CardContent>
+	<CardHeader>
+		<CardTitle>Push alerts</CardTitle>
+		<CardDescription>
+			Channels (ntfy, Telegram, webhook) notified about failures and session events.
+		</CardDescription>
+		<CardAction>
+			<Button
+				variant="outline"
+				size="icon-sm"
+				title="Add channel"
+				aria-label="Add channel"
+				onclick={openChannelWizard}
+			>
+				<Plus />
+			</Button>
+		</CardAction>
+	</CardHeader>
 	{#if chanMsg}
 		<p class="px-6 text-sm text-muted-foreground">{chanMsg}</p>
 	{/if}

@@ -1,6 +1,6 @@
 <script lang="ts">
 import { onMount } from 'svelte'
-import { api, ApiError } from '$lib/api'
+import { ApiError, api } from '$lib/api'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '$lib/components/ui/card'
 import { Label } from '$lib/components/ui/label'
 import { Textarea } from '$lib/components/ui/textarea'

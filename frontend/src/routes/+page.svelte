@@ -308,6 +308,7 @@ onDestroy(() => {
 						<Dropdown
 							id="primary"
 							bind:value={primary}
+							defaultValue={defaults.stt_provider ?? ''}
 							options={sttProviders.map((p) => ({ value: p.id, label: p.name }))}
 							placeholder="Select provider…"
 						/>

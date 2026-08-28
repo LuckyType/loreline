@@ -1,8 +1,8 @@
 <script lang="ts">
-import { onMount, onDestroy } from 'svelte'
-import { api, ApiError } from '$lib/api'
+import { onDestroy, onMount } from 'svelte'
+import { ApiError, api } from '$lib/api'
 import { Button } from '$lib/components/ui/button'
-import { Card, CardContent, CardHeader, CardTitle } from '$lib/components/ui/card'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '$lib/components/ui/card'
 import { Label } from '$lib/components/ui/label'
 import { Separator } from '$lib/components/ui/separator'
 import { Switch } from '$lib/components/ui/switch'
@@ -143,6 +143,7 @@ onDestroy(stopMeter)
 <Card>
 	<CardHeader>
 		<CardTitle>Client settings</CardTitle>
+		<CardDescription>Microphone, autostart and self-update of this recorder.</CardDescription>
 	</CardHeader>
 	<CardContent class="flex flex-wrap items-end gap-6">
 		<div class="flex min-w-60 flex-1 flex-col gap-2">

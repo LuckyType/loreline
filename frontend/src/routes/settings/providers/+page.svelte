@@ -4,7 +4,14 @@ import { onMount } from 'svelte'
 import { ApiError, api } from '$lib/api'
 import { Badge } from '$lib/components/ui/badge'
 import { Button } from '$lib/components/ui/button'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '$lib/components/ui/card'
+import {
+	Card,
+	CardAction,
+	CardContent,
+	CardDescription,
+	CardHeader,
+	CardTitle,
+} from '$lib/components/ui/card'
 import { Checkbox } from '$lib/components/ui/checkbox'
 import {
 	Dialog,
@@ -160,7 +167,7 @@ let hosting = $state<Hosting>('cloud')
 let selected = $state<ProviderMeta | null>(null)
 let wizardOpen = $state(false)
 
-let defaults = $state<ActionDefaults>({
+const blankDefaults = (): ActionDefaults => ({
 	stt_provider: '',
 	stt_model: '',
 	diar_mode: '',
@@ -168,6 +175,10 @@ let defaults = $state<ActionDefaults>({
 	summarize_provider: '',
 	summarize_model: '',
 })
+let defaults = $state<ActionDefaults>(blankDefaults())
+// Last persisted state - drives the "default" tags in the pickers, so they
+// reflect what is saved, not the (possibly unsaved) current selection.
+let savedDefaults = $state<ActionDefaults>(blankDefaults())
 let defaultsMsg = $state('')
 const sttProviders = $derived(providers.filter((p) => p.kind !== 'openai_chat'))
 const llmProviders = $derived(providers.filter((p) => p.kind === 'openai_chat'))
@@ -196,6 +207,10 @@ async function load() {
 async function loadDefaults() {
 	try {
 		defaults = await api.getDefaults()
+		// Legacy stored "" and an explicit "none" mean the same thing (no
+		// diarization for new sessions) - show one spelling, not two options.
+		if (!defaults.diar_mode) defaults.diar_mode = 'none'
+		savedDefaults = { ...defaults }
 	} catch {
 		/* keep blanks */
 	}
@@ -204,6 +219,8 @@ async function loadDefaults() {
 async function saveDefaults() {
 	try {
 		defaults = await api.setDefaults(defaults)
+		if (!defaults.diar_mode) defaults.diar_mode = 'none'
+		savedDefaults = { ...defaults }
 		defaultsMsg = 'Saved'
 		setTimeout(() => (defaultsMsg = ''), 2500)
 	} catch (err) {
@@ -342,9 +359,12 @@ onMount(async () => {
 {/if}
 
 <Card>
-	<CardContent class="flex items-center justify-between py-4">
-		<h2 class="m-0">Providers</h2>
-		<div class="flex gap-1">
+	<CardHeader>
+		<CardTitle>Providers</CardTitle>
+		<CardDescription>
+			Speech-to-text and LLM endpoints for transcription, diarization and summaries.
+		</CardDescription>
+		<CardAction class="flex gap-1">
 			<Button variant="outline" size="sm" onclick={testAll} disabled={providers.length === 0}>
 				Test all
 			</Button>
@@ -357,8 +377,8 @@ onMount(async () => {
 			>
 				<Plus />
 			</Button>
-		</div>
-	</CardContent>
+		</CardAction>
+	</CardHeader>
 	<CardContent class="pt-0">
 		<Table>
 			<TableHeader>
@@ -448,6 +468,7 @@ onMount(async () => {
 				<Dropdown
 					id="def-stt-src"
 					bind:value={defaults.stt_provider}
+					defaultValue={savedDefaults.stt_provider ?? ''}
 					options={sttProviders.map((p) => ({ value: p.id, label: p.name }))}
 				/>
 				<Label class="text-xs text-muted-foreground" for="def-stt-model">Model</Label>
@@ -455,6 +476,7 @@ onMount(async () => {
 					id="def-stt-model"
 					provider={sttSrcProvider}
 					bind:value={defaults.stt_model}
+					defaultModel={savedDefaults.stt_model}
 					autoseed={false}
 				/>
 			</div>
@@ -468,8 +490,8 @@ onMount(async () => {
 				<Dropdown
 					id="def-diar"
 					bind:value={defaults.diar_mode}
+					defaultValue={savedDefaults.diar_mode}
 					options={[
-            { value: '', label: 'No default' },
             { value: 'none', label: 'None' },
             { value: 'inline', label: 'Inline (from STT)' },
             { value: 'remote', label: 'Remote service' }
@@ -495,6 +517,7 @@ onMount(async () => {
 					<Dropdown
 						id="def-llm-src"
 						bind:value={defaults.summarize_provider}
+						defaultValue={savedDefaults.summarize_provider ?? ''}
 						options={llmProviders.map((p) => ({ value: p.id, label: p.name }))}
 					/>
 					<Label class="text-xs text-muted-foreground" for="def-llm-model">Model</Label>
@@ -502,6 +525,7 @@ onMount(async () => {
 						id="def-llm-model"
 						provider={llmSrcProvider}
 						bind:value={defaults.summarize_model}
+						defaultModel={savedDefaults.summarize_model}
 						autoseed={false}
 					/>
 				{:else}

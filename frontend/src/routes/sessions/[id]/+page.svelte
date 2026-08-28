@@ -462,6 +462,7 @@ onDestroy(() => {
 						<Dropdown
 							class="max-w-52"
 							bind:value={rpProvider}
+							defaultValue={defaults.stt_provider ?? ''}
 							options={providers.map((p) => ({ value: p.id, label: p.name }))}
 							placeholder="Provider"
 						/>
@@ -643,6 +644,7 @@ onDestroy(() => {
 			<Label>LLM provider</Label>
 			<Dropdown
 				bind:value={sumProvider}
+				defaultValue={defaults.summarize_provider ?? ''}
 				options={llmProviders.map((p) => ({ value: p.id, label: p.name }))}
 				placeholder="LLM provider"
 			/>
