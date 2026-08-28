@@ -22,7 +22,10 @@ _DEFAULT_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_MODEL = "gpt-4o-mini"
 _TIMEOUT_S = 120.0
 
-_SYSTEM_PROMPT = (
+# Built-in summary instructions. The settings UI exposes an editable copy of
+# this (kv `action_defaults.summarize_prompt`); a blank stored value falls back
+# here, so clearing the field is the reset-to-default gesture.
+DEFAULT_SYSTEM_PROMPT = (
     "You are an assistant that writes concise, well-structured summaries of "
     "tabletop RPG session transcripts. Capture the key events, decisions, NPCs, "
     "locations and unresolved threads. Preserve speaker/character names where the "
@@ -52,9 +55,13 @@ async def summarize_transcript(
     api_key: str | None,
     model: str | None,
     transcript: str,
+    system_prompt: str | None = None,
     client_factory: ClientFactory | None = None,
 ) -> str:
     """Summarize ``transcript`` via the provider's chat-completions endpoint.
+
+    ``system_prompt`` overrides the built-in summary instructions; blank or
+    None falls back to :data:`DEFAULT_SYSTEM_PROMPT`.
 
     Raises ``LLMError`` (never a bare ``httpx`` exception) on any upstream
     failure, carrying the provider's own error message when it has one - an
@@ -62,10 +69,11 @@ async def summarize_transcript(
     should all read as *why it failed*, not surface as an opaque 500.
     """
     chosen_model = model or config.model or DEFAULT_MODEL
+    instructions = (system_prompt or "").strip() or DEFAULT_SYSTEM_PROMPT
     payload: dict[str, object] = {
         "model": chosen_model,
         "messages": [
-            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "system", "content": instructions},
             {"role": "user", "content": f"Summarize this session transcript:\n\n{transcript}"},
         ],
         "temperature": 0.3,

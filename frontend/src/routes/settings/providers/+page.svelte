@@ -23,6 +23,7 @@ import {
 } from '$lib/components/ui/dialog'
 import { Input } from '$lib/components/ui/input'
 import { Label } from '$lib/components/ui/label'
+import { Textarea } from '$lib/components/ui/textarea'
 import {
 	Table,
 	TableBody,
@@ -174,6 +175,7 @@ const blankDefaults = (): ActionDefaults => ({
 	diar_endpoint: '',
 	summarize_provider: '',
 	summarize_model: '',
+	summarize_prompt: '',
 })
 let defaults = $state<ActionDefaults>(blankDefaults())
 // Last persisted state - drives the "default" tags in the pickers, so they
@@ -534,6 +536,23 @@ onMount(async () => {
 					</p>
 				{/if}
 			</div>
+		</div>
+
+		<div class="flex flex-col gap-2.5 rounded-lg border p-3.5">
+			<div class="flex items-center gap-2 font-medium">
+				<AlignLeft class="size-4" />
+				Summary system prompt
+			</div>
+			<Textarea
+				id="def-llm-prompt"
+				rows={5}
+				bind:value={defaults.summarize_prompt}
+				placeholder="Instructions the summary model receives before the transcript"
+			/>
+			<p class="m-0 text-xs text-muted-foreground">
+				Sent as the system message with every summary. Clear it and save to restore the built-in
+				default.
+			</p>
 		</div>
 
 		<div class="flex items-center justify-end gap-3">

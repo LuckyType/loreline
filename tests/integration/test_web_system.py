@@ -16,6 +16,7 @@ from asgi_lifespan import LifespanManager
 from httpx import ASGITransport, AsyncClient
 
 import loreline.web.routes.system as system_route
+from loreline.llm import DEFAULT_SYSTEM_PROMPT
 from loreline.settings import Settings
 from loreline.updater.process import CommandResult
 from loreline.web.app import create_app
@@ -157,6 +158,9 @@ async def test_action_defaults_roundtrip(client: AsyncClient) -> None:
         "diar_endpoint": "",
         "summarize_provider": "",
         "summarize_model": "",
+        # Never-saved prompt is served as the concrete built-in text, so the
+        # settings UI always shows editable instructions.
+        "summarize_prompt": DEFAULT_SYSTEM_PROMPT,
     }
 
     put = await client.put(
@@ -178,6 +182,29 @@ async def test_action_defaults_roundtrip(client: AsyncClient) -> None:
     assert fetched["diar_endpoint"] == "http://diarizer:8001"
     assert fetched["summarize_provider"] == "prov-llm"
     assert fetched["summarize_model"] == "gpt-4o-mini"
+
+
+async def test_summarize_prompt_default_tracking_and_reset(client: AsyncClient) -> None:
+    """Saving the built-in text (or blank) stores nothing, so untouched setups
+    keep tracking future default improvements; a custom prompt round-trips; and
+    clearing the field resets to the built-in default."""
+    saved = await client.put("/api/system/defaults", json={"summarize_prompt": "Nur Stichpunkte."})
+    assert saved.json()["summarize_prompt"] == "Nur Stichpunkte."
+    assert (await client.get("/api/system/defaults")).json()["summarize_prompt"] == (
+        "Nur Stichpunkte."
+    )
+
+    # Clearing the field is the reset gesture: served (and echoed) as the default.
+    reset = await client.put("/api/system/defaults", json={"summarize_prompt": ""})
+    assert reset.json()["summarize_prompt"] == DEFAULT_SYSTEM_PROMPT
+    fetched = (await client.get("/api/system/defaults")).json()
+    assert fetched["summarize_prompt"] == DEFAULT_SYSTEM_PROMPT
+
+    # Saving the served default text verbatim also stores blank (tracks the built-in).
+    await client.put("/api/system/defaults", json={"summarize_prompt": DEFAULT_SYSTEM_PROMPT})
+    assert (await client.get("/api/system/defaults")).json()["summarize_prompt"] == (
+        DEFAULT_SYSTEM_PROMPT
+    )
 
 
 async def test_alert_channels_crud_and_test(

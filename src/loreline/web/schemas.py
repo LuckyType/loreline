@@ -94,6 +94,8 @@ class ActionDefaults(BaseModel):
     diar_endpoint: str = ""
     summarize_provider: str = ""
     summarize_model: str = ""
+    summarize_prompt: str = ""
+    """Summary system prompt; blank means the built-in default (served filled in)."""
 
 
 class SummarizeRequest(BaseModel):

@@ -16,6 +16,7 @@ from starlette.status import HTTP_404_NOT_FOUND, HTTP_503_SERVICE_UNAVAILABLE
 
 from loreline import __version__
 from loreline.diarization.remote import probe_health
+from loreline.llm import DEFAULT_SYSTEM_PROMPT
 from loreline.monitoring import (
     AlertChannel,
     channel_token_secret,
@@ -26,7 +27,7 @@ from loreline.secrets import SecretStore
 from loreline.services import DockerUnavailableError, ServiceState
 from loreline.updater import UpdateResult
 from loreline.web.auth import require_auth
-from loreline.web.deps import get_state
+from loreline.web.deps import ACTION_DEFAULTS_KEY, get_state, load_action_defaults
 from loreline.web.schemas import (
     ActionDefaults,
     AlertChannelView,
@@ -41,7 +42,6 @@ from loreline.web.schemas import (
 
 router = APIRouter(prefix="/api/system", tags=["system"])
 _auth = [Depends(require_auth)]
-_DEFAULTS_KEY = "action_defaults"  # kv_settings key for the per-action default models/mode
 
 # The UI polls /healthz every few seconds; re-probing the diarizer that often
 # would be wasteful (and slow when it's down and every probe waits for a
@@ -94,10 +94,7 @@ async def healthz(request: Request) -> HealthResponse:
     threshold = state.settings.disk_alert_threshold_mb * 1024 * 1024
     alert_config = await state.alerts.get_config()
 
-    raw_defaults = await state.settings_repo.get(_DEFAULTS_KEY)
-    defaults = (
-        ActionDefaults.model_validate_json(raw_defaults) if raw_defaults else ActionDefaults()
-    )
+    defaults = await load_action_defaults(state)
     endpoint = defaults.diar_endpoint or None
     reachable = await _diarizer_status(endpoint) if endpoint else None
 
@@ -150,16 +147,34 @@ async def set_autostart(request: Request, body: AutostartUpdate) -> AutostartSta
 
 @router.get("/defaults", dependencies=_auth)
 async def get_defaults(request: Request) -> ActionDefaults:
-    """Return the per-action default models/mode used to pre-select the pickers."""
-    raw = await get_state(request).settings_repo.get(_DEFAULTS_KEY)
-    return ActionDefaults.model_validate_json(raw) if raw else ActionDefaults()
+    """Return the per-action default models/mode used to pre-select the pickers.
+
+    A blank stored summary prompt is served as the built-in default text, so
+    the settings UI always shows the concrete, editable instructions -
+    clearing the field and saving is the reset-to-default gesture.
+    """
+    defaults = await load_action_defaults(get_state(request))
+    if not defaults.summarize_prompt.strip():
+        defaults.summarize_prompt = DEFAULT_SYSTEM_PROMPT
+    return defaults
 
 
 @router.put("/defaults", dependencies=_auth)
 async def set_defaults(request: Request, body: ActionDefaults) -> ActionDefaults:
-    """Persist the per-action defaults."""
-    await get_state(request).settings_repo.set(_DEFAULTS_KEY, body.model_dump_json())
-    return body
+    """Persist the per-action defaults.
+
+    A summary prompt equal to the built-in default (or blank) is stored blank,
+    so an untouched field keeps tracking future improvements to the built-in
+    text instead of pinning today's copy. The response mirrors GET: served
+    filled in.
+    """
+    stored = body
+    if stored.summarize_prompt.strip() in ("", DEFAULT_SYSTEM_PROMPT):
+        stored = stored.model_copy(update={"summarize_prompt": ""})
+    await get_state(request).settings_repo.set(ACTION_DEFAULTS_KEY, stored.model_dump_json())
+    if not stored.summarize_prompt:
+        stored = stored.model_copy(update={"summarize_prompt": DEFAULT_SYSTEM_PROMPT})
+    return stored
 
 
 def _channel_view(channel: AlertChannel, secrets: SecretStore) -> AlertChannelView:

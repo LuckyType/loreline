@@ -6,16 +6,26 @@ from typing import TYPE_CHECKING
 
 from fastapi import Request
 
+from loreline.web.schemas import ActionDefaults
+
 if TYPE_CHECKING:
     from loreline.reprocess import ReprocessManager
     from loreline.session import SessionManager
     from loreline.web.app import AppState
+
+ACTION_DEFAULTS_KEY = "action_defaults"  # kv_settings key for the per-action defaults
 
 
 def get_state(request: Request) -> AppState:
     """Return the shared :class:`AppState` attached to ``app.state.ctx``."""
     state: AppState = request.app.state.ctx
     return state
+
+
+async def load_action_defaults(state: AppState) -> ActionDefaults:
+    """Read the stored per-action defaults (blank model when never saved)."""
+    raw = await state.settings_repo.get(ACTION_DEFAULTS_KEY)
+    return ActionDefaults.model_validate_json(raw) if raw else ActionDefaults()
 
 
 def get_manager(request: Request) -> SessionManager:

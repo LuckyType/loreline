@@ -33,7 +33,7 @@ from loreline.session import (
     SessionConfigError,
 )
 from loreline.web.auth import require_auth
-from loreline.web.deps import get_manager, get_state
+from loreline.web.deps import get_manager, get_state, load_action_defaults
 from loreline.web.routes.audio import INPUT_DEVICE_KEY, parse_device
 from loreline.web.schemas import (
     OkResponse,
@@ -155,12 +155,14 @@ async def summarize_session(
     # Resolve the model the same way summarize_transcript does, so the stored
     # provenance records what actually ran, not just what was requested.
     chosen_model = body.model or provider.model or DEFAULT_MODEL
+    defaults = await load_action_defaults(state)
     try:
         summary = await summarize_transcript(
             config=provider,
             api_key=api_key,
             model=body.model,
             transcript=to_txt(session, events),
+            system_prompt=defaults.summarize_prompt or None,
         )
     except LLMError as exc:
         raise HTTPException(status_code=HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc

@@ -121,6 +121,8 @@ export interface ActionDefaults {
 	diar_mode: string
 	diar_endpoint: string
 	summarize_model: string
+	/** Summary system prompt; the server serves the built-in default when unset. */
+	summarize_prompt?: string
 }
 
 export interface SessionDetail {

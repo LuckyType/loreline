@@ -8,7 +8,7 @@ import re
 import httpx
 import pytest
 
-from loreline.llm import LLMError, chat_health, summarize_transcript
+from loreline.llm import DEFAULT_SYSTEM_PROMPT, LLMError, chat_health, summarize_transcript
 from loreline.models import Protocol, ProviderConfig, ProviderKind
 
 _BASE_URL = "http://llm:1234/v1"
@@ -55,6 +55,44 @@ async def test_summarize_transcript_posts_chat_completions() -> None:
     assert isinstance(messages, list)
     assert messages[0]["role"] == "system"
     assert "You enter the cave." in messages[1]["content"]
+
+
+async def test_summarize_custom_system_prompt_overrides_default() -> None:
+    captured: dict[str, object] = {}
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        captured["messages"] = json.loads(request.content)["messages"]
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+    transport = httpx.MockTransport(handle)
+
+    await summarize_transcript(
+        config=_config(),
+        api_key="k",
+        model="m",
+        transcript="t",
+        system_prompt="Fasse in Stichpunkten auf Deutsch zusammen.",
+        client_factory=lambda: _client(transport),
+    )
+    messages = captured["messages"]
+    assert isinstance(messages, list)
+    assert messages[0] == {
+        "role": "system",
+        "content": "Fasse in Stichpunkten auf Deutsch zusammen.",
+    }
+
+    # Blank/whitespace falls back to the built-in instructions.
+    await summarize_transcript(
+        config=_config(),
+        api_key="k",
+        model="m",
+        transcript="t",
+        system_prompt="   ",
+        client_factory=lambda: _client(transport),
+    )
+    messages = captured["messages"]
+    assert isinstance(messages, list)
+    assert messages[0]["content"] == DEFAULT_SYSTEM_PROMPT
 
 
 async def test_summarize_unexpected_payload_yields_empty() -> None:

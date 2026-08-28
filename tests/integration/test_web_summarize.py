@@ -59,6 +59,32 @@ async def _llm_provider(client: AsyncClient) -> str:
     ).json()["id"]
 
 
+async def test_summarize_uses_configured_system_prompt(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The summary system prompt saved in settings is handed to the LLM call;
+    with nothing saved, none is passed (the built-in default applies)."""
+    seen: dict[str, object] = {}
+
+    async def fake_summarize(**kwargs: object) -> str:
+        seen.clear()
+        seen.update(kwargs)
+        return "ok"
+
+    monkeypatch.setattr(sessions_route, "summarize_transcript", fake_summarize)
+    sid = await _session_with_transcript(client)
+    llm = await _llm_provider(client)
+
+    resp = await client.post(f"/api/session/{sid}/summarize", json={"provider_id": llm})
+    assert resp.status_code == 200
+    assert seen["system_prompt"] is None  # nothing configured -> built-in default
+
+    await client.put("/api/system/defaults", json={"summarize_prompt": "Nur Stichpunkte."})
+    resp = await client.post(f"/api/session/{sid}/summarize", json={"provider_id": llm})
+    assert resp.status_code == 200
+    assert seen["system_prompt"] == "Nur Stichpunkte."
+
+
 async def test_summarize_session(client: AsyncClient, monkeypatch: pytest.MonkeyPatch) -> None:
     async def fake_summarize(**_kwargs: object) -> str:
         return "The party fought a dragon."
