@@ -107,6 +107,34 @@ MIGRATIONS: list[str] = [
     """
     ALTER TABLE sessions ADD COLUMN summary TEXT;
     """,
+    # v9 - transcript versions: record the model a re-transcription job ran
+    # with and the version a diarize job targets; store the summary's
+    # provider/model; move segment tags to the per-version scheme
+    # (reprocess:<job_id>, diarize:<version>) and relink legacy
+    # provider-tagged reprocess rows to the newest done job that made them.
+    """
+    ALTER TABLE reprocess_jobs ADD COLUMN model TEXT;
+    ALTER TABLE reprocess_jobs ADD COLUMN target TEXT NOT NULL DEFAULT 'original';
+    ALTER TABLE sessions ADD COLUMN summary_provider TEXT;
+    ALTER TABLE sessions ADD COLUMN summary_model TEXT;
+    UPDATE transcript_segments SET source = 'diarize:original' WHERE source = 'diarize';
+    UPDATE transcript_segments SET source = 'reprocess:' || (
+        SELECT j.id FROM reprocess_jobs j
+        WHERE j.session_id = transcript_segments.session_id
+          AND j.operation = 'transcribe'
+          AND j.status = 'done'
+          AND 'reprocess:' || j.provider_id = transcript_segments.source
+        ORDER BY j.created_at DESC LIMIT 1
+    )
+    WHERE source LIKE 'reprocess:%'
+      AND EXISTS (
+        SELECT 1 FROM reprocess_jobs j
+        WHERE j.session_id = transcript_segments.session_id
+          AND j.operation = 'transcribe'
+          AND j.status = 'done'
+          AND 'reprocess:' || j.provider_id = transcript_segments.source
+      );
+    """,
 ]
 
 

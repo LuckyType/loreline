@@ -7,6 +7,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from loreline.models import (
+    ORIGINAL_VERSION,
     DiarizationConfig,
     Protocol,
     ProviderCaps,
@@ -115,6 +116,8 @@ class ReprocessRequest(BaseModel):
     diarization: DiarizationConfig = Field(default_factory=DiarizationConfig)
     model: str | None = None
     """Override the provider's model for this job (chosen on demand), "transcribe" only."""
+    target: str = ORIGINAL_VERSION
+    """Transcript version a "diarize" job relabels ("original" or a transcribe job id)."""
 
 
 class OkResponse(BaseModel):

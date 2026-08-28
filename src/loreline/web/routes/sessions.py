@@ -15,9 +15,10 @@ from starlette.status import (
     HTTP_502_BAD_GATEWAY,
 )
 
-from loreline.export import EXPORTERS, canonical_transcript, relabel_speakers, to_txt
-from loreline.llm import LLMError, summarize_transcript
+from loreline.export import EXPORTERS, canonical_transcript, relabel_speakers, to_txt, variant_view
+from loreline.llm import DEFAULT_MODEL, LLMError, summarize_transcript
 from loreline.models import (
+    ORIGINAL_VERSION,
     ProviderKind,
     Session,
     SessionStatus,
@@ -100,6 +101,21 @@ async def get_session(request: Request, session_id: str) -> SessionDetail:
     return SessionDetail(session=session, transcript=transcript)
 
 
+@router.get("/{session_id}/transcript")
+async def get_transcript_version(
+    request: Request, session_id: str, version: str = ORIGINAL_VERSION
+) -> list[TranscriptEvent]:
+    """One transcript version's segments ("original" or a transcribe job id).
+
+    Returns the version's diarized relabeling when one exists, its raw rows
+    otherwise - same rule the canonical view applies to the original.
+    """
+    state = get_state(request)
+    if await state.sessions.get(session_id) is None:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="session not found")
+    return variant_view(await state.transcripts.for_session(session_id), version)
+
+
 @router.put("/{session_id}/speakers")
 async def set_speaker_names(
     request: Request, session_id: str, body: SpeakerNamesUpdate
@@ -135,6 +151,9 @@ async def summarize_session(
     if not events:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="session has no transcript")
     api_key = state.secrets.get(provider.auth_ref) if provider.auth_ref else None
+    # Resolve the model the same way summarize_transcript does, so the stored
+    # provenance records what actually ran, not just what was requested.
+    chosen_model = body.model or provider.model or DEFAULT_MODEL
     try:
         summary = await summarize_transcript(
             config=provider,
@@ -144,7 +163,9 @@ async def summarize_session(
         )
     except LLMError as exc:
         raise HTTPException(status_code=HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
-    await state.sessions.set_summary(session_id, summary)
+    await state.sessions.set_summary(
+        session_id, summary, provider_id=provider.id, model=chosen_model
+    )
     return SummarizeResult(summary=summary)
 
 

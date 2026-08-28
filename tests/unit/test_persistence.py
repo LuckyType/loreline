@@ -48,7 +48,7 @@ async def test_migrations_idempotent(tmp_path: Path) -> None:
         async with database.connection.execute("SELECT MAX(version) FROM schema_version;") as cur:
             row = await cur.fetchone()
         assert row is not None
-        assert row[0] == 8
+        assert row[0] == 9
 
 
 async def test_glossary_get_effective_merges_default_and_campaign(db: Database) -> None:
@@ -86,10 +86,14 @@ async def test_session_summary_roundtrip(db: Database) -> None:
     fresh = await repo.get("s1")
     assert fresh is not None and fresh.summary is None  # default null
 
-    await repo.set_summary("s1", "The party fought a dragon.")
+    await repo.set_summary(
+        "s1", "The party fought a dragon.", provider_id="llm-1", model="gpt-4o-mini"
+    )
     loaded = await repo.get("s1")
     assert loaded is not None
     assert loaded.summary == "The party fought a dragon."
+    assert loaded.summary_provider == "llm-1"
+    assert loaded.summary_model == "gpt-4o-mini"
 
 
 async def test_mark_interrupted_fails_stuck_capturing_sessions(db: Database) -> None:

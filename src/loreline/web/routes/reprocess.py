@@ -11,6 +11,7 @@ from loreline.reprocess import (
     AudioMissingError,
     ProviderNotFoundError,
     SessionNotFoundError,
+    TargetNotFoundError,
 )
 from loreline.web.auth import require_auth
 from loreline.web.deps import get_reprocess, get_state
@@ -27,7 +28,7 @@ async def enqueue_reprocess(request: Request, body: ReprocessRequest) -> Reproce
     manager = get_reprocess(request)
     try:
         return await manager.enqueue(body)
-    except (SessionNotFoundError, ProviderNotFoundError) as exc:
+    except (SessionNotFoundError, ProviderNotFoundError, TargetNotFoundError) as exc:
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except AudioMissingError as exc:
         raise HTTPException(status_code=HTTP_409_CONFLICT, detail=str(exc)) from exc

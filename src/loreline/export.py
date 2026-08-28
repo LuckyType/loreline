@@ -10,25 +10,51 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Mapping, Sequence
 
-from loreline.models import DIARIZE_SOURCE, REPROCESS_SOURCE_PREFIX, Session, TranscriptEvent
+from loreline.models import (
+    DIARIZE_SOURCE_PREFIX,
+    ORIGINAL_VERSION,
+    REPROCESS_SOURCE_PREFIX,
+    Session,
+    TranscriptEvent,
+)
+
+
+def variant_rows(events: Sequence[TranscriptEvent], version: str) -> list[TranscriptEvent]:
+    """A transcript version's raw rows, ignoring any diarized relabeling.
+
+    ``ORIGINAL_VERSION`` selects the live capture (every untagged row - with
+    failover a session's live rows can carry more than one provider id); any
+    other version id selects that re-transcription job's rows.
+    """
+    if version == ORIGINAL_VERSION:
+        return [
+            e
+            for e in events
+            if not e.source.startswith((REPROCESS_SOURCE_PREFIX, DIARIZE_SOURCE_PREFIX))
+        ]
+    return [e for e in events if e.source == f"{REPROCESS_SOURCE_PREFIX}{version}"]
+
+
+def variant_view(
+    events: Sequence[TranscriptEvent], version: str = ORIGINAL_VERSION
+) -> list[TranscriptEvent]:
+    """Select one transcript version to show/export/summarize.
+
+    A session's rows exist in versions - the live capture and one per
+    re-transcription job (see ``loreline.reprocess.jobs``). A diarization pass
+    over a version stores a fully relabeled copy of its rows (tagged
+    ``DIARIZE_SOURCE_PREFIX + version``) which supersedes the raw rows here;
+    other versions never leak in, so nothing is duplicated.
+    """
+    diarized = [e for e in events if e.source == f"{DIARIZE_SOURCE_PREFIX}{version}"]
+    if diarized:
+        return diarized
+    return variant_rows(events, version)
 
 
 def canonical_transcript(events: Sequence[TranscriptEvent]) -> list[TranscriptEvent]:
-    """Select the transcript view to show/export/summarize for a session.
-
-    A session's stored rows can come from more than one source: the live
-    capture (tagged by provider id), a post-session global re-diarization pass
-    (tagged ``DIARIZE_SOURCE``), and alternate re-transcriptions kept for future
-    comparison (tagged ``REPROCESS_SOURCE_PREFIX + provider_id``, see
-    ``loreline.reprocess.jobs``). A re-diarization pass supersedes the live rows
-    when present (it's a full relabeled copy of them); re-transcription
-    alternates are never part of the canonical view - nothing merges or diffs
-    them yet, so surfacing them here would just duplicate every segment.
-    """
-    diarized = [e for e in events if e.source == DIARIZE_SOURCE]
-    if diarized:
-        return diarized
-    return [e for e in events if not e.source.startswith(REPROCESS_SOURCE_PREFIX)]
+    """The default transcript view for a session: the original version."""
+    return variant_view(events, ORIGINAL_VERSION)
 
 
 def relabel_speakers(

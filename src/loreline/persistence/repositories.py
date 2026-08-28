@@ -201,11 +201,14 @@ class SessionRepository:
         )
         await self._db.connection.commit()
 
-    async def set_summary(self, session_id: str, summary: str) -> None:
-        """Persist the LLM-generated session summary."""
+    async def set_summary(
+        self, session_id: str, summary: str, *, provider_id: str, model: str
+    ) -> None:
+        """Persist the LLM-generated session summary and what produced it."""
         await self._db.connection.execute(
-            "UPDATE sessions SET summary = ? WHERE id = ?;",
-            (summary, session_id),
+            "UPDATE sessions SET summary = ?, summary_provider = ?, summary_model = ? "
+            "WHERE id = ?;",
+            (summary, provider_id, model, session_id),
         )
         await self._db.connection.commit()
 
@@ -273,15 +276,17 @@ class ReprocessRepository:
         await self._db.connection.execute(
             """
             INSERT INTO reprocess_jobs
-                (id, session_id, provider_id, operation, diarization, status,
-                 created_at, started_at, finished_at, segments_added, error)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                (id, session_id, provider_id, operation, model, target, diarization,
+                 status, created_at, started_at, finished_at, segments_added, error)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
             """,
             (
                 job.id,
                 job.session_id,
                 job.provider_id,
                 job.operation,
+                job.model,
+                job.target,
                 job.diarization.model_dump_json(),
                 job.status.value,
                 job.created_at,
@@ -396,6 +401,8 @@ def _row_to_session(row: aiosqlite.Row) -> Session:
         audio_path=row["audio_path"],
         speaker_names=json.loads(row["speaker_names"]),
         summary=row["summary"],
+        summary_provider=row["summary_provider"],
+        summary_model=row["summary_model"],
     )
 
 
@@ -419,6 +426,8 @@ def _row_to_job(row: aiosqlite.Row) -> ReprocessJob:
         session_id=row["session_id"],
         provider_id=row["provider_id"],
         operation=row["operation"],
+        model=row["model"],
+        target=row["target"],
         diarization=DiarizationConfig.model_validate_json(row["diarization"]),
         status=JobStatus(row["status"]),
         created_at=row["created_at"],

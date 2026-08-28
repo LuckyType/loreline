@@ -130,10 +130,15 @@ class TranscriptEvent(BaseModel):
 
 
 # ``TranscriptEvent.source`` tags used by post-session re-processing (see
-# ``loreline.reprocess.jobs``) to distinguish alternate/derived transcript rows
-# from the live capture, so read paths can select the canonical view (see
-# ``loreline.export.canonical_transcript``).
-DIARIZE_SOURCE = "diarize"
+# ``loreline.reprocess.jobs``). A session's transcript exists in *versions*:
+# the live capture ("original", rows tagged with the provider id that produced
+# them) and one per re-transcription job (rows tagged
+# ``REPROCESS_SOURCE_PREFIX + job_id``). A diarization pass relabels ONE
+# version's rows into a copy tagged ``DIARIZE_SOURCE_PREFIX + version`` that
+# supersedes that version's raw rows on read (see
+# ``loreline.export.variant_view``).
+ORIGINAL_VERSION = "original"
+DIARIZE_SOURCE_PREFIX = "diarize:"
 REPROCESS_SOURCE_PREFIX = "reprocess:"
 
 
@@ -185,6 +190,8 @@ class Session(BaseModel):
     audio_path: str | None = None
     speaker_names: dict[str, str] = Field(default_factory=dict[str, str])  # {label: display name}
     summary: str | None = None  # LLM-generated session summary (on demand)
+    summary_provider: str | None = None  # provider id the summary came from
+    summary_model: str | None = None  # model the summary was generated with
 
 
 class ReprocessJob(BaseModel):
@@ -193,7 +200,9 @@ class ReprocessJob(BaseModel):
     id: str
     session_id: str
     provider_id: str
-    operation: str = "transcribe"  # "transcribe" (re-STT) | "diarize" (session-wide)
+    operation: str = "transcribe"  # "transcribe" (re-STT) | "diarize" (per version)
+    model: str | None = None  # the model the job ran with ("transcribe" only)
+    target: str = ORIGINAL_VERSION  # transcript version a "diarize" job relabels
     diarization: DiarizationConfig = Field(default_factory=DiarizationConfig)
     status: JobStatus = JobStatus.QUEUED
     created_at: float

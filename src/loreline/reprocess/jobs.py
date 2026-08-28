@@ -1,11 +1,13 @@
 """Post-session re-processing jobs.
 
 Re-runs a stored session's audio through a (typically higher-quality or local)
-STT backend, producing a new transcript version tagged
-``REPROCESS_SOURCE_PREFIX + provider`` for future comparison against the live
-transcript (kept out of the canonical view - see
-``loreline.export.canonical_transcript`` - until a diff UI lands). Jobs run as
-in-process ``asyncio`` tasks; state is tracked in the ``reprocess_jobs`` table.
+STT backend, producing a new transcript *version* tagged
+``REPROCESS_SOURCE_PREFIX + job_id`` - every run is kept, so the original and
+any number of re-transcriptions stay comparable side by side (see
+``loreline.export.variant_view``). A diarize job relabels ONE version
+(``job.target``) into a ``DIARIZE_SOURCE_PREFIX + version`` copy, replacing
+that version's previous diarization. Jobs run as in-process ``asyncio``
+tasks; state is tracked in the ``reprocess_jobs`` table.
 """
 
 from __future__ import annotations
@@ -20,9 +22,11 @@ from typing import TYPE_CHECKING
 from loreline.bus import EventBus
 from loreline.diarization.merge import assign_speakers
 from loreline.diarization.provider import create_diarizer
+from loreline.export import variant_rows
 from loreline.logging import get_logger
 from loreline.models import (
-    DIARIZE_SOURCE,
+    DIARIZE_SOURCE_PREFIX,
+    ORIGINAL_VERSION,
     REPROCESS_SOURCE_PREFIX,
     DiarizationMode,
     JobStatus,
@@ -66,6 +70,10 @@ class AudioMissingError(ValueError):
 
 class ProviderNotFoundError(ValueError):
     """Raised when the chosen re-process provider id does not exist."""
+
+
+class TargetNotFoundError(ValueError):
+    """Raised when a diarize job targets a transcript version with no rows."""
 
 
 class ReprocessManager:
@@ -113,12 +121,21 @@ class ReprocessManager:
             if req.model:
                 # Model is chosen on demand at enqueue time, overriding the stored default.
                 provider = provider.model_copy(update={"model": req.model})
+        elif req.target != ORIGINAL_VERSION:
+            events = await self._transcripts.for_session(req.session_id)
+            if not variant_rows(events, req.target):
+                msg = f"unknown transcript version {req.target!r}"
+                raise TargetNotFoundError(msg)
 
         job = ReprocessJob(
             id=uuid.uuid4().hex,
             session_id=req.session_id,
             provider_id=req.provider_id if req.operation == "transcribe" else "",
             operation=req.operation,
+            # Resolved here (request override or provider default) so the job
+            # row records what the run actually used, not just the request.
+            model=provider.model if provider is not None else None,
+            target=req.target if req.operation == "diarize" else ORIGINAL_VERSION,
             diarization=req.diarization,
             status=JobStatus.QUEUED,
             created_at=time.time(),
@@ -183,7 +200,7 @@ class ReprocessManager:
         campaign_id: str | None,
         started_mono: float,
     ) -> int:
-        """Re-run STT over the stored utterances, replacing this provider's rows."""
+        """Re-run STT over the stored utterances as a new transcript version."""
         if provider is None:
             msg = "transcribe requires a provider"
             raise ProviderNotFoundError(msg)
@@ -201,13 +218,10 @@ class ReprocessManager:
             ),
             diarizer=diarizer,
         )
-        await self._transcripts.delete_source(
-            job.session_id, f"{REPROCESS_SOURCE_PREFIX}{job.provider_id}"
-        )
         try:
             # Blocking file I/O (a whole session's utterances) off the event loop.
             utterances = await asyncio.to_thread(self._audio_store.read_utterances, job.session_id)
-            return await self._drive(router, bus, utterances, job.provider_id, started_mono)
+            return await self._drive(router, bus, utterances, job.id, started_mono)
         finally:
             await _aclose(backend)
             await _aclose(diarizer)
@@ -227,8 +241,10 @@ class ReprocessManager:
         return self._diarizer_factory(config)
 
     async def _diarize_session(self, job: ReprocessJob) -> int:
-        """Diarize the whole continuous session audio once and relabel the live
-        transcript globally, giving stable speaker identity across the session."""
+        """Diarize the whole continuous session audio once and relabel ONE
+        transcript version (``job.target``) globally, giving stable speaker
+        identity across the session. Replaces that version's previous
+        diarization; other versions are untouched."""
         session = await self._sessions.get(job.session_id)
         if session is None:
             msg = f"unknown session {job.session_id!r}"
@@ -248,12 +264,12 @@ class ReprocessManager:
         if not segments:
             return 0
         events = await self._transcripts.for_session(job.session_id)
-        live = [event for event in events if event.source == session.primary_provider]
+        base = variant_rows(events, job.target)
+        source = f"{DIARIZE_SOURCE_PREFIX}{job.target}"
         relabeled = [
-            assign_speakers(event, segments).model_copy(update={"source": DIARIZE_SOURCE})
-            for event in live
+            assign_speakers(event, segments).model_copy(update={"source": source}) for event in base
         ]
-        await self._transcripts.delete_source(job.session_id, DIARIZE_SOURCE)
+        await self._transcripts.delete_source(job.session_id, source)
         for event in relabeled:
             await self._transcripts.add(event)
         return len(relabeled)
@@ -263,7 +279,7 @@ class ReprocessManager:
         router: SttRouter,
         bus: EventBus[TranscriptEvent],
         utterances: list[Utterance],
-        provider_id: str,
+        job_id: str,
         started_mono: float,
     ) -> int:
         """Subscribe first, then run the router, persisting every emitted event.
@@ -271,7 +287,7 @@ class ReprocessManager:
         Subscribing before the router runs guarantees no published event (or the
         close sentinel) is missed.
         """
-        source = f"{REPROCESS_SOURCE_PREFIX}{provider_id}"
+        source = f"{REPROCESS_SOURCE_PREFIX}{job_id}"
         count = 0
         async with bus.subscribe(reliable=True) as stream:
             run_task = asyncio.create_task(_run_then_close(router, utterances, bus))

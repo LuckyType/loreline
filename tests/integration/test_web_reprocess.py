@@ -114,6 +114,8 @@ async def test_reprocess_transcribe_with_on_demand_model(tmp_path: Path) -> None
                 await asyncio.sleep(0.02)
             assert job["status"] == "done"
             assert captured["model"] == "nova-9000"
+            # The override is recorded on the job row as the model that ran.
+            assert job["model"] == "nova-9000"
 
 
 async def test_reprocess_job(tmp_path: Path) -> None:
@@ -148,20 +150,41 @@ async def test_reprocess_job(tmp_path: Path) -> None:
             assert job["status"] == "done"
             assert int(job["segments_added"]) >= 1  # type: ignore[arg-type]
 
+            # The job records the model it resolved at enqueue time (the
+            # provider here has none stored and no override was given).
+            assert job["model"] is None
+
             jobs = await client.get("/api/reprocess", params={"session_id": sid})
             assert len(jobs.json()) == 1
 
-            # The alternate re-transcription is persisted (kept for a future diff
-            # UI: see loreline.export.canonical_transcript)...
+            # The re-transcription is persisted as its own version, tagged by
+            # the JOB id (so runs never overwrite each other)...
             ctx = app.state.ctx  # pyright: ignore[reportAny]
             raw_sources = {e.source for e in await ctx.transcripts.for_session(sid)}
-            assert any(s.startswith("reprocess:") for s in raw_sources)
+            assert f"reprocess:{job_id}" in raw_sources
+
+            # ...retrievable via the per-version transcript endpoint...
+            version = await client.get(f"/api/session/{sid}/transcript", params={"version": job_id})
+            assert version.status_code == 200
+            assert len(version.json()) >= 1
 
             # ...but stays out of the canonical session view, which would
             # otherwise show every segment twice.
             detail = (await client.get(f"/api/session/{sid}")).json()
             sources = {seg["source"] for seg in detail["transcript"]}
             assert not any(s.startswith("reprocess:") for s in sources)
+
+            # A second run with the same provider is a NEW version; both are kept.
+            second = await client.post(
+                "/api/reprocess", json={"session_id": sid, "provider_id": pid}
+            )
+            second_id = second.json()["id"]
+            for _ in range(50):
+                if (await client.get(f"/api/reprocess/{second_id}")).json()["status"] == "done":
+                    break
+                await asyncio.sleep(0.02)
+            raw_sources = {e.source for e in await ctx.transcripts.for_session(sid)}
+            assert {f"reprocess:{job_id}", f"reprocess:{second_id}"} <= raw_sources
 
 
 async def test_reprocess_unknown_session(client: AsyncClient) -> None:
@@ -222,7 +245,48 @@ async def test_diarize_session_relabels_globally(tmp_path: Path) -> None:
             assert job["status"] == "done"
             assert int(job["segments_added"]) >= 1  # type: ignore[arg-type]
 
+            # The original version's diarized copy supersedes it in the
+            # canonical view, tagged with the version it relabels.
             detail = (await client.get(f"/api/session/{sid}")).json()
-            diarized = [s for s in detail["transcript"] if s["source"] == "diarize"]
+            diarized = [s for s in detail["transcript"] if s["source"] == "diarize:original"]
             assert diarized
             assert all(s["speaker"] == "Speaker A" for s in diarized)
+
+            # Diarizing a re-transcribed version relabels ONLY that version.
+            rp = await client.post("/api/reprocess", json={"session_id": sid, "provider_id": pid})
+            rp_id = rp.json()["id"]
+            for _ in range(50):
+                if (await client.get(f"/api/reprocess/{rp_id}")).json()["status"] == "done":
+                    break
+                await asyncio.sleep(0.02)
+            enqueue = await client.post(
+                "/api/reprocess",
+                json={
+                    "session_id": sid,
+                    "operation": "diarize",
+                    "target": rp_id,
+                    "diarization": {"mode": "remote", "endpoint": "http://diar"},
+                },
+            )
+            assert enqueue.status_code == 202
+            diar_id = enqueue.json()["id"]
+            assert enqueue.json()["target"] == rp_id
+            for _ in range(50):
+                if (await client.get(f"/api/reprocess/{diar_id}")).json()["status"] == "done":
+                    break
+                await asyncio.sleep(0.02)
+            version = await client.get(f"/api/session/{sid}/transcript", params={"version": rp_id})
+            assert all(s["source"] == f"diarize:{rp_id}" for s in version.json())
+            assert all(s["speaker"] == "Speaker A" for s in version.json())
+
+            # A diarize job aimed at a nonexistent version is a 404.
+            missing = await client.post(
+                "/api/reprocess",
+                json={
+                    "session_id": sid,
+                    "operation": "diarize",
+                    "target": "nope",
+                    "diarization": {"mode": "remote", "endpoint": "http://diar"},
+                },
+            )
+            assert missing.status_code == 404

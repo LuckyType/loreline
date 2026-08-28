@@ -19,7 +19,7 @@ from loreline.models import ProviderConfig
 log = get_logger(__name__)
 
 _DEFAULT_BASE_URL = "https://api.openai.com/v1"
-_DEFAULT_MODEL = "gpt-4o-mini"
+DEFAULT_MODEL = "gpt-4o-mini"
 _TIMEOUT_S = 120.0
 
 _SYSTEM_PROMPT = (
@@ -61,7 +61,7 @@ async def summarize_transcript(
     invalid model id, a bad key, a rate limit, or a plain connection failure
     should all read as *why it failed*, not surface as an opaque 500.
     """
-    chosen_model = model or config.model or _DEFAULT_MODEL
+    chosen_model = model or config.model or DEFAULT_MODEL
     payload: dict[str, object] = {
         "model": chosen_model,
         "messages": [

@@ -7,6 +7,7 @@ from loreline.reprocess.jobs import (
     ProviderNotFoundError,
     ReprocessManager,
     SessionNotFoundError,
+    TargetNotFoundError,
 )
 
 __all__ = [
@@ -14,4 +15,5 @@ __all__ = [
     "ProviderNotFoundError",
     "ReprocessManager",
     "SessionNotFoundError",
+    "TargetNotFoundError",
 ]
