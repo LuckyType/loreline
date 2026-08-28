@@ -158,7 +158,6 @@ async function clearLogs() {
 async function load() {
 	try {
 		providers = await api.listProviders()
-		if (!primary && sttProviders.length) primary = sttProviders[0].id
 	} catch (err) {
 		error = err instanceof ApiError ? err.message : 'failed to load providers'
 	}
@@ -174,6 +173,13 @@ async function load() {
 		}
 	} catch {
 		/* defaults are optional */
+	}
+	// Seed the provider picker only after the defaults are known, so the
+	// configured default provider wins over "first in the list".
+	if (!primary) {
+		const wanted = defaults.stt_provider
+		primary =
+			wanted && sttProviders.some((p) => p.id === wanted) ? wanted : (sttProviders[0]?.id ?? '')
 	}
 }
 

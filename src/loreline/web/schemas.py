@@ -88,9 +88,11 @@ class SessionIds(BaseModel):
 class ActionDefaults(BaseModel):
     """Per-action defaults surfaced first in the on-demand pickers (blank = none)."""
 
+    stt_provider: str = ""
     stt_model: str = ""
     diar_mode: str = ""
     diar_endpoint: str = ""
+    summarize_provider: str = ""
     summarize_model: str = ""
 
 

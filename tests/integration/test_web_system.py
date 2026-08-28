@@ -151,26 +151,32 @@ async def test_autostart_toggle(client: AsyncClient) -> None:
 async def test_action_defaults_roundtrip(client: AsyncClient) -> None:
     empty = (await client.get("/api/system/defaults")).json()
     assert empty == {
+        "stt_provider": "",
         "stt_model": "",
         "diar_mode": "",
         "diar_endpoint": "",
+        "summarize_provider": "",
         "summarize_model": "",
     }
 
     put = await client.put(
         "/api/system/defaults",
         json={
+            "stt_provider": "prov-stt",
             "stt_model": "nova-3",
             "diar_mode": "remote",
             "diar_endpoint": "http://diarizer:8001",
+            "summarize_provider": "prov-llm",
             "summarize_model": "gpt-4o-mini",
         },
     )
     assert put.status_code == 200
     fetched = (await client.get("/api/system/defaults")).json()
+    assert fetched["stt_provider"] == "prov-stt"
     assert fetched["stt_model"] == "nova-3"
     assert fetched["diar_mode"] == "remote"
     assert fetched["diar_endpoint"] == "http://diarizer:8001"
+    assert fetched["summarize_provider"] == "prov-llm"
     assert fetched["summarize_model"] == "gpt-4o-mini"
 
 

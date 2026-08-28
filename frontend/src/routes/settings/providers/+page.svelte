@@ -1,12 +1,11 @@
 <script lang="ts">
+import { AlignLeft, Cloud, Mic, Pencil, Plus, Server, Trash2, Users } from '@lucide/svelte'
 import { onMount } from 'svelte'
-import { api, ApiError } from '$lib/api'
-import { confirm } from '$lib/confirm.svelte'
-import { Cloud, Pencil, Plus, Server, Trash2 } from '@lucide/svelte'
-import ModelPicker from '$lib/ModelPicker.svelte'
-import Dropdown from '$lib/Dropdown.svelte'
+import { ApiError, api } from '$lib/api'
+import { Badge } from '$lib/components/ui/badge'
 import { Button } from '$lib/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '$lib/components/ui/card'
+import { Checkbox } from '$lib/components/ui/checkbox'
 import {
 	Dialog,
 	DialogContent,
@@ -17,8 +16,6 @@ import {
 } from '$lib/components/ui/dialog'
 import { Input } from '$lib/components/ui/input'
 import { Label } from '$lib/components/ui/label'
-import { Badge } from '$lib/components/ui/badge'
-import { Checkbox } from '$lib/components/ui/checkbox'
 import {
 	Table,
 	TableBody,
@@ -27,12 +24,15 @@ import {
 	TableHeader,
 	TableRow,
 } from '$lib/components/ui/table'
+import { confirm } from '$lib/confirm.svelte'
+import Dropdown from '$lib/Dropdown.svelte'
+import ModelPicker from '$lib/ModelPicker.svelte'
 import type {
 	ActionDefaults,
+	ProtocolKind,
 	ProviderConfig,
 	ProviderCreate,
 	ProviderKind,
-	ProtocolKind,
 } from '$lib/types'
 
 type Hosting = 'cloud' | 'selfhosted'
@@ -161,18 +161,18 @@ let selected = $state<ProviderMeta | null>(null)
 let wizardOpen = $state(false)
 
 let defaults = $state<ActionDefaults>({
+	stt_provider: '',
 	stt_model: '',
 	diar_mode: '',
 	diar_endpoint: '',
+	summarize_provider: '',
 	summarize_model: '',
 })
 let defaultsMsg = $state('')
-let sttSrc = $state('')
-let llmSrc = $state('')
 const sttProviders = $derived(providers.filter((p) => p.kind !== 'openai_chat'))
 const llmProviders = $derived(providers.filter((p) => p.kind === 'openai_chat'))
-const sttSrcProvider = $derived(providers.find((p) => p.id === sttSrc))
-const llmSrcProvider = $derived(providers.find((p) => p.id === llmSrc))
+const sttSrcProvider = $derived(providers.find((p) => p.id === defaults.stt_provider))
+const llmSrcProvider = $derived(providers.find((p) => p.id === defaults.summarize_provider))
 
 const filteredModels = $derived(
 	modelFilter
@@ -181,8 +181,12 @@ const filteredModels = $derived(
 )
 
 $effect(() => {
-	if (!sttSrc && sttProviders.length) sttSrc = sttProviders[0].id
-	if (!llmSrc && llmProviders.length) llmSrc = llmProviders[0].id
+	// Pre-fill empty pickers so the model list is browsable; nothing is
+	// persisted until the explicit Save.
+	if (!defaults.stt_provider && sttProviders.length) defaults.stt_provider = sttProviders[0].id
+	if (!defaults.summarize_provider && llmProviders.length) {
+		defaults.summarize_provider = llmProviders[0].id
+	}
 })
 
 async function load() {
@@ -201,6 +205,7 @@ async function saveDefaults() {
 	try {
 		defaults = await api.setDefaults(defaults)
 		defaultsMsg = 'Saved'
+		setTimeout(() => (defaultsMsg = ''), 2500)
 	} catch (err) {
 		defaultsMsg = err instanceof ApiError ? err.message : 'save failed'
 	}
@@ -430,85 +435,89 @@ onMount(async () => {
 <Card class="mt-4">
 	<CardHeader>
 		<CardTitle>Defaults</CardTitle>
-		<CardDescription>
-			Pre-selected first in the per-session pickers. Pick a provider to browse its models.
-		</CardDescription>
+		<CardDescription>Pre-selected when starting or re-processing a session.</CardDescription>
 	</CardHeader>
 	<CardContent class="flex flex-col gap-4">
-		<div class="flex flex-col gap-2">
-			<Label for="def-stt-src">Transcription model</Label>
-			<div class="flex items-stretch gap-2">
+		<div class="grid gap-3 md:grid-cols-3">
+			<div class="flex flex-col gap-2.5 rounded-lg border p-3.5">
+				<div class="flex items-center gap-2 font-medium">
+					<Mic class="size-4" />
+					Transcription
+				</div>
+				<Label class="text-xs text-muted-foreground" for="def-stt-src">Provider</Label>
 				<Dropdown
 					id="def-stt-src"
-					class="max-w-48"
-					bind:value={sttSrc}
+					bind:value={defaults.stt_provider}
 					options={sttProviders.map((p) => ({ value: p.id, label: p.name }))}
 				/>
-				<div class="flex-1">
-					<ModelPicker
-						provider={sttSrcProvider}
-						bind:value={defaults.stt_model}
-						autoseed={false}
-						onpick={saveDefaults}
-					/>
-				</div>
-			</div>
-		</div>
-		<div class="flex flex-col gap-2">
-			<Label for="def-diar">Diarization</Label>
-			<Dropdown
-				id="def-diar"
-				class="max-w-48"
-				bind:value={defaults.diar_mode}
-				options={[
-          { value: '', label: 'No default' },
-          { value: 'none', label: 'None' },
-          { value: 'inline', label: 'Inline (from STT)' },
-          { value: 'remote', label: 'Remote service' }
-        ]}
-				onpick={() => void saveDefaults()}
-			/>
-		</div>
-		{#if defaults.diar_mode === 'remote'}
-			<div class="flex flex-col gap-2">
-				<Label for="def-diar-endpoint">Diarization endpoint</Label>
-				<Input
-					id="def-diar-endpoint"
-					class="max-w-48"
-					bind:value={defaults.diar_endpoint}
-					placeholder="http://diarization:8001"
-					onblur={saveDefaults}
+				<Label class="text-xs text-muted-foreground" for="def-stt-model">Model</Label>
+				<ModelPicker
+					id="def-stt-model"
+					provider={sttSrcProvider}
+					bind:value={defaults.stt_model}
+					autoseed={false}
 				/>
 			</div>
-		{/if}
-		<div class="flex flex-col gap-2">
-			<Label for="def-llm-src">Summary model</Label>
-			{#if llmProviders.length}
-				<div class="flex items-stretch gap-2">
+
+			<div class="flex flex-col gap-2.5 rounded-lg border p-3.5">
+				<div class="flex items-center gap-2 font-medium">
+					<Users class="size-4" />
+					Diarization
+				</div>
+				<Label class="text-xs text-muted-foreground" for="def-diar">Mode</Label>
+				<Dropdown
+					id="def-diar"
+					bind:value={defaults.diar_mode}
+					options={[
+            { value: '', label: 'No default' },
+            { value: 'none', label: 'None' },
+            { value: 'inline', label: 'Inline (from STT)' },
+            { value: 'remote', label: 'Remote service' }
+          ]}
+				/>
+				{#if defaults.diar_mode === 'remote'}
+					<Label class="text-xs text-muted-foreground" for="def-diar-endpoint">Endpoint</Label>
+					<Input
+						id="def-diar-endpoint"
+						bind:value={defaults.diar_endpoint}
+						placeholder="http://diarization:8001"
+					/>
+				{/if}
+			</div>
+
+			<div class="flex flex-col gap-2.5 rounded-lg border p-3.5">
+				<div class="flex items-center gap-2 font-medium">
+					<AlignLeft class="size-4" />
+					Summary
+				</div>
+				{#if llmProviders.length}
+					<Label class="text-xs text-muted-foreground" for="def-llm-src">Provider</Label>
 					<Dropdown
 						id="def-llm-src"
-						class="max-w-48"
-						bind:value={llmSrc}
+						bind:value={defaults.summarize_provider}
 						options={llmProviders.map((p) => ({ value: p.id, label: p.name }))}
 					/>
-					<div class="flex-1">
-						<ModelPicker
-							provider={llmSrcProvider}
-							bind:value={defaults.summarize_model}
-							autoseed={false}
-							onpick={saveDefaults}
-						/>
-					</div>
-				</div>
-			{:else}
-				<p class="m-0 text-sm text-muted-foreground">
-					Add an LLM provider (OpenAI-compatible chat) to set a summary default.
-				</p>
-			{/if}
+					<Label class="text-xs text-muted-foreground" for="def-llm-model">Model</Label>
+					<ModelPicker
+						id="def-llm-model"
+						provider={llmSrcProvider}
+						bind:value={defaults.summarize_model}
+						autoseed={false}
+					/>
+				{:else}
+					<p class="m-0 text-sm text-muted-foreground">
+						Add an LLM provider (OpenAI-compatible chat) to set a summary default.
+					</p>
+				{/if}
+			</div>
 		</div>
-		{#if defaultsMsg}
-			<span class="text-sm text-muted-foreground">{defaultsMsg}</span>
-		{/if}
+
+		<div class="flex items-center justify-end gap-3">
+			{#if defaultsMsg}
+				<span class="text-xs text-muted-foreground">{defaultsMsg}</span>
+			{/if}
+			<Button onclick={saveDefaults}>Save defaults</Button>
+		</div>
 	</CardContent>
 </Card>
 
