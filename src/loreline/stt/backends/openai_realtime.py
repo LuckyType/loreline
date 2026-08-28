@@ -19,6 +19,7 @@ Docs:
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import contextlib
 import json
@@ -32,7 +33,7 @@ from loreline.audio.resample import resample_pcm16
 from loreline.logging import get_logger
 from loreline.models import Glossary, ProviderConfig, ProviderKind, TranscriptEvent
 from loreline.secrets import SecretStore
-from loreline.stt.backends._ws import as_dict, get_str, probe_health
+from loreline.stt.backends._ws import as_dict, as_obj_dict, get_str, probe_health
 from loreline.stt.base import glossary_terms
 from loreline.stt.registry import register
 
@@ -45,6 +46,27 @@ _FAILED = "conversation.item.input_audio_transcription.failed"
 # OpenAI Realtime rejects input sample rates below 24 kHz, while our capture
 # pipeline is locked to 16 kHz by Silero VAD. Upsample to this rate on the way out.
 _OUTPUT_RATE = 24_000
+# OpenAI rejects a transcription prompt beyond this ("string_above_max_length"),
+# and the rejection voids the whole session.update - language included.
+_PROMPT_MAX_CHARS = 1024
+_CONFIGURE_TIMEOUT_S = 10.0
+
+
+def _capped_prompt(terms: list[str]) -> tuple[str | None, int]:
+    """Join glossary terms into a prompt within OpenAI's length limit.
+
+    Keeps whole leading terms only (glossary order is priority order); returns
+    the prompt and how many trailing terms were dropped to fit.
+    """
+    kept: list[str] = []
+    length = 0
+    for term in terms:
+        addition = len(term) + (2 if kept else 0)  # ", " separator
+        if length + addition > _PROMPT_MAX_CHARS:
+            break
+        kept.append(term)
+        length += addition
+    return ", ".join(kept) or None, len(terms) - len(kept)
 
 
 class OpenAIRealtimeBackend:
@@ -65,6 +87,7 @@ class OpenAIRealtimeBackend:
         self._out_rate = max(config.sample_rate, _OUTPUT_RATE)
         self._ws: ClientConnection | None = None
         self._prompt: str | None = None
+        self._prompt_rejected = False  # model refused the prompt param; stop sending it
 
     @property
     def _headers(self) -> dict[str, str]:
@@ -75,7 +98,7 @@ class OpenAIRealtimeBackend:
             "model": self._model,
             "language": self._language,
         }
-        if self._prompt:
+        if self._prompt and not self._prompt_rejected:
             # Bias recognition toward the campaign glossary (spell/char/place names).
             transcription["prompt"] = self._prompt
         return json.dumps(
@@ -104,7 +127,15 @@ class OpenAIRealtimeBackend:
         session_id: str,
         glossary: Glossary | None = None,
     ) -> AsyncIterator[TranscriptEvent]:
-        self._prompt = ", ".join(glossary_terms(glossary)) or None
+        prompt, dropped = _capped_prompt(glossary_terms(glossary))
+        if dropped and prompt != self._prompt:  # log once per glossary, not per utterance
+            log.warning(
+                "openai.realtime.glossary_truncated",
+                provider=self.config.id,
+                dropped_terms=dropped,
+                max_chars=_PROMPT_MAX_CHARS,
+            )
+        self._prompt = prompt
         async for utterance in audio:
             event = await self._transcribe_one(utterance, session_id=session_id)
             if event is not None:
@@ -119,9 +150,51 @@ class OpenAIRealtimeBackend:
         """
         if self._ws is None:
             ws = await connect(self._url, additional_headers=self._headers)
-            await ws.send(self._session_update())
+            try:
+                await self._configure(ws)
+            except BaseException:
+                with contextlib.suppress(Exception):
+                    await ws.close()
+                raise
             self._ws = ws
         return self._ws
+
+    async def _configure(self, ws: ClientConnection) -> None:
+        """Send ``session.update`` and wait until the server settles it.
+
+        Draining the config handshake here keeps a rejection out of the
+        per-utterance receive loop, where it would silently swallow an
+        utterance's transcript (and count as success, so no fallback fires).
+        A rejected prompt - a model without prompt support - downgrades the
+        session once to a promptless update, so the language/format config
+        still applies instead of being voided along with the prompt.
+        """
+        await ws.send(self._session_update())
+        async with asyncio.timeout(_CONFIGURE_TIMEOUT_S):
+            async for raw in ws:
+                message = as_dict(raw)
+                kind = get_str(message, "type")
+                if kind.endswith("session.updated"):
+                    return
+                if kind != "error":
+                    continue  # session.created and other chatter
+                detail = as_obj_dict(message.get("error", message))
+                if not self._prompt_rejected and "transcription.prompt" in get_str(detail, "param"):
+                    self._prompt_rejected = True
+                    log.warning(
+                        "openai.realtime.prompt_rejected",
+                        provider=self.config.id,
+                        detail=detail,
+                    )
+                    await ws.send(self._session_update())
+                    continue
+                log.warning(
+                    "openai.realtime.error",
+                    provider=self.config.id,
+                    event_type=kind,
+                    detail=detail,
+                )
+                return
 
     async def _reset_ws(self) -> None:
         ws, self._ws = self._ws, None

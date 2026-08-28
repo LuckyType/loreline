@@ -87,6 +87,7 @@ async def test_realtime_applies_glossary_prompt() -> None:
             data = json.loads(message)
             if data.get("type") == "session.update":
                 captured["raw"] = message
+                await ws.send(json.dumps({"type": "session.updated"}))
             elif data.get("type") == "input_audio_buffer.commit":
                 await ws.send(json.dumps({"type": _COMPLETED_TYPE, "transcript": "ok"}))
 
@@ -110,6 +111,104 @@ async def test_realtime_applies_glossary_prompt() -> None:
     assert '"prompt"' in raw
     assert "Drakonia" in raw
     assert "Mistwood" in raw
+
+
+async def test_realtime_prompt_capped_to_openai_limit() -> None:
+    """A glossary past OpenAI's 1024-char prompt limit is truncated at a term
+    boundary instead of being sent oversized - an oversized prompt is rejected
+    server-side together with the whole session config."""
+    captured: dict[str, str] = {}
+
+    async def handler(ws: ServerConnection) -> None:
+        async for message in ws:
+            if isinstance(message, bytes):
+                continue
+            data = json.loads(message)
+            if data.get("type") == "session.update":
+                captured["raw"] = message
+                await ws.send(json.dumps({"type": "session.updated"}))
+            elif data.get("type") == "input_audio_buffer.commit":
+                await ws.send(json.dumps({"type": _COMPLETED_TYPE, "transcript": "ok"}))
+
+    terms = [f"Term{i:04d}xxxxxxxxxxxx" for i in range(100)]  # ~1800 chars joined
+    async with serve(handler, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        config = ProviderConfig(
+            id="oai",
+            name="OpenAI",
+            kind=ProviderKind.OPENAI,
+            base_url=f"ws://127.0.0.1:{port}",
+            protocol=Protocol.WS,
+            sample_rate=24000,
+        )
+        backend = OpenAIRealtimeBackend(config, api_key="x")
+        glossary = Glossary(campaign_id="c", terms=terms)
+        events = [e async for e in backend.transcribe(_one(), session_id="s", glossary=glossary)]
+        await backend.aclose()
+
+    assert events
+    prompt = json.loads(captured["raw"])["session"]["audio"]["input"]["transcription"]["prompt"]
+    assert len(prompt) <= 1024
+    assert prompt.startswith(terms[0])
+    assert not prompt.endswith(",")  # whole terms only, no mid-term cut
+    assert prompt.split(", ")[-1] in terms
+
+
+async def test_realtime_prompt_rejection_downgrades_to_promptless() -> None:
+    """A model that refuses the prompt param voids the whole session.update, so
+    the backend must retry once without the prompt - keeping language/format -
+    and still transcribe. The rejection is remembered across reconnects."""
+    updates: list[str] = []
+
+    async def handler(ws: ServerConnection) -> None:
+        async for message in ws:
+            if isinstance(message, bytes):
+                continue
+            data = json.loads(message)
+            if data.get("type") == "session.update":
+                updates.append(message)
+                if '"prompt"' in message:
+                    await ws.send(
+                        json.dumps(
+                            {
+                                "type": "error",
+                                "error": {
+                                    "type": "invalid_request_error",
+                                    "code": "invalid_value",
+                                    "param": "session.audio.input.transcription.prompt",
+                                    "message": "The 'prompt' parameter is not supported.",
+                                },
+                            }
+                        )
+                    )
+                else:
+                    await ws.send(json.dumps({"type": "session.updated"}))
+            elif data.get("type") == "input_audio_buffer.commit":
+                await ws.send(json.dumps({"type": _COMPLETED_TYPE, "transcript": "ok"}))
+
+    async with serve(handler, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        config = ProviderConfig(
+            id="oai",
+            name="OpenAI",
+            kind=ProviderKind.OPENAI,
+            base_url=f"ws://127.0.0.1:{port}",
+            protocol=Protocol.WS,
+            sample_rate=24000,
+        )
+        backend = OpenAIRealtimeBackend(config, api_key="x")
+        glossary = Glossary(campaign_id="c", terms=["Drakonia"])
+        events: list[TranscriptEvent] = []
+        for i in range(2):
+            async for event in backend.transcribe(_utt(i), session_id="s", glossary=glossary):
+                events.append(event)
+        await backend.aclose()
+
+    assert len(events) == 2  # no utterance was swallowed by the rejection
+    assert len(updates) == 2  # with-prompt attempt, then the promptless retry
+    assert '"prompt"' in updates[0]
+    assert '"prompt"' not in updates[1]
+    assert '"language"' in updates[1]  # rest of the session config kept
 
 
 async def test_realtime_health_ok() -> None:
