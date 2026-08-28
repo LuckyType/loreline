@@ -237,6 +237,10 @@ async def merge_sessions(request: Request, body: SessionIds) -> Session:
     sources = [s for s in [await state.sessions.get(i) for i in body.ids] if s is not None]
     if len(sources) < _MERGE_MIN_SESSIONS:
         raise HTTPException(status_code=HTTP_409_CONFLICT, detail="merge needs at least 2 sessions")
+    # The running session's WAV + index now exist (and grow) throughout capture,
+    # so without this guard a merge would snapshot a torn copy of live audio.
+    if any(s.id == state.manager.current_session_id() for s in sources):
+        raise HTTPException(status_code=HTTP_409_CONFLICT, detail="cannot merge a running session")
     sources.sort(key=lambda s: s.started_at)
 
     merged_id = uuid.uuid4().hex

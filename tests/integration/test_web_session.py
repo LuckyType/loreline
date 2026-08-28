@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
+import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
 import pytest_asyncio
 from asgi_lifespan import LifespanManager
+from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from loreline.audio.chunker import SpeechDetector, Utterance
@@ -289,6 +292,105 @@ async def test_merge_concatenates_audio(tmp_path: Path) -> None:
             job = (await client.get(f"/api/reprocess/{job_id}")).json()
             assert job["status"] == "done"
             assert int(job["segments_added"]) == len(utterances)
+
+
+class HangingBackend(FakeBackend):
+    """Accepts the utterance, then never answers - a black-holed provider."""
+
+    async def transcribe(
+        self,
+        audio: AsyncIterator[Utterance],
+        *,
+        session_id: str,
+        glossary: object = None,
+    ) -> AsyncIterator[TranscriptEvent]:
+        _ = (session_id, glossary)
+        async for _utt in audio:
+            await asyncio.sleep(3600)
+        if False:  # pragma: no cover - marks this as an async generator
+            yield TranscriptEvent(
+                session_id=session_id, source=self.config.id, text="", start_ts=0.0, end_ts=0.0
+            )
+
+
+async def test_stop_returns_despite_hung_backend(
+    session_settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Stop must not be held hostage by a dead backend draining its backlog:
+    after the drain timeout the router is cancelled and the session still
+    completes - its audio is on disk for later re-transcription."""
+    monkeypatch.setattr("loreline.session.manager._STOP_DRAIN_TIMEOUT_S", 0.3)
+    app = create_app(
+        session_settings,
+        capture_factory=capture_factory,  # type: ignore[arg-type]
+        backend_factory=HangingBackend,  # type: ignore[arg-type]
+        diarizer_factory=lambda _cfg: FakeDiarizer(),
+    )
+    async with LifespanManager(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            pid = await _create_provider(client)
+            start = await client.post("/api/session/start", json={"primary_provider": pid})
+            session_id = start.json()["id"]
+            await asyncio.sleep(0.1)  # let capture hand the utterance to the hung backend
+
+            began = time.monotonic()
+            stop = await client.post("/api/session/stop")
+            assert stop.status_code == 200
+            assert stop.json()["status"] == "completed"
+            assert time.monotonic() - began < 5.0
+
+            ctx = app.state.ctx  # pyright: ignore[reportAny]
+            assert ctx.audio_store.exists(session_id)  # recording stayed adoptable
+
+
+async def test_startup_rebuilds_orphaned_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A WAV left without its index sidecar (unclean death) is adopted at the
+    next startup: the background sweep re-runs VAD and restores the index; a
+    stray WAV with no session row is left alone."""
+
+    def any_byte_detector(_sample_rate: int) -> SpeechDetector:
+        return any  # a frame with any nonzero byte counts as speech
+
+    monkeypatch.setattr("loreline.session.recovery._default_detector", any_byte_detector)
+    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t")
+
+    def make_app() -> FastAPI:
+        return create_app(
+            settings,
+            capture_factory=capture_factory,  # type: ignore[arg-type]
+            backend_factory=FakeBackend,  # type: ignore[arg-type]
+            diarizer_factory=lambda _cfg: FakeDiarizer(),
+        )
+
+    app = make_app()
+    async with LifespanManager(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            pid = await _create_provider(client)
+            start = await client.post("/api/session/start", json={"primary_provider": pid})
+            session_id = start.json()["id"]
+            await client.post("/api/session/stop")
+        store = app.state.ctx.audio_store  # pyright: ignore[reportAny]
+        original = store.read_utterances(session_id)
+        store.index_path(session_id).unlink()  # simulate a pre-sidecar crash
+        with store.writer("stray", sample_rate=16000) as writer:  # no session row
+            writer.append_frame(b"\x01\x00" * 320)
+        store.index_path("stray").unlink()
+
+    app = make_app()
+    async with LifespanManager(app):
+        store = app.state.ctx.audio_store  # pyright: ignore[reportAny]
+        for _ in range(100):
+            if store.exists(session_id):
+                break
+            await asyncio.sleep(0.05)
+        rebuilt = store.read_utterances(session_id)
+        assert len(rebuilt) >= 1
+        assert len(rebuilt) == len(original)
+        assert not store.index_path("stray").exists()
 
 
 async def test_merge_and_delete_sessions(tmp_path: Path) -> None:

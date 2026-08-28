@@ -79,6 +79,10 @@ class HealthResponse(BaseModel):
     """The configured remote-diarization endpoint, or null when none is set."""
     diarizer_reachable: bool | None = None
     """Whether that endpoint answered; null when no endpoint is configured."""
+    stt_degraded_since: float | None = None
+    """Epoch time the active session's live transcription started failing
+    (primary and fallback both producing nothing); null when healthy or idle.
+    Audio keeps recording either way - this drives the dashboard warning."""
 
 
 @router.get("/healthz")
@@ -110,6 +114,7 @@ async def healthz(request: Request) -> HealthResponse:
         alerts_enabled=any(c.enabled for c in alert_config.channels),
         diarizer_endpoint=endpoint,
         diarizer_reachable=reachable,
+        stt_degraded_since=state.manager.stt_degraded_since(),
     )
 
 

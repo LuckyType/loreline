@@ -121,6 +121,16 @@ $effect(() => {
 
 const sessionElapsed = $derived(sessionStartedAt === null ? null : nowMs / 1000 - sessionStartedAt)
 
+// Live transcription can stop flowing while the recording itself is fine
+// (backend outage, dead uplink). healthz reports when the router's failing
+// streak began; surface it as a warning rather than letting the transcript
+// pane just go silently quiet.
+const sttDegradedAt = $derived.by(() => {
+	const since = capturing ? $health?.stt_degraded_since : null
+	if (!since) return null
+	return new Date(since * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+})
+
 // --- live transcript ---
 let txEvents = $state<TranscriptEvent[]>([])
 let txAutoscroll = $state(true)
@@ -299,6 +309,12 @@ onDestroy(() => {
 					</span>
 					<Button variant="destructive" onclick={stop} disabled={busy}>Stop session</Button>
 				</div>
+				{#if sttDegradedAt}
+					<p class="mt-2 border-t border-dashed pt-2 text-sm text-amber-500">
+						Live transcription has been failing since {sttDegradedAt} - audio is still being
+						recorded and the session can be re-transcribed later.
+					</p>
+				{/if}
 			{:else}
 				<!-- Essentials inline; fallback + diarization fold away, but the summary
 				     below always states what they're set to so nothing hides silently. -->

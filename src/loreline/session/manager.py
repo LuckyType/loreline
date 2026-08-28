@@ -101,6 +101,7 @@ class _Runtime:
     session: Session
     source: CaptureSource
     session_bus: EventBus[TranscriptEvent]
+    router: SttRouter
     router_task: asyncio.Task[None]
     persist_task: asyncio.Task[None]
     backends: list[STTBackend]
@@ -149,6 +150,11 @@ class SessionManager:
 
     def current_session_id(self) -> str | None:
         return self._runtime.session.id if self._runtime is not None else None
+
+    def stt_degraded_since(self) -> float | None:
+        """Epoch time the active session's transcription started failing, or None."""
+        runtime = self._runtime
+        return runtime.router.degraded_since if runtime is not None else None
 
     async def _resolve_providers(
         self, req: StartSessionRequest
@@ -259,6 +265,7 @@ class SessionManager:
                 session=session,
                 source=source,
                 session_bus=session_bus,
+                router=router,
                 router_task=router_task,
                 persist_task=persist_task,
                 backends=backends,
@@ -279,7 +286,16 @@ class SessionManager:
         runtime.source.stop()
         status = SessionStatus.COMPLETED
         try:
-            await runtime.router_task
+            # Bounded drain: with STT healthy the router finishes its queue in
+            # moments, but an unreachable backend leaves a deep utterance
+            # backlog where every entry burns a full per-utterance timeout -
+            # holding this stop request (and the shutdown path) hostage for up
+            # to half an hour. The audio + index are already on disk, so cut
+            # the drain short instead: wait_for cancels the router task, and
+            # the skipped tail stays re-transcribable from stored audio.
+            await asyncio.wait_for(runtime.router_task, timeout=_STOP_DRAIN_TIMEOUT_S)
+        except TimeoutError:
+            log.warning("session.stop.drain_timeout", session_id=runtime.session.id)
         except Exception:
             log.exception("session.router.failed", session_id=runtime.session.id)
             status = SessionStatus.ERROR
@@ -312,7 +328,7 @@ class SessionManager:
         return runtime.session
 
     async def _failover_alert(self, message: str) -> None:
-        await self._notify("STT failover", message, level=AlertLevel.WARNING)
+        await self._notify("Transcription degraded", message, level=AlertLevel.WARNING)
 
     async def _notify(self, title: str, message: str, *, level: AlertLevel) -> None:
         """Best-effort push alert; never raises into the caller."""
@@ -353,6 +369,10 @@ class SessionManager:
 
 _UTTERANCE_QUEUE_MAX = 64
 _CAPTURE_DONE = object()
+# How long stop() lets the router drain queued utterances before cancelling it.
+# One per-utterance STT timeout: a healthy drain finishes well inside this; a
+# drain that can't is a dead backend working through a backlog.
+_STOP_DRAIN_TIMEOUT_S = 30.0
 
 
 def _offer(queue: asyncio.Queue[object], item: object) -> None:
@@ -390,12 +410,14 @@ async def _capture_utterances(
         utterance = chunker.feed(frame, ts=ts, is_speech=is_speech)
         if utterance is not None:
             if audio_writer is not None:
-                audio_writer.mark_utterance(utterance)
+                # mark_utterance persists the index sidecar - disk I/O, so off
+                # the event loop like the frame writes above.
+                await asyncio.to_thread(audio_writer.mark_utterance, utterance)
             _offer(queue, utterance)
     final = chunker.flush()
     if final is not None:
         if audio_writer is not None:
-            audio_writer.mark_utterance(final)
+            await asyncio.to_thread(audio_writer.mark_utterance, final)
         _offer(queue, final)
     _offer(queue, _CAPTURE_DONE)
 

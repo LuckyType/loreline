@@ -81,6 +81,36 @@ class FailingBackend(FakeBackend):
             )
 
 
+class FlakyBackend(FakeBackend):
+    """Fails the first ``fail_first`` utterances, then transcribes normally."""
+
+    def __init__(self, provider_id: str, *, fail_first: int) -> None:
+        super().__init__(provider_id)
+        self._remaining_failures = fail_first
+
+    async def transcribe(
+        self,
+        audio: AsyncIterator[Utterance],
+        *,
+        session_id: str,
+        glossary: object = None,
+    ) -> AsyncIterator[TranscriptEvent]:
+        _ = glossary
+        async for utt in audio:
+            if self._remaining_failures > 0:
+                self._remaining_failures -= 1
+                msg = "still flaky"
+                raise RuntimeError(msg)
+            yield TranscriptEvent(
+                session_id=session_id,
+                source=self.config.id,
+                text="recovered",
+                start_ts=utt.start,
+                end_ts=utt.end,
+                is_final=True,
+            )
+
+
 class FakeDiarizer:
     def __init__(self, segments: list[SpeakerSegment]) -> None:
         self._segments = segments
@@ -243,6 +273,69 @@ async def test_router_inline_diarization_sets_event_speaker() -> None:
     await router.run(_utterances())
     events = await collector
     assert events[0].speaker == "Speaker A"  # dominant by duration
+
+
+async def _n_utterances(n: int) -> AsyncIterator[Utterance]:
+    for i in range(n):
+        yield Utterance(pcm=b"\x01\x00" * 1600, start=float(i), end=i + 1.0)
+
+
+async def test_router_degraded_after_failure_streak_alerts_once() -> None:
+    """A streak of utterances that transcribe nothing marks the router degraded
+    and notifies exactly once - not per failure, which floods alert channels
+    when a backend stays down for hours."""
+    bus: EventBus[TranscriptEvent] = EventBus()
+    alerts: list[str] = []
+
+    async def on_failover(message: str) -> None:
+        alerts.append(message)
+
+    router = SttRouter(
+        FailingBackend("primary"), bus, RouterConfig(session_id="s1"), on_failover=on_failover
+    )
+    await router.run(_n_utterances(2))
+    assert router.degraded_since is None  # under the streak threshold
+    assert alerts == []
+
+    await router.run(_n_utterances(3))
+    assert router.degraded_since is not None
+    assert len(alerts) == 1
+
+
+async def test_router_recovers_when_transcription_resumes() -> None:
+    bus: EventBus[TranscriptEvent] = EventBus()
+    router = SttRouter(FlakyBackend("primary", fail_first=3), bus, RouterConfig(session_id="s1"))
+    collector = asyncio.create_task(_collect(bus, 1))
+    await asyncio.sleep(0.01)
+    await router.run(_n_utterances(4))
+    events = await collector
+    assert events[0].text == "recovered"
+    assert router.degraded_since is None  # streak ended by the 4th utterance
+
+
+async def test_router_fallback_success_is_not_degraded() -> None:
+    """A working fallback keeps the transcript flowing, so the session is not
+    degraded no matter how long the primary keeps failing."""
+    bus: EventBus[TranscriptEvent] = EventBus()
+    alerts: list[str] = []
+
+    async def on_failover(message: str) -> None:
+        alerts.append(message)
+
+    router = SttRouter(
+        FailingBackend("primary"),
+        bus,
+        RouterConfig(session_id="s1"),
+        fallback=FakeBackend("fallback"),
+        on_failover=on_failover,
+    )
+    collector = asyncio.create_task(_collect(bus, 4))
+    await asyncio.sleep(0.01)
+    await router.run(_n_utterances(4))
+    events = await collector
+    assert all(e.source == "fallback" for e in events)
+    assert router.degraded_since is None
+    assert alerts == []
 
 
 async def test_compare_fan_out() -> None:

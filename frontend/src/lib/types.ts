@@ -139,6 +139,8 @@ export interface Health {
 	alerts_enabled?: boolean
 	diarizer_endpoint?: string | null
 	diarizer_reachable?: boolean | null
+	/** Epoch seconds live transcription started failing; null when healthy/idle. */
+	stt_degraded_since?: number | null
 }
 
 export interface InputDevice {

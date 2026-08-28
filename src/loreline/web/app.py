@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import os
+import threading
 import time
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
@@ -32,6 +35,7 @@ from loreline.secrets import SecretStore
 from loreline.services import ServiceManager
 from loreline.session import SessionManager
 from loreline.session.manager import BackendFactory, CaptureFactory, DiarizerFactory
+from loreline.session.recovery import recover_orphaned_indexes
 from loreline.settings import Settings, get_settings
 from loreline.updater import Autostart, Updater
 from loreline.updater.process import CommandRunner
@@ -189,11 +193,28 @@ def create_app(
         await state.db.connect()
         await state.sessions.mark_interrupted()
         await state.reprocess.reconcile()
+        # Rebuild index sidecars for recordings a dead process left behind, in
+        # the background - a multi-hour WAV takes minutes of VAD, and startup
+        # must not wait on it. The abort event lets shutdown cut it short
+        # (nothing partial is written; the sweep re-runs next boot).
+        recovery_abort = threading.Event()
+        recovery_task = asyncio.create_task(
+            recover_orphaned_indexes(
+                audio_store=state.audio_store,
+                sessions=state.sessions,
+                alerter=state.alerts,
+                abort=recovery_abort,
+                active_session_id=state.manager.current_session_id,
+            )
+        )
         app.state.ctx = state
         log.info("loreline.startup", version=__version__, environment=settings.environment)
         try:
             yield
         finally:
+            recovery_abort.set()
+            with contextlib.suppress(Exception):
+                await recovery_task
             await state.manager.stop()
             await state.reprocess.aclose()
             await state.db.close()

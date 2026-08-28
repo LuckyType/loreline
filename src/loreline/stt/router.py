@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 
@@ -39,6 +40,12 @@ class RouterConfig:
     timeout_s: float = 30.0
 
 
+# Consecutive utterances that produced no transcript (primary and fallback both
+# failing) before the session counts as degraded. One or two misses are routine
+# transient errors; a streak means transcription has actually stopped flowing.
+_DEGRADED_AFTER_FAILURES = 3
+
+
 class SttRouter:
     """Route utterances through STT backends with failover and diarization."""
 
@@ -58,6 +65,18 @@ class SttRouter:
         self._config = config
         self._diarizer = diarizer
         self._on_failover = on_failover
+        self._consecutive_failures = 0
+        self._degraded_since: float | None = None
+
+    @property
+    def degraded_since(self) -> float | None:
+        """Epoch time live transcription entered its current failing streak.
+
+        None while healthy. Set once a run of ``_DEGRADED_AFTER_FAILURES``
+        consecutive utterances produced no transcript at all (fallback
+        included); cleared by the next utterance that transcribes.
+        """
+        return self._degraded_since
 
     async def run(self, utterances: AsyncIterator[Utterance]) -> None:
         """Drive the live transcription loop until the stream ends."""
@@ -90,32 +109,64 @@ class SttRouter:
         return output
 
     async def _transcribe_with_failover(self, utterance: Utterance) -> list[TranscriptEvent]:
+        last_error = ""
         try:
-            return await asyncio.wait_for(
+            events = await asyncio.wait_for(
                 self._collect(self._primary, utterance), timeout=self._config.timeout_s
             )
         except Exception as exc:  # resilience: any backend error triggers fallback
+            last_error = f"{self._primary.config.name}: {exc}"
             log.warning(
                 "stt.primary.failed",
                 provider=self._primary.config.name,
                 provider_id=self._primary.config.id,
                 error=str(exc),
             )
-            await self._notify_failover(f"Primary STT {self._primary.config.name} failed: {exc}")
-        if self._fallback is None:
-            return []
-        try:
-            return await asyncio.wait_for(
-                self._collect(self._fallback, utterance), timeout=self._config.timeout_s
-            )
-        except Exception as exc:  # both backends failed; emit nothing for this utterance
-            log.error(
-                "stt.fallback.failed",
-                provider=self._fallback.config.name,
-                provider_id=self._fallback.config.id,
-                error=str(exc),
-            )
-            return []
+        else:
+            self._note_transcribed()
+            return events
+        if self._fallback is not None:
+            try:
+                events = await asyncio.wait_for(
+                    self._collect(self._fallback, utterance), timeout=self._config.timeout_s
+                )
+            except Exception as exc:  # both backends failed; emit nothing for this utterance
+                last_error = f"{self._fallback.config.name}: {exc}"
+                log.error(
+                    "stt.fallback.failed",
+                    provider=self._fallback.config.name,
+                    provider_id=self._fallback.config.id,
+                    error=str(exc),
+                )
+            else:
+                self._note_transcribed()
+                return events
+        await self._note_dropped(last_error)
+        return []
+
+    def _note_transcribed(self) -> None:
+        """An utterance produced a transcript; end any failing streak."""
+        if self._degraded_since is not None:
+            log.info("stt.recovered", failures=self._consecutive_failures)
+        self._consecutive_failures = 0
+        self._degraded_since = None
+
+    async def _note_dropped(self, error: str) -> None:
+        """An utterance produced no transcript at all; track the streak.
+
+        The push alert fires once, on the transition into degraded - not per
+        failure, which floods every configured channel when a backend stays
+        down for hours.
+        """
+        self._consecutive_failures += 1
+        if self._consecutive_failures != _DEGRADED_AFTER_FAILURES:
+            return
+        self._degraded_since = time.time()
+        log.error("stt.degraded", failures=self._consecutive_failures, error=error)
+        await self._notify_failover(
+            f"Live transcription is failing ({error}). "
+            "Audio keeps recording; the session can be re-transcribed later."
+        )
 
     async def _notify_failover(self, message: str) -> None:
         if self._on_failover is None:
