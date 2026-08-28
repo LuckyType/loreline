@@ -101,6 +101,8 @@ export interface Session {
 	audio_path: string | null
 	speaker_names: Record<string, string>
 	summary: string | null
+	summary_provider?: string | null
+	summary_model?: string | null
 }
 
 export interface SummarizeRequest {
@@ -171,6 +173,8 @@ export interface ReprocessJob {
 	session_id: string
 	provider_id: string
 	operation: 'transcribe' | 'diarize'
+	model?: string | null
+	target?: string
 	diarization: DiarizationConfig
 	status: JobStatusKind
 	created_at: number
@@ -186,6 +190,7 @@ export interface ReprocessRequest {
 	operation?: 'transcribe' | 'diarize'
 	diarization?: DiarizationConfig
 	model?: string | null
+	target?: string
 }
 
 export type ExportFormat = 'txt' | 'md' | 'srt' | 'vtt' | 'json'

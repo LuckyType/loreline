@@ -24,6 +24,7 @@ import type {
 	StartSessionRequest,
 	SummarizeRequest,
 	SummarizeResult,
+	TranscriptEvent,
 	UpdateResult,
 } from './types'
 
@@ -163,6 +164,10 @@ export const api = {
 	stopSession: () => request<Session>('/api/session/stop', { method: 'POST' }),
 	listSessions: () => request<Session[]>('/api/session'),
 	getSession: (id: string) => request<SessionDetail>(`/api/session/${id}`),
+	getTranscriptVersion: (id: string, version: string) =>
+		request<TranscriptEvent[]>(
+			`/api/session/${id}/transcript?version=${encodeURIComponent(version)}`,
+		),
 	setSpeakerNames: (id: string, names: Record<string, string>) =>
 		request<{ ok: boolean }>(`/api/session/${id}/speakers`, {
 			method: 'PUT',

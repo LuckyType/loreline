@@ -38,12 +38,15 @@ export function providerName(id: string | null | undefined, providers: ProviderC
 	return `${id.slice(0, 8)}…`
 }
 
-// A transcript segment's `source` is a provider id, the diarization tag, or
-// `reprocess:<provider id>` - see loreline.models.
+// A transcript segment's `source` is a provider id, a `diarize:<version>` tag,
+// or `reprocess:<job id>` - see loreline.models.
 export function sourceLabel(source: string, providers: ProviderConfig[]): string {
-	if (source === DIARIZE_SOURCE) return 'Diarization'
+	if (source === DIARIZE_SOURCE || source.startsWith(`${DIARIZE_SOURCE}:`)) return 'Diarization'
 	if (source.startsWith(REPROCESS_PREFIX)) {
-		return `${providerName(source.slice(REPROCESS_PREFIX.length), providers)} (re-run)`
+		const suffix = source.slice(REPROCESS_PREFIX.length)
+		// Legacy rows referenced the provider; current rows reference the job.
+		const provider = providers.find((p) => p.id === suffix)
+		return provider ? `${provider.name} (re-run)` : `re-run ${suffix.slice(0, 8)}`
 	}
 	return providerName(source, providers)
 }

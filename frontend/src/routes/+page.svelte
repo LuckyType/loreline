@@ -1,24 +1,24 @@
 <script lang="ts">
-import { onDestroy, onMount } from 'svelte'
-import { api, ApiError } from '$lib/api'
-import { confirm } from '$lib/confirm.svelte'
-import { health, logsWs, speakerColor, formatTime, transcriptWs } from '$lib/stores'
-import { connect, type LiveSocket } from '$lib/ws'
 import { ArrowDownToLine, ChevronDown, Filter, Trash2, WrapText } from '@lucide/svelte'
-import ModelPicker from '$lib/ModelPicker.svelte'
-import LogLine from '$lib/LogLine.svelte'
+import { onDestroy, onMount } from 'svelte'
+import { ApiError, api } from '$lib/api'
 import { Button } from '$lib/components/ui/button'
 import { Card, CardContent } from '$lib/components/ui/card'
 import { Input } from '$lib/components/ui/input'
 import { Label } from '$lib/components/ui/label'
+import { confirm } from '$lib/confirm.svelte'
 import Dropdown from '$lib/Dropdown.svelte'
-import { cn } from '$lib/utils'
+import LogLine from '$lib/LogLine.svelte'
+import ModelPicker from '$lib/ModelPicker.svelte'
+import { formatTime, health, logsWs, speakerColor, transcriptWs } from '$lib/stores'
 import type {
 	ActionDefaults,
-	ProviderConfig,
 	DiarizationModeKind,
+	ProviderConfig,
 	TranscriptEvent,
 } from '$lib/types'
+import { cn } from '$lib/utils'
+import { connect, type LiveSocket } from '$lib/ws'
 
 // --- session controls ---
 let providers = $state<ProviderConfig[]>([])
@@ -119,9 +119,7 @@ $effect(() => {
 	return () => clearInterval(timer)
 })
 
-const sessionElapsed = $derived(
-	sessionStartedAt === null ? null : nowMs / 1000 - sessionStartedAt,
-)
+const sessionElapsed = $derived(sessionStartedAt === null ? null : nowMs / 1000 - sessionStartedAt)
 
 // --- live transcript ---
 let txEvents = $state<TranscriptEvent[]>([])
@@ -289,7 +287,8 @@ onDestroy(() => {
 						<span class="size-2 rounded-full bg-emerald-500"></span>
 						<strong>Recording</strong>
 						<span class="text-muted-foreground">
-							{sessionElapsed === null ? '-' : formatTime(sessionElapsed)} · {providers.length} providers
+							{sessionElapsed === null ? '-' : formatTime(sessionElapsed)}
+							· {providers.length} providers
 						</span>
 					</span>
 					<Button variant="destructive" onclick={stop} disabled={busy}>Stop session</Button>
