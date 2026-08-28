@@ -115,6 +115,8 @@ export interface SummarizeResult {
 }
 
 export interface ActionDefaults {
+	stt_provider?: string
+	summarize_provider?: string
 	stt_model: string
 	diar_mode: string
 	diar_endpoint: string

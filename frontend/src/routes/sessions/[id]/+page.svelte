@@ -26,6 +26,7 @@ import {
 } from '$lib/components/ui/table'
 import { confirm } from '$lib/confirm.svelte'
 import Dropdown from '$lib/Dropdown.svelte'
+import Foldable from '$lib/Foldable.svelte'
 import ModelPicker from '$lib/ModelPicker.svelte'
 import { providerName } from '$lib/stores'
 import TranscriptList from '$lib/TranscriptList.svelte'
@@ -70,6 +71,30 @@ function exportAs(fmt: ExportFormat) {
 	exportOpen = false
 	window.location.href = api.exportUrl(id, fmt)
 }
+
+// Fold state of the page's sections, kept across visits (best effort).
+const SECTIONS_KEY = 'loreline.session-sections'
+
+function loadSections(): { table: boolean; transcript: boolean; summary: boolean } {
+	const fallback = { table: true, transcript: true, summary: true }
+	try {
+		const raw = localStorage.getItem(SECTIONS_KEY)
+		return raw ? { ...fallback, ...JSON.parse(raw) } : fallback
+	} catch {
+		return fallback
+	}
+}
+
+let sections = $state(loadSections())
+
+$effect(() => {
+	const serialized = JSON.stringify(sections)
+	try {
+		localStorage.setItem(SECTIONS_KEY, serialized)
+	} catch {
+		/* best effort */
+	}
+})
 
 // --- transcript versions ---
 // A session's transcript exists in versions: the original live capture plus
@@ -264,7 +289,11 @@ async function openSummarize() {
 	)
 		return
 	sumError = ''
-	if (!sumProvider) sumProvider = llmProviders[0]?.id ?? ''
+	if (!sumProvider) {
+		const wanted = defaults.summarize_provider
+		sumProvider =
+			wanted && llmProviders.some((p) => p.id === wanted) ? wanted : (llmProviders[0]?.id ?? '')
+	}
 	summarizeOpen = true
 }
 
@@ -361,201 +390,217 @@ onDestroy(() => {
 		<div class="border-t"></div>
 
 		<CardContent class="flex flex-col gap-3">
-			<Table>
-				<TableHeader>
-					<TableRow>
-						<TableHead>Transcript</TableHead><TableHead>Provider</TableHead
-						><TableHead>Model</TableHead><TableHead>Diarization</TableHead
-						><TableHead>Segments</TableHead><TableHead>Created</TableHead
-						><TableHead>Status</TableHead>
-					</TableRow>
-				</TableHeader>
-				<TableBody>
-					<TableRow
-						class="cursor-pointer hover:bg-accent/30 {selectedVersion === 'original'
+			<Foldable
+				title="Transcriptions"
+				meta="{transcribeJobs.length + 1} version{transcribeJobs.length === 0 ? '' : 's'}"
+				bind:open={sections.table}
+			>
+				<Table>
+					<TableHeader>
+						<TableRow>
+							<TableHead>Transcript</TableHead><TableHead>Provider</TableHead
+							><TableHead>Model</TableHead><TableHead>Diarization</TableHead
+							><TableHead>Segments</TableHead><TableHead>Created</TableHead
+							><TableHead>Status</TableHead>
+						</TableRow>
+					</TableHeader>
+					<TableBody>
+						<TableRow
+							class="cursor-pointer hover:bg-accent/30 {selectedVersion === 'original'
               ? 'bg-accent/50 [box-shadow:inset_2px_0_0_var(--color-primary)]'
               : ''}"
-						onclick={() => selectVersion('original')}
-					>
-						<TableCell><code>original</code></TableCell>
-						<TableCell>{providerName(detail.session.primary_provider, providers)}</TableCell>
-						<TableCell class="text-muted-foreground">-</TableCell>
-						<TableCell>{diarizeInfo('original')}</TableCell>
-						<TableCell>{detail.transcript.length}</TableCell>
-						<TableCell class="text-muted-foreground"
-							>{fmtWhen(detail.session.started_at)}</TableCell
+							onclick={() => selectVersion('original')}
 						>
-						<TableCell><Badge variant="outline">live</Badge></TableCell>
-					</TableRow>
-					{#each transcribeJobs as j (j.id)}
-						<TableRow
-							class="{selectable(j) ? 'cursor-pointer hover:bg-accent/30' : ''} {selectedVersion ===
+							<TableCell><code>original</code></TableCell>
+							<TableCell>{providerName(detail.session.primary_provider, providers)}</TableCell>
+							<TableCell class="text-muted-foreground">-</TableCell>
+							<TableCell>{diarizeInfo('original')}</TableCell>
+							<TableCell>{detail.transcript.length}</TableCell>
+							<TableCell class="text-muted-foreground"
+								>{fmtWhen(detail.session.started_at)}</TableCell
+							>
+							<TableCell><Badge variant="outline">live</Badge></TableCell>
+						</TableRow>
+						{#each transcribeJobs as j (j.id)}
+							<TableRow
+								class="{selectable(j) ? 'cursor-pointer hover:bg-accent/30' : ''} {selectedVersion ===
 							j.id
                 ? 'bg-accent/50 [box-shadow:inset_2px_0_0_var(--color-primary)]'
                 : ''}"
-							onclick={() => selectable(j) && selectVersion(j.id)}
-						>
-							<TableCell><code>{j.id.slice(0, 8)}</code></TableCell>
-							<TableCell>{providerName(j.provider_id, providers)}</TableCell>
-							<TableCell>{j.model ?? '-'}</TableCell>
-							<TableCell>{diarizeInfo(j.id)}</TableCell>
-							<TableCell>{j.segments_added}</TableCell>
-							<TableCell class="text-muted-foreground">{fmtWhen(j.created_at)}</TableCell>
-							<TableCell>
-								<Badge
-									title={j.error ?? undefined}
-									variant={j.status === 'error'
+								onclick={() => selectable(j) && selectVersion(j.id)}
+							>
+								<TableCell><code>{j.id.slice(0, 8)}</code></TableCell>
+								<TableCell>{providerName(j.provider_id, providers)}</TableCell>
+								<TableCell>{j.model ?? '-'}</TableCell>
+								<TableCell>{diarizeInfo(j.id)}</TableCell>
+								<TableCell>{j.segments_added}</TableCell>
+								<TableCell class="text-muted-foreground">{fmtWhen(j.created_at)}</TableCell>
+								<TableCell>
+									<Badge
+										title={j.error ?? undefined}
+										variant={j.status === 'error'
                     ? 'destructive'
                     : j.status === 'done'
                       ? 'secondary'
                       : 'outline'}
-								>
-									{j.status}
-								</Badge>
-							</TableCell>
-						</TableRow>
-					{/each}
-				</TableBody>
-			</Table>
-			{#if lastJobError?.error}
-				<p class="text-xs text-destructive">
-					Last failed job ({lastJobError.operation}): {lastJobError.error}
-				</p>
-			{/if}
-			{#if hasAudio}
-				<div class="flex flex-wrap items-center justify-end gap-2">
-					<span class="text-muted-foreground">New transcription</span>
-					<Dropdown
-						class="max-w-52"
-						bind:value={rpProvider}
-						options={providers.map((p) => ({ value: p.id, label: p.name }))}
-						placeholder="Provider"
-					/>
-					<ModelPicker
-						provider={rpSelectedProvider}
-						bind:value={rpModel}
-						defaultModel={defaults.stt_model}
-					/>
-					<Button variant="outline" onclick={reprocess} disabled={rpBusy || !rpProvider}>
-						{rpBusy ? 'Queuing…' : 'Re-process audio'}
-					</Button>
-				</div>
-			{:else}
-				<p class="text-muted-foreground">
-					No stored audio for this session - re-processing and diarization are unavailable.
-				</p>
-			{/if}
+									>
+										{j.status}
+									</Badge>
+								</TableCell>
+							</TableRow>
+						{/each}
+					</TableBody>
+				</Table>
+				{#if lastJobError?.error}
+					<p class="text-xs text-destructive">
+						Last failed job ({lastJobError.operation}): {lastJobError.error}
+					</p>
+				{/if}
+				{#if hasAudio}
+					<div class="flex flex-wrap items-center justify-end gap-2">
+						<span class="text-muted-foreground">New transcription</span>
+						<Dropdown
+							class="max-w-52"
+							bind:value={rpProvider}
+							options={providers.map((p) => ({ value: p.id, label: p.name }))}
+							placeholder="Provider"
+						/>
+						<ModelPicker
+							provider={rpSelectedProvider}
+							bind:value={rpModel}
+							defaultModel={defaults.stt_model}
+						/>
+						<Button variant="outline" onclick={reprocess} disabled={rpBusy || !rpProvider}>
+							{rpBusy ? 'Queuing…' : 'Re-process audio'}
+						</Button>
+					</div>
+				{:else}
+					<p class="text-muted-foreground">
+						No stored audio for this session - re-processing and diarization are unavailable.
+					</p>
+				{/if}
+			</Foldable>
 		</CardContent>
 
 		<div class="border-t"></div>
 
 		<CardContent class="flex flex-col gap-3">
-			<div
-				class="flex flex-wrap items-center justify-between gap-3 rounded-md bg-accent/40 px-3 py-2.5"
+			<Foldable
+				title="Transcript"
+				meta="{selectedVersion === 'original'
+					? 'original'
+					: selectedVersion.slice(0, 8)} · {shownEvents.length} segments"
+				bind:open={sections.transcript}
 			>
-				<div class="flex flex-wrap items-center gap-x-4 gap-y-1">
-					<span
-						>Transcript
-						<code
-							>{selectedVersion === 'original' ? 'original' : selectedVersion.slice(0, 8)}</code
-						></span
-					>
-					<span><span class="text-muted-foreground">Provider</span> {selectedProviderName}</span>
-					<span><span class="text-muted-foreground">Model</span> {selectedModel}</span>
-					{#if diarizeJob}
+				<div
+					class="flex flex-wrap items-center justify-between gap-3 rounded-md bg-accent/40 px-3 py-2.5"
+				>
+					<div class="flex flex-wrap items-center gap-x-4 gap-y-1">
 						<span
-							><span class="text-muted-foreground">Diarized with</span>
-							{diarizerLabel(diarizeJob)}</span
+							>Transcript
+							<code
+								>{selectedVersion === 'original' ? 'original' : selectedVersion.slice(0, 8)}</code
+							></span
 						>
-					{:else}
-						<span class="text-muted-foreground">Not diarized</span>
-					{/if}
-					<span><span class="text-muted-foreground">Segments</span> {shownEvents.length}</span>
-				</div>
-				<div class="flex flex-wrap items-center gap-2">
-					{#if hasAudio}
-						<Dropdown
-							class="max-w-52"
-							bind:value={rpDiarKind}
-							options={[
+						<span><span class="text-muted-foreground">Provider</span> {selectedProviderName}</span>
+						<span><span class="text-muted-foreground">Model</span> {selectedModel}</span>
+						{#if diarizeJob}
+							<span
+								><span class="text-muted-foreground">Diarized with</span>
+								{diarizerLabel(diarizeJob)}</span
+							>
+						{:else}
+							<span class="text-muted-foreground">Not diarized</span>
+						{/if}
+						<span><span class="text-muted-foreground">Segments</span> {shownEvents.length}</span>
+					</div>
+					<div class="flex flex-wrap items-center gap-2">
+						{#if hasAudio}
+							<Dropdown
+								class="max-w-52"
+								bind:value={rpDiarKind}
+								options={[
                 { value: 'remote', label: 'sherpa-onnx' },
                 { value: 'openai', label: 'gpt-4o-transcribe-diarize' }
               ]}
-						/>
-						{#if rpDiarKind === 'remote'}
-							<Input class="max-w-48" placeholder="http://…:8001" bind:value={rpDiarEndpoint} />
+							/>
+							{#if rpDiarKind === 'remote'}
+								<Input class="max-w-48" placeholder="http://…:8001" bind:value={rpDiarEndpoint} />
+							{/if}
+							<Input
+								class="max-w-20"
+								type="number"
+								min="1"
+								placeholder="min"
+								bind:value={rpDiarMin}
+							/>
+							<Input
+								class="max-w-20"
+								type="number"
+								min="1"
+								placeholder="max"
+								bind:value={rpDiarMax}
+							/>
+							<Button
+								variant="outline"
+								size="sm"
+								onclick={diarizeSession}
+								disabled={rpBusy}
+								title="Diarizes the full session audio and relabels the selected transcription; re-running replaces its previous diarization."
+							>
+								Diarize
+							</Button>
+							<div class="h-5 w-px bg-border"></div>
 						{/if}
-						<Input
-							class="max-w-20"
-							type="number"
-							min="1"
-							placeholder="min"
-							bind:value={rpDiarMin}
-						/>
-						<Input
-							class="max-w-20"
-							type="number"
-							min="1"
-							placeholder="max"
-							bind:value={rpDiarMax}
-						/>
 						<Button
 							variant="outline"
 							size="sm"
-							onclick={diarizeSession}
-							disabled={rpBusy}
-							title="Diarizes the full session audio and relabels the selected transcription; re-running replaces its previous diarization."
+							onclick={openRename}
+							disabled={speakers.length === 0}
 						>
-							Diarize
+							Rename speakers
 						</Button>
-						<div class="h-5 w-px bg-border"></div>
-					{/if}
-					<Button variant="outline" size="sm" onclick={openRename} disabled={speakers.length === 0}>
-						Rename speakers
-					</Button>
+					</div>
 				</div>
-			</div>
-			<TranscriptList
-				events={shownEvents}
-				names={detail.session.speaker_names}
-				{providers}
-				showSource={selectedVersion === 'original'}
-			/>
+				<TranscriptList
+					events={shownEvents}
+					names={detail.session.speaker_names}
+					{providers}
+					showSource={selectedVersion === 'original'}
+				/>
+			</Foldable>
 		</CardContent>
 
 		<div class="border-t"></div>
 
 		<CardContent class="flex flex-col gap-2">
-			<div class="flex items-center justify-between">
-				<div class="flex flex-wrap items-baseline gap-x-2">
-					<h3 class="m-0 font-medium">Summary</h3>
-					{#if detail.session.summary && detail.session.summary_model}
-						<span class="text-xs text-muted-foreground">
-							{providerName(detail.session.summary_provider, providers)}
-							·
-							{detail.session
-								.summary_model}
-						</span>
-					{/if}
+			<Foldable
+				title="Summary"
+				meta={detail.session.summary && detail.session.summary_model
+					? `${providerName(detail.session.summary_provider, providers)} · ${detail.session.summary_model}`
+					: ''}
+				bind:open={sections.summary}
+			>
+				{#if detail.session.summary}
+					<p class="m-0 leading-relaxed whitespace-pre-wrap">{detail.session.summary}</p>
+				{:else if llmProviders.length === 0}
+					<p class="m-0 text-muted-foreground">
+						Add an LLM provider (OpenAI-compatible chat) in Settings to enable summaries.
+					</p>
+				{:else}
+					<p class="m-0 text-muted-foreground">Not summarized yet.</p>
+				{/if}
+				<div class="flex justify-end">
+					<Button
+						variant="outline"
+						size="sm"
+						onclick={openSummarize}
+						disabled={llmProviders.length === 0}
+					>
+						{detail.session.summary ? 'Re-summarize' : 'Summarize'}
+					</Button>
 				</div>
-				<Button
-					variant="outline"
-					size="sm"
-					onclick={openSummarize}
-					disabled={llmProviders.length === 0}
-				>
-					{detail.session.summary ? 'Re-summarize' : 'Summarize'}
-				</Button>
-			</div>
-			{#if detail.session.summary}
-				<p class="m-0 leading-relaxed whitespace-pre-wrap">{detail.session.summary}</p>
-			{:else if llmProviders.length === 0}
-				<p class="m-0 text-muted-foreground">
-					Add an LLM provider (OpenAI-compatible chat) in Settings to enable summaries.
-				</p>
-			{:else}
-				<p class="m-0 text-muted-foreground">Not summarized yet.</p>
-			{/if}
+			</Foldable>
 		</CardContent>
 	</Card>
 {/if}

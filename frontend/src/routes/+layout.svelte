@@ -1,18 +1,41 @@
 <script lang="ts">
 import '../app.css'
-import { onMount, onDestroy } from 'svelte'
-import { page } from '$app/stores'
-import { goto } from '$app/navigation'
-import { api, ApiError } from '$lib/api'
-import { health, authed, transcriptWs, logsWs } from '$lib/stores'
-import { Button } from '$lib/components/ui/button'
-import { Badge } from '$lib/components/ui/badge'
-import ConfirmDialog from '$lib/ConfirmDialog.svelte'
+import { PanelLeft } from '@lucide/svelte'
 import type { Snippet } from 'svelte'
+import { onDestroy, onMount } from 'svelte'
+import { goto } from '$app/navigation'
+import { page } from '$app/stores'
+import { ApiError, api } from '$lib/api'
+import ConfirmDialog from '$lib/ConfirmDialog.svelte'
+import { Badge } from '$lib/components/ui/badge'
+import { Button } from '$lib/components/ui/button'
+import { authed, health, logsWs, transcriptWs } from '$lib/stores'
 
 let { children }: { children: Snippet } = $props()
 
 let timer: ReturnType<typeof setInterval> | null = null
+
+// Sidebar fold state, kept across visits (best effort - private windows etc.).
+const NAV_KEY = 'loreline.nav-collapsed'
+
+function loadNavCollapsed(): boolean {
+	try {
+		return localStorage.getItem(NAV_KEY) === '1'
+	} catch {
+		return false
+	}
+}
+
+let navCollapsed = $state(loadNavCollapsed())
+
+function toggleNav() {
+	navCollapsed = !navCollapsed
+	try {
+		localStorage.setItem(NAV_KEY, navCollapsed ? '1' : '0')
+	} catch {
+		/* best effort */
+	}
+}
 
 const nav = [
 	{ href: '/', label: 'Dashboard' },
@@ -72,6 +95,14 @@ function hms(seconds: number | undefined): string {
 {:else}
 	<div class="flex min-h-screen flex-col">
 		<header class="flex items-center gap-4 border-b bg-card px-5 py-3">
+			<Button
+				variant="ghost"
+				size="icon-sm"
+				onclick={toggleNav}
+				aria-label={navCollapsed ? 'Show navigation' : 'Hide navigation'}
+			>
+				<PanelLeft class="size-4" />
+			</Button>
 			<div class="flex items-baseline gap-2">
 				<strong>Loreline</strong>
 				<span class="text-muted-foreground">{$health?.version ?? ''}</span>
@@ -152,19 +183,21 @@ function hms(seconds: number | undefined): string {
 			</div>
 			<Button variant="outline" size="sm" onclick={logout}>Logout</Button>
 		</header>
-		<div class="grid flex-1 grid-cols-[200px_1fr]">
-			<nav class="flex flex-col gap-1 border-r bg-card p-3">
-				{#each nav as item (item.href)}
-					<a
-						href={item.href}
-						class="rounded-lg px-3 py-2 hover:bg-accent {isActiveNavItem(item.href)
-              ? 'bg-accent font-medium'
-              : ''}"
-					>
-						{item.label}
-					</a>
-				{/each}
-			</nav>
+		<div class="grid flex-1 {navCollapsed ? 'grid-cols-1' : 'grid-cols-[200px_1fr]'}">
+			{#if !navCollapsed}
+				<nav class="flex flex-col gap-1 border-r bg-card p-3">
+					{#each nav as item (item.href)}
+						<a
+							href={item.href}
+							class="rounded-lg px-3 py-2 hover:bg-accent {isActiveNavItem(item.href)
+                ? 'bg-accent font-medium'
+                : ''}"
+						>
+							{item.label}
+						</a>
+					{/each}
+				</nav>
+			{/if}
 			<main class="overflow-auto p-6">
 				{@render children()}
 			</main>
