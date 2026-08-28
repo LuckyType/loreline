@@ -127,3 +127,64 @@
 		@apply font-sans;
 	}
 }
+
+/* Magic Bento card glow (adapted from svelte-bits' Magic Bento): a masked
+   radial gradient rings each card, following the cursor; intensity is driven
+   per card by src/lib/magicBento.ts via the --glow-* variables. */
+[data-slot="card"] {
+	position: relative;
+	--glow-x: 50%;
+	--glow-y: 50%;
+	--glow-intensity: 0;
+	--glow-radius: 300px;
+	--glow-rgb: 99 102 241;
+}
+[data-slot="card"]::after {
+	content: "";
+	position: absolute;
+	inset: 0;
+	padding: 3px;
+	background: radial-gradient(
+		var(--glow-radius) circle at var(--glow-x) var(--glow-y),
+		rgb(var(--glow-rgb) / calc(var(--glow-intensity) * 0.8)) 0%,
+		rgb(var(--glow-rgb) / calc(var(--glow-intensity) * 0.4)) 30%,
+		transparent 60%
+	);
+	border-radius: inherit;
+	-webkit-mask:
+		linear-gradient(#fff 0 0) content-box,
+		linear-gradient(#fff 0 0);
+	-webkit-mask-composite: xor;
+	mask:
+		linear-gradient(#fff 0 0) content-box,
+		linear-gradient(#fff 0 0);
+	mask-composite: exclude;
+	pointer-events: none;
+	z-index: 1;
+}
+
+.magic-particle {
+	position: absolute;
+	width: 4px;
+	height: 4px;
+	border-radius: 50%;
+	background: rgb(var(--glow-rgb, 99 102 241));
+	box-shadow: 0 0 6px rgb(var(--glow-rgb, 99 102 241) / 0.6);
+	pointer-events: none;
+	opacity: 0;
+	z-index: 100;
+}
+
+.magic-spotlight {
+	position: fixed;
+	width: 800px;
+	height: 800px;
+	border-radius: 50%;
+	pointer-events: none;
+	transform: translate(-50%, -50%);
+	mix-blend-mode: screen;
+	opacity: 0;
+	transition: opacity 0.3s ease;
+	/* Below dialogs/popovers (z-50 and up) - the glow must never wash over a modal. */
+	z-index: 30;
+}

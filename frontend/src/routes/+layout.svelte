@@ -9,6 +9,7 @@ import { ApiError, api } from '$lib/api'
 import ConfirmDialog from '$lib/ConfirmDialog.svelte'
 import { Badge } from '$lib/components/ui/badge'
 import { Button } from '$lib/components/ui/button'
+import { initMagicBento } from '$lib/magicBento'
 import { authed, health, logsWs, transcriptWs } from '$lib/stores'
 
 let { children }: { children: Snippet } = $props()
@@ -66,11 +67,17 @@ async function logout() {
 	goto('/login')
 }
 
+let magicCleanup: (() => void) | null = null
+
 onMount(() => {
 	poll()
 	timer = setInterval(poll, 5000)
+	magicCleanup = initMagicBento()
 })
-onDestroy(() => timer && clearInterval(timer))
+onDestroy(() => {
+	if (timer) clearInterval(timer)
+	magicCleanup?.()
+})
 
 const healthColor = $derived(
 	$health == null ? 'bg-amber-500' : $health.status === 'ok' ? 'bg-emerald-500' : 'bg-red-500',
