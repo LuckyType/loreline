@@ -18,10 +18,12 @@ from typing import TYPE_CHECKING, Self
 from loreline.audio.chunker import Utterance
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from types import TracebackType
 
 _SAMPLE_WIDTH = 2  # 16-bit
 _CHANNELS = 1
+_COPY_CHUNK_FRAMES = 65536
 
 
 class SessionAudioWriter:
@@ -121,6 +123,74 @@ class AudioStore:
             self.index_path(session_id),
             sample_rate=sample_rate,
         )
+
+    def duration_s(self, session_id: str) -> float:
+        """Length of the stored continuous WAV in seconds."""
+        with wave.open(str(self.wav_path(session_id)), "rb") as wav:
+            rate = wav.getframerate()
+            return wav.getnframes() / rate if rate else 0.0
+
+    def merge(self, source_ids: Sequence[str], dest_id: str) -> None:
+        """Concatenate the sources' WAVs + utterance indexes into ``dest_id``.
+
+        Parts are appended in the given order. Utterance timestamps in the
+        merged index are derived from audio position (frame offsets), so the
+        merged WAV, its index, and a back-to-back-merged transcript line up
+        regardless of the sources' original capture clocks. Every source must
+        have stored audio at one shared sample rate; raises ``ValueError``
+        otherwise (and never leaves partial output behind).
+        """
+        rates: list[int] = []
+        for sid in source_ids:
+            if not self.exists(sid):
+                msg = f"session {sid!r} has no stored audio"
+                raise ValueError(msg)
+            with wave.open(str(self.wav_path(sid)), "rb") as wav:
+                rates.append(wav.getframerate())
+        if len(set(rates)) != 1:
+            msg = f"sources mix sample rates {sorted(set(rates))}"
+            raise ValueError(msg)
+        sample_rate = rates[0]
+
+        merged_entries: list[dict[str, float | int]] = []
+        frames_total = 0
+        try:
+            with wave.open(str(self.wav_path(dest_id)), "wb") as out:
+                out.setnchannels(_CHANNELS)
+                out.setsampwidth(_SAMPLE_WIDTH)
+                out.setframerate(sample_rate)
+                for sid in source_ids:
+                    with wave.open(str(self.wav_path(sid)), "rb") as src:
+                        part_frames = src.getnframes()
+                        while chunk := src.readframes(_COPY_CHUNK_FRAMES):
+                            out.writeframes(chunk)
+                    index = json.loads(self.index_path(sid).read_text())
+                    entries: list[dict[str, float | int]] = index["utterances"]
+                    for entry in entries:
+                        offset_frames = frames_total + int(entry["offset_frames"])
+                        n_frames = int(entry["n_frames"])
+                        merged_entries.append(
+                            {
+                                "start": offset_frames / sample_rate,
+                                "end": (offset_frames + n_frames) / sample_rate,
+                                "offset_frames": offset_frames,
+                                "n_frames": n_frames,
+                            }
+                        )
+                    frames_total += part_frames
+            self.index_path(dest_id).write_text(
+                json.dumps(
+                    {
+                        "sample_rate": sample_rate,
+                        "channels": _CHANNELS,
+                        "utterances": merged_entries,
+                    },
+                    indent=2,
+                )
+            )
+        except Exception:
+            self.delete(dest_id)
+            raise
 
     def read_wav(self, session_id: str) -> tuple[bytes, int]:
         """Return the full continuous session WAV bytes + its sample rate."""

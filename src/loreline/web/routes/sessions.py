@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 
 from fastapi import APIRouter, Depends, Request
@@ -224,11 +225,13 @@ async def delete_sessions(request: Request, body: SessionIds) -> OkResponse:
 
 @router.post("/merge")
 async def merge_sessions(request: Request, body: SessionIds) -> Session:
-    """Merge the selected sessions' transcripts into a new session.
+    """Merge the selected sessions' transcripts - and audio - into a new session.
 
     Parts are concatenated oldest-first, each part's timestamps offset so they run
-    back-to-back; speaker rename maps are unioned. Originals are left intact (audio
-    is not merged, so the new session has no stored WAV).
+    back-to-back; speaker rename maps are unioned; originals are left intact. When
+    every source has stored audio (at one shared sample rate), the WAVs and
+    utterance indexes are concatenated too, so the merged session can be
+    re-processed, re-diarized, and downloaded like any other.
     """
     state = get_state(request)
     sources = [s for s in [await state.sessions.get(i) for i in body.ids] if s is not None]
@@ -237,6 +240,20 @@ async def merge_sessions(request: Request, body: SessionIds) -> Session:
     sources.sort(key=lambda s: s.started_at)
 
     merged_id = uuid.uuid4().hex
+
+    def _merge_audio() -> list[float] | None:
+        """Concatenate source audio; per-part durations, or None when impossible."""
+        if not all(state.audio_store.exists(s.id) for s in sources):
+            return None
+        try:
+            state.audio_store.merge([s.id for s in sources], merged_id)
+        except ValueError:  # e.g. mixed sample rates - merge the transcripts only
+            return None
+        return [state.audio_store.duration_s(s.id) for s in sources]
+
+    # Blocking file I/O (copying whole session WAVs) off the event loop.
+    durations = await asyncio.to_thread(_merge_audio)
+
     merged = Session(
         id=merged_id,
         status=SessionStatus.COMPLETED,
@@ -244,17 +261,23 @@ async def merge_sessions(request: Request, body: SessionIds) -> Session:
         campaign_id=sources[0].campaign_id,
         primary_provider=sources[0].primary_provider,
         diarization=sources[0].diarization,
+        audio_path=str(state.audio_store.wav_path(merged_id)) if durations is not None else None,
     )
     await state.sessions.create(merged)
 
     names: dict[str, str] = {}
     offset = 0.0
-    for src in sources:
+    for i, src in enumerate(sources):
         events = canonical_transcript(await state.transcripts.for_session(src.id))
         for event in events:
             shifted = rebase_transcript(event, -offset)  # negative offset shifts forward
             await state.transcripts.add(shifted.model_copy(update={"session_id": merged_id}))
-        offset += max((event.end_ts for event in events), default=0.0)
+        if durations is not None:
+            # With merged audio, parts advance by their audio length so the
+            # transcript stays aligned with the concatenated WAV.
+            offset += durations[i]
+        else:
+            offset += max((event.end_ts for event in events), default=0.0)
         for label, name in src.speaker_names.items():
             names.setdefault(label, name)
     if names:

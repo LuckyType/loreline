@@ -234,6 +234,63 @@ async def test_start_disabled_provider_conflicts(session_client: AsyncClient) ->
     assert "disabled" in resp.json()["detail"]
 
 
+async def test_merge_concatenates_audio(tmp_path: Path) -> None:
+    """Merging sessions that all have stored audio also merges the WAVs, so
+    the merged session stays re-processable and downloadable."""
+    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t")
+    app = create_app(
+        settings,
+        capture_factory=capture_factory,  # type: ignore[arg-type]
+        backend_factory=FakeBackend,  # type: ignore[arg-type]
+        diarizer_factory=lambda _cfg: FakeDiarizer(),
+    )
+    async with LifespanManager(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                "/api/providers",
+                json={"name": "Fake", "kind": "openai_compat", "protocol": "http_batch"},
+            )
+            pid = resp.json()["id"]
+
+            ids: list[str] = []
+            for _ in range(2):
+                start = await client.post("/api/session/start", json={"primary_provider": pid})
+                ids.append(start.json()["id"])
+                await client.post("/api/session/stop")
+
+            ctx = app.state.ctx  # pyright: ignore[reportAny]
+            store = ctx.audio_store
+            part_durations = [store.duration_s(i) for i in ids]
+            part_counts = [len(store.read_utterances(i)) for i in ids]
+
+            merged = (await client.post("/api/session/merge", json={"ids": ids})).json()
+            assert merged["audio_path"]
+
+            # The merged WAV is the parts back to back, and the merged index
+            # carries every utterance with the later part shifted past the
+            # first part's audio.
+            assert abs(store.duration_s(merged["id"]) - sum(part_durations)) < 1e-6
+            utterances = store.read_utterances(merged["id"])
+            assert len(utterances) == sum(part_counts)
+            assert utterances[part_counts[0]].start >= part_durations[0]
+
+            audio = await client.get(f"/api/session/{merged['id']}/audio")
+            assert audio.status_code == 200
+            assert audio.content[:4] == b"RIFF"
+
+            # ...which makes the merged session re-processable end to end.
+            enqueue = await client.post(
+                "/api/reprocess", json={"session_id": merged["id"], "provider_id": pid}
+            )
+            assert enqueue.status_code == 202
+            job_id = enqueue.json()["id"]
+            await ctx.reprocess.wait(job_id)
+            job = (await client.get(f"/api/reprocess/{job_id}")).json()
+            assert job["status"] == "done"
+            assert int(job["segments_added"]) == len(utterances)
+
+
 async def test_merge_and_delete_sessions(tmp_path: Path) -> None:
     settings = Settings(data_dir=tmp_path / "d", auth_password="", jwt_secret="t")
     app = create_app(settings)
