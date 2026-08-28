@@ -11,13 +11,13 @@ Docs: https://developers.deepgram.com/docs/streaming
 
 from __future__ import annotations
 
-import contextlib
+import asyncio
 import json
 from collections.abc import AsyncIterator
 from urllib.parse import urlencode
 
-from websockets.asyncio.client import ClientConnection, connect
-from websockets.exceptions import WebSocketException
+from websockets.asyncio.client import connect
+from websockets.exceptions import ConnectionClosedOK, WebSocketException
 
 from loreline.audio.chunker import Utterance
 from loreline.logging import get_logger
@@ -39,6 +39,9 @@ log = get_logger(__name__)
 
 _DEFAULT_URL = "wss://api.deepgram.com/v1/listen"
 _DEFAULT_MODEL = "nova-2"
+# Safety net per received frame; CloseStream -> Metadata is the real
+# end-of-flush signal, and results stream back within a couple of seconds.
+_RECV_TIMEOUT_S = 10.0
 
 
 class DeepgramBackend:
@@ -56,7 +59,6 @@ class DeepgramBackend:
         self._language = language or config.language
         self._model = config.model or _DEFAULT_MODEL
         self._url = config.base_url or _DEFAULT_URL
-        self._ws: ClientConnection | None = None
 
     def _build_url(self, glossary: Glossary | None) -> str:
         params: list[tuple[str, str]] = [
@@ -88,44 +90,39 @@ class DeepgramBackend:
             if event is not None:
                 yield event
 
-    async def _ensure_ws(self, url: str) -> ClientConnection:
-        """Open the live-transcription stream once and reuse it across utterances.
-
-        Each utterance is flushed with a ``Finalize`` control message (which forces
-        the final transcript but keeps the socket open), so the whole session runs
-        on one connection instead of a fresh WebSocket handshake per utterance.
-        """
-        if self._ws is None:
-            self._ws = await connect(url, additional_headers=self._headers)
-        return self._ws
-
-    async def _reset_ws(self) -> None:
-        ws, self._ws = self._ws, None
-        if ws is not None:
-            with contextlib.suppress(Exception):
-                await ws.close()
-
     async def _transcribe_one(
         self, url: str, utterance: Utterance, *, session_id: str
     ) -> TranscriptEvent | None:
+        # One connection per utterance, closed with CloseStream: that is the
+        # only flush signal Deepgram defines unconditionally - the server
+        # finalizes buffered audio, streams the remaining final Results, then
+        # Metadata and a clean close. (A shared stream flushed with Finalize
+        # has no such guarantee: the from_finalize ack is conditional and can
+        # arrive seconds late, where it poisons the next utterance's reads.)
+        # Deepgram's own endpointing splits one utterance into several final
+        # Results frames, and the first is routinely a near-silent lead-in
+        # with an empty transcript - accumulate them all, not just the first.
+        parts: list[str] = []
         words: list[Word] = []
-        transcript = ""
-        try:
-            ws = await self._ensure_ws(url)
+        async with connect(url, additional_headers=self._headers) as ws:
             await ws.send(utterance.pcm)
-            await ws.send(json.dumps({"type": "Finalize"}))
-            async for raw in ws:
+            await ws.send(json.dumps({"type": "CloseStream"}))
+            while True:
+                try:
+                    async with asyncio.timeout(_RECV_TIMEOUT_S):
+                        raw = await ws.recv()
+                except (TimeoutError, ConnectionClosedOK):
+                    break
                 message = as_dict(raw)
                 kind = get_str(message, "type")
-                if kind == "Results":
-                    if get_bool(message, "is_final"):  # flushed final for this utterance
-                        transcript, words = _parse_results(message, offset=utterance.start)
-                        break
+                if kind == "Results" and get_bool(message, "is_final"):
+                    text, more = _parse_results(message, offset=utterance.start)
+                    if text:
+                        parts.append(text)
+                    words.extend(more)
                 elif kind in {"Metadata", "Close"}:
                     break
-        except (OSError, WebSocketException):
-            await self._reset_ws()  # drop the dead stream; the next utterance reconnects
-            raise
+        transcript = " ".join(parts)
         if not transcript:
             return None
         speaker = words[0].speaker if words else None
@@ -148,11 +145,7 @@ class DeepgramBackend:
             return False
 
     async def aclose(self) -> None:
-        ws = self._ws
-        if ws is not None:
-            with contextlib.suppress(Exception):
-                await ws.send(json.dumps({"type": "CloseStream"}))
-        await self._reset_ws()
+        """Nothing is held between utterances (one connection per utterance)."""
 
 
 def _parse_results(message: dict[str, object], *, offset: float) -> tuple[str, list[Word]]:

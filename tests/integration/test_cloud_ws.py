@@ -64,7 +64,9 @@ async def test_deepgram_streaming_with_diarization() -> None:
     event = events[0]
     assert event.is_final
     assert event.source == "dg-1"
-    assert "deepgram mock" in event.text
+    # all finals of the flush accumulated (empty lead-in dropped, both content
+    # splits kept), not just the first frame.
+    assert event.text == "deepgram mock 1600 samples"
     assert event.start_ts == 10.0
     # inline diarization: distinct speakers, offset applied to word timings.
     assert {w.speaker for w in event.words} == {"Speaker 0", "Speaker 1"}
@@ -89,13 +91,34 @@ async def test_assemblyai_streaming_with_diarization() -> None:
     assert len(events) == 1
     event = events[0]
     assert event.is_final
-    assert "assemblyai mock" in event.text
+    # both turns of the flush accumulated (not just the first), and turn 0's
+    # formatted duplicate deduplicated by turn_order (not counted twice).
+    assert event.text == "assemblyai mock 1600 samples"
     assert {w.speaker for w in event.words} == {"Speaker A", "Speaker B"}
     # ms -> s conversion plus utterance offset.
     assert event.words[0].start >= 10.0
 
 
-async def test_deepgram_reuses_one_connection() -> None:
+async def test_assemblyai_rechunks_long_utterances() -> None:
+    # The v3 endpoint rejects any single audio message outside 50-1000 ms
+    # (the mock enforces it with close code 3007, like the real service), so a
+    # 5 s utterance only survives if the backend re-chunks it before sending.
+    async def _long_utterance() -> AsyncIterator[Utterance]:
+        yield Utterance(pcm=b"\x01\x00" * 80000, start=0.0, end=5.0)
+
+    async with serve(assemblyai_handler, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        backend = AssemblyAIBackend(_aai_config(port), api_key="secret")
+        events = [e async for e in backend.transcribe(_long_utterance(), session_id="s1")]
+
+    assert len(events) == 1
+    assert events[0].text == "assemblyai mock 80000 samples"
+
+
+async def test_deepgram_one_connection_per_utterance() -> None:
+    # Deliberate: CloseStream -> Metadata is Deepgram's only unconditional
+    # flush signal, so every utterance gets its own connection - reusing one
+    # stream leaks late frames into the next utterance's reads.
     connections = 0
 
     async def counting(ws: ServerConnection) -> None:
@@ -110,10 +133,13 @@ async def test_deepgram_reuses_one_connection() -> None:
         await backend.aclose()
 
     assert len(events) == 2
-    assert connections == 1  # one WebSocket served both utterances (no per-utterance churn)
+    assert events[0].text == events[1].text == "deepgram mock 1600 samples"
+    assert connections == 2
 
 
-async def test_assemblyai_reuses_one_connection() -> None:
+async def test_assemblyai_one_session_per_utterance() -> None:
+    # Deliberate: Terminate -> Termination is the v3 protocol's only
+    # end-of-flush signal, so every utterance gets its own session.
     connections = 0
 
     async def counting(ws: ServerConnection) -> None:
@@ -128,7 +154,8 @@ async def test_assemblyai_reuses_one_connection() -> None:
         await backend.aclose()
 
     assert len(events) == 2
-    assert connections == 1
+    assert events[0].text == events[1].text == "assemblyai mock 1600 samples"
+    assert connections == 2
 
 
 async def test_deepgram_health_ok() -> None:

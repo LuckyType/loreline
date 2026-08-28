@@ -3,21 +3,21 @@
 AssemblyAI's v3 streaming endpoint accepts raw PCM (s16le) over a WebSocket and
 returns ``Turn`` messages containing the running transcript and per-word data;
 a turn with ``end_of_turn=true`` marks a completed segment. Each utterance is
-streamed and terminated, and the final formatted turn is emitted as one
-``TranscriptEvent``.
+streamed on its own session, closed with ``Terminate``, and its completed
+turns are emitted as one ``TranscriptEvent``.
 
 Docs: https://www.assemblyai.com/docs/speech-to-text/universal-streaming
 """
 
 from __future__ import annotations
 
-import contextlib
+import asyncio
 import json
 from collections.abc import AsyncIterator
 from urllib.parse import urlencode
 
-from websockets.asyncio.client import ClientConnection, connect
-from websockets.exceptions import WebSocketException
+from websockets.asyncio.client import connect
+from websockets.exceptions import ConnectionClosedOK, WebSocketException
 
 from loreline.audio.chunker import Utterance
 from loreline.logging import get_logger
@@ -39,6 +39,15 @@ log = get_logger(__name__)
 
 _DEFAULT_URL = "wss://streaming.assemblyai.com/v3/ws"
 _MS_PER_S = 1000.0
+# The v3 endpoint rejects any single audio message outside 50-1000 ms (close
+# code 3007), so utterances are re-chunked before sending.
+_CHUNK_MS = 800
+_MIN_CHUNK_MS = 50
+# Safety net per received frame; the protocol's own Termination reply is the
+# real end-of-flush signal, and partial-turn updates keep arriving every few
+# seconds while the server is still transcribing, so a healthy session never
+# goes quiet this long.
+_RECV_TIMEOUT_S = 15.0
 
 
 class AssemblyAIBackend:
@@ -49,7 +58,6 @@ class AssemblyAIBackend:
         self._api_key = api_key
         self._language = config.language
         self._url = config.base_url or _DEFAULT_URL
-        self._ws: ClientConnection | None = None
 
     def _build_url(self, glossary: Glossary | None) -> str:
         params: list[tuple[str, str]] = [
@@ -80,45 +88,41 @@ class AssemblyAIBackend:
             if event is not None:
                 yield event
 
-    async def _ensure_ws(self, url: str) -> ClientConnection:
-        """Open the streaming session once and reuse it across utterances.
-
-        Each utterance is closed out with a ``ForceEndpoint`` control message
-        (which ends the current turn but keeps the session open), so the whole
-        session runs on one connection rather than reconnecting per utterance.
-        ``Terminate`` is reserved for ``aclose`` (it ends the billable session).
-        """
-        if self._ws is None:
-            self._ws = await connect(url, additional_headers=self._headers)
-        return self._ws
-
-    async def _reset_ws(self) -> None:
-        ws, self._ws = self._ws, None
-        if ws is not None:
-            with contextlib.suppress(Exception):
-                await ws.close()
-
     async def _transcribe_one(
         self, url: str, utterance: Utterance, *, session_id: str
     ) -> TranscriptEvent | None:
-        transcript = ""
-        words: list[Word] = []
-        try:
-            ws = await self._ensure_ws(url)
-            await ws.send(utterance.pcm)
-            await ws.send(json.dumps({"type": "ForceEndpoint"}))
-            async for raw in ws:
+        # One session per utterance, closed with Terminate: that is the only
+        # flush signal the v3 protocol defines - the server transcribes
+        # everything it received (possibly as several end-of-turn messages),
+        # then answers with Termination. (Reusing a session and force-
+        # endpointing instead leaves no way to tell "flush done" from "still
+        # transcribing": real update gaps run 2-3 s, so any quiet-gap
+        # heuristic either drops utterance tails or stalls every utterance.)
+        # With format_turns the server may resend a turn it already ended as
+        # a formatted duplicate, so keep the last message per turn_order.
+        turns: dict[int, tuple[str, list[Word]]] = {}
+        async with connect(url, additional_headers=self._headers) as ws:
+            for chunk in _audio_chunks(utterance.pcm, self.config.sample_rate):
+                await ws.send(chunk)
+            await ws.send(json.dumps({"type": "Terminate"}))
+            while True:
+                try:
+                    async with asyncio.timeout(_RECV_TIMEOUT_S):
+                        raw = await ws.recv()
+                except (TimeoutError, ConnectionClosedOK):
+                    break
                 message = as_dict(raw)
                 kind = get_str(message, "type")
                 if kind == "Turn" and get_bool(message, "end_of_turn"):
-                    transcript = get_str(message, "transcript")
-                    words = _parse_words(message, offset=utterance.start)
+                    turns[int(get_float(message, "turn_order"))] = (
+                        get_str(message, "transcript"),
+                        _parse_words(message, offset=utterance.start),
+                    )
+                elif kind == "Termination":
                     break
-                if kind == "Termination":
-                    break
-        except (OSError, WebSocketException):
-            await self._reset_ws()  # drop the dead session; the next utterance reconnects
-            raise
+        ordered = [turns[order] for order in sorted(turns)]
+        transcript = " ".join(text for text, _ in ordered if text)
+        words = [word for _, turn_words in ordered for word in turn_words]
         if not transcript:
             return None
         speaker = words[0].speaker if words else None
@@ -141,11 +145,25 @@ class AssemblyAIBackend:
             return False
 
     async def aclose(self) -> None:
-        ws = self._ws
-        if ws is not None:
-            with contextlib.suppress(Exception):
-                await ws.send(json.dumps({"type": "Terminate"}))
-        await self._reset_ws()
+        """Nothing is held between utterances (one session per utterance)."""
+
+
+def _audio_chunks(pcm: bytes, sample_rate: int) -> list[bytes]:
+    """Split s16le PCM into messages the endpoint accepts (50-1000 ms each)."""
+    bytes_per_ms = sample_rate * 2 // 1000
+    min_len = bytes_per_ms * _MIN_CHUNK_MS
+    if len(pcm) < min_len:  # pad ultra-short utterances up to the server minimum
+        pcm += b"\x00" * (min_len - len(pcm))
+    step = bytes_per_ms * _CHUNK_MS
+    chunks: list[bytes] = []
+    pos = 0
+    while pos < len(pcm):
+        end = pos + step
+        if len(pcm) - end < min_len:  # fold a sub-minimum tail into the last chunk
+            end = len(pcm)
+        chunks.append(pcm[pos:end])
+        pos = end
+    return chunks
 
 
 def _parse_words(message: dict[str, object], *, offset: float) -> list[Word]:
