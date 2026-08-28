@@ -86,6 +86,43 @@ const advancedProblem = $derived(
 
 const capturing = $derived($health?.capture_status === 'capturing')
 
+// --- session elapsed time ---
+// healthz's uptime_seconds is the app process's uptime, not the session's -
+// after the first session of a process's lifetime the two drift apart for
+// good. Fetch the active session's started_at instead and tick locally.
+let sessionStartedAt = $state<number | null>(null) // epoch seconds
+let nowMs = $state(Date.now())
+
+$effect(() => {
+	const id = capturing ? $health?.active_session_id : null
+	if (!id) {
+		sessionStartedAt = null
+		return
+	}
+	api
+		.getSession(id)
+		.then((detail) => {
+			if ($health?.active_session_id === detail.session.id) {
+				sessionStartedAt = detail.session.started_at
+			}
+		})
+		.catch(() => {
+			/* the ticker just stays hidden until the next health poll retries */
+		})
+})
+
+$effect(() => {
+	if (!capturing) return
+	const timer = setInterval(() => {
+		nowMs = Date.now()
+	}, 1000)
+	return () => clearInterval(timer)
+})
+
+const sessionElapsed = $derived(
+	sessionStartedAt === null ? null : nowMs / 1000 - sessionStartedAt,
+)
+
 // --- live transcript ---
 let txEvents = $state<TranscriptEvent[]>([])
 let txAutoscroll = $state(true)
@@ -252,7 +289,7 @@ onDestroy(() => {
 						<span class="size-2 rounded-full bg-emerald-500"></span>
 						<strong>Recording</strong>
 						<span class="text-muted-foreground">
-							{Math.round($health?.uptime_seconds ?? 0)}s · {providers.length} providers
+							{sessionElapsed === null ? '-' : formatTime(sessionElapsed)} · {providers.length} providers
 						</span>
 					</span>
 					<Button variant="destructive" onclick={stop} disabled={busy}>Stop session</Button>
