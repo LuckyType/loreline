@@ -143,3 +143,30 @@ async def test_summarize_unknown_session(client: AsyncClient) -> None:
     llm = await _llm_provider(client)
     resp = await client.post("/api/session/nope/summarize", json={"provider_id": llm})
     assert resp.status_code == 404
+
+
+async def test_summarize_with_openrouter_provider(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """OpenRouter is an LLM kind too - the route accepts it and records the
+    ``vendor/model`` id it defaulted to as the summary's provenance."""
+
+    async def fake_summarize(**_kwargs: object) -> str:
+        return "The party bargained with a dragon."
+
+    monkeypatch.setattr(sessions_route, "summarize_transcript", fake_summarize)
+
+    sid = await _session_with_transcript(client)
+    llm = (
+        await client.post(
+            "/api/providers",
+            json={"name": "OpenRouter", "kind": "openrouter", "protocol": "http_batch"},
+        )
+    ).json()["id"]
+
+    resp = await client.post(f"/api/session/{sid}/summarize", json={"provider_id": llm})
+    assert resp.status_code == 200
+
+    detail = (await client.get(f"/api/session/{sid}")).json()["session"]
+    assert detail["summary"] == "The party bargained with a dragon."
+    assert detail["summary_model"] == "openai/gpt-4o-mini"

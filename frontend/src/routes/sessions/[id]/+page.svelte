@@ -30,14 +30,15 @@ import Foldable from '$lib/Foldable.svelte'
 import ModelPicker from '$lib/ModelPicker.svelte'
 import { providerName } from '$lib/stores'
 import TranscriptList from '$lib/TranscriptList.svelte'
-import type {
-	ActionDefaults,
-	DiarizationModeKind,
-	ExportFormat,
-	ProviderConfig,
-	ReprocessJob,
-	SessionDetail,
-	TranscriptEvent,
+import {
+	isLlmProvider,
+	type ActionDefaults,
+	type DiarizationModeKind,
+	type ExportFormat,
+	type ProviderConfig,
+	type ReprocessJob,
+	type SessionDetail,
+	type TranscriptEvent,
 } from '$lib/types'
 
 let detail = $state<SessionDetail | null>(null)
@@ -193,7 +194,7 @@ let renameOpen = $state(false)
 let nameForm = $state<Record<string, string>>({})
 
 // --- summarize ---
-const llmProviders = $derived(providers.filter((p) => p.kind === 'openai_chat'))
+const llmProviders = $derived(providers.filter((p) => isLlmProvider(p)))
 let summarizeOpen = $state(false)
 let sumProvider = $state('')
 let sumModel = $state('')

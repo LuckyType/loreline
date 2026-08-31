@@ -39,7 +39,10 @@ all STT and diarization run on remote endpoints (cloud APIs or self-hosted LAN s
   service (included), or off.
 - **Sessions** - SQLite persistence with per-session audio, post-session re-processing
   (re-transcribe or re-diarize with a different provider/model), speaker renaming, and
-  LLM-generated summaries.
+  LLM-generated summaries (OpenAI, OpenRouter, or any OpenAI-compatible chat endpoint -
+  Ollama, LM Studio, vLLM). OpenRouter providers can additionally pick their routing:
+  prefer the cheapest upstream provider, and/or restrict to providers that don't store
+  or train on the transcript (Zero Data Retention).
 - **Exports** - txt, md, srt, vtt, json.
 - **Web UI** - SvelteKit SPA served by FastAPI: live transcript, session history,
   provider/glossary config, live logs, health and alerting.

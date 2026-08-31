@@ -1,8 +1,8 @@
 """LLM helpers for on-demand session summaries.
 
-Talks to any OpenAI-compatible chat endpoint (OpenAI cloud, Ollama, LM Studio,
-vLLM, …) via ``POST /chat/completions``. A single connector covers them all;
-only the ``base_url`` and API key differ.
+Talks to any OpenAI-compatible chat endpoint (OpenAI cloud, OpenRouter, Ollama,
+LM Studio, vLLM, …) via ``POST /chat/completions``. A single connector covers
+them all; only the ``base_url``, API key and default model differ per kind.
 """
 
 from __future__ import annotations
@@ -14,13 +14,26 @@ from typing import cast
 import httpx
 
 from loreline.logging import get_logger
-from loreline.models import ProviderConfig
+from loreline.models import OpenRouterRouting, ProviderConfig, ProviderKind
 
 log = get_logger(__name__)
 
 _DEFAULT_BASE_URL = "https://api.openai.com/v1"
+_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_MODEL = "gpt-4o-mini"
+_OPENROUTER_DEFAULT_MODEL = "openai/gpt-4o-mini"
 _TIMEOUT_S = 120.0
+
+# Provider kinds that summarize, i.e. speak chat-completions rather than STT.
+LLM_KINDS = frozenset({ProviderKind.OPENAI_CHAT, ProviderKind.OPENROUTER})
+
+# OpenRouter credits the calling app on its public leaderboards through these
+# two optional headers; they are meaningless to every other endpoint, so they
+# only go out for that kind.
+_OPENROUTER_HEADERS = {
+    "HTTP-Referer": "https://github.com/LuckyType/loreline",
+    "X-Title": "Loreline",
+}
 
 # Built-in summary instructions. The settings UI exposes an editable copy of
 # this (kv `action_defaults.summarize_prompt`); a blank stored value falls back
@@ -39,13 +52,54 @@ class LLMError(Exception):
     """The upstream chat-completions call failed (bad model, bad key, rate limit, …)."""
 
 
+def default_base_url(kind: ProviderKind) -> str:
+    """Endpoint an LLM kind talks to when its config names no ``base_url``."""
+    return _OPENROUTER_BASE_URL if kind is ProviderKind.OPENROUTER else _DEFAULT_BASE_URL
+
+
+def default_model(kind: ProviderKind) -> str:
+    """Model an LLM kind summarizes with when neither call nor config picks one.
+
+    OpenRouter addresses models as ``vendor/model``, so a bare OpenAI model name
+    is not a valid id there.
+    """
+    return _OPENROUTER_DEFAULT_MODEL if kind is ProviderKind.OPENROUTER else DEFAULT_MODEL
+
+
+def routing_payload(config: ProviderConfig) -> dict[str, object] | None:
+    """OpenRouter's ``provider`` routing object for this config, or None.
+
+    Only fields the GM actually moved off their default are emitted, and the
+    whole object is dropped when none were: an empty ``provider`` object would
+    pin today's OpenRouter defaults into every request, which is precisely
+    what a config that says nothing should *not* do.
+
+    Returns None for every non-OpenRouter kind - ``provider`` is an OpenRouter
+    body extension, and a plain OpenAI-compatible endpoint has no idea what to
+    do with it.
+    """
+    if config.kind is not ProviderKind.OPENROUTER or config.routing is None:
+        return None
+    routing: OpenRouterRouting = config.routing
+    payload: dict[str, object] = {}
+    if routing.sort is not None:
+        payload["sort"] = routing.sort
+    if routing.data_collection == "deny":
+        payload["data_collection"] = "deny"
+    if routing.zdr:
+        payload["zdr"] = True
+    return payload or None
+
+
 def _client(
     config: ProviderConfig, api_key: str | None, factory: ClientFactory | None
 ) -> httpx.AsyncClient:
     if factory is not None:
         return factory()
-    base_url = config.base_url or _DEFAULT_BASE_URL
+    base_url = config.base_url or default_base_url(config.kind)
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    if config.kind is ProviderKind.OPENROUTER:
+        headers.update(_OPENROUTER_HEADERS)
     return httpx.AsyncClient(base_url=base_url, headers=headers, timeout=_TIMEOUT_S)
 
 
@@ -68,7 +122,7 @@ async def summarize_transcript(
     invalid model id, a bad key, a rate limit, or a plain connection failure
     should all read as *why it failed*, not surface as an opaque 500.
     """
-    chosen_model = model or config.model or DEFAULT_MODEL
+    chosen_model = model or config.model or default_model(config.kind)
     instructions = (system_prompt or "").strip() or DEFAULT_SYSTEM_PROMPT
     payload: dict[str, object] = {
         "model": chosen_model,
@@ -78,6 +132,9 @@ async def summarize_transcript(
         ],
         "temperature": 0.3,
     }
+    routing = routing_payload(config)
+    if routing is not None:
+        payload["provider"] = routing
     client = _client(config, api_key, client_factory)
     try:
         response = await _post_completion(client, payload)

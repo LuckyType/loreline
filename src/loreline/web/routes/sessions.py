@@ -17,10 +17,9 @@ from starlette.status import (
 )
 
 from loreline.export import EXPORTERS, canonical_transcript, relabel_speakers, to_txt, variant_view
-from loreline.llm import DEFAULT_MODEL, LLMError, summarize_transcript
+from loreline.llm import LLM_KINDS, LLMError, default_model, summarize_transcript
 from loreline.models import (
     ORIGINAL_VERSION,
-    ProviderKind,
     Session,
     SessionStatus,
     TranscriptEvent,
@@ -141,7 +140,7 @@ async def summarize_session(
     provider = await state.providers.get(body.provider_id)
     if provider is None:
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="provider not found")
-    if provider.kind is not ProviderKind.OPENAI_CHAT:
+    if provider.kind not in LLM_KINDS:
         raise HTTPException(
             status_code=HTTP_400_BAD_REQUEST, detail="provider is not an LLM provider"
         )
@@ -154,7 +153,7 @@ async def summarize_session(
     api_key = state.secrets.get(provider.auth_ref) if provider.auth_ref else None
     # Resolve the model the same way summarize_transcript does, so the stored
     # provenance records what actually ran, not just what was requested.
-    chosen_model = body.model or provider.model or DEFAULT_MODEL
+    chosen_model = body.model or provider.model or default_model(provider.kind)
     defaults = await load_action_defaults(state)
     try:
         summary = await summarize_transcript(

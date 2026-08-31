@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 from loreline.models import (
     ORIGINAL_VERSION,
     DiarizationConfig,
+    OpenRouterRouting,
     Protocol,
     ProviderCaps,
     ProviderKind,
@@ -34,6 +35,7 @@ class ProviderCreate(BaseModel):
     sample_rate: int = 16000
     language: str = "de"
     capabilities: ProviderCaps = Field(default_factory=ProviderCaps)
+    routing: OpenRouterRouting | None = None  # OpenRouter kind only
     enabled: bool = True
     api_key: str | None = Field(
         default=None,

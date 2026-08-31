@@ -6,7 +6,15 @@ import { Separator } from '$lib/components/ui/separator'
 import { portal } from '$lib/portal'
 import { cn } from '$lib/utils'
 
-export type DropdownOption = { value: string; label: string }
+export type DropdownOption = {
+	value: string
+	label: string
+	/** Muted right-hand detail (e.g. a model's price), shown in the list only -
+	 *  never on the trigger, which stays a plain readable label. */
+	hint?: string
+	/** Native tooltip for the row, for detail too long to show inline. */
+	title?: string
+}
 
 let {
 	value = $bindable(''),
@@ -146,13 +154,19 @@ function pick(v: string) {
                 ? 'border border-primary'
                 : 'border border-transparent'}"
 							onclick={() => pick(o.value)}
+							title={o.title}
 						>
-							<span>{o.label}</span>
-							{#if defaultValue && o.value === defaultValue}
-								<span class="rounded-full border px-1.5 text-xs text-muted-foreground"
-									>default</span
-								>
-							{/if}
+							<span class="min-w-0 truncate">{o.label}</span>
+							<span class="flex shrink-0 items-center gap-1.5">
+								{#if o.hint}
+									<span class="text-xs whitespace-nowrap text-muted-foreground">{o.hint}</span>
+								{/if}
+								{#if defaultValue && o.value === defaultValue}
+									<span class="rounded-full border px-1.5 text-xs text-muted-foreground"
+										>default</span
+									>
+								{/if}
+							</span>
 						</button>
 					{/each}
 					{#if shownFavorites.length && shownRest.length}
@@ -173,13 +187,19 @@ function pick(v: string) {
                 ? 'border border-primary'
                 : 'border border-transparent'}"
 							onclick={() => pick(o.value)}
+							title={o.title}
 						>
-							<span>{o.label}</span>
-							{#if defaultValue && o.value === defaultValue}
-								<span class="rounded-full border px-1.5 text-xs text-muted-foreground"
-									>default</span
-								>
-							{/if}
+							<span class="min-w-0 truncate">{o.label}</span>
+							<span class="flex shrink-0 items-center gap-1.5">
+								{#if o.hint}
+									<span class="text-xs whitespace-nowrap text-muted-foreground">{o.hint}</span>
+								{/if}
+								{#if defaultValue && o.value === defaultValue}
+									<span class="rounded-full border px-1.5 text-xs text-muted-foreground"
+										>default</span
+									>
+								{/if}
+							</span>
 						</button>
 					{/each}
 					{#if !filtered.length}

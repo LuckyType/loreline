@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -18,6 +19,7 @@ class ProviderKind(StrEnum):
     GEMINI = "gemini"  # Gemini API transcription (accepts a plain API key)
     VOSK = "vosk"  # self-hosted vosk-server
     OPENAI_CHAT = "openai_chat"  # LLM chat for summaries (OpenAI / Ollama / LM Studio / vLLM)
+    OPENROUTER = "openrouter"  # OpenRouter LLM gateway for summaries ("vendor/model" ids)
 
 
 class Protocol(StrEnum):
@@ -65,6 +67,70 @@ class ProviderCaps(BaseModel):
     vocab_param: str | None = None  # e.g. "keyterm", "word_boost", "speech_contexts"
 
 
+class ModelPrice(BaseModel):
+    """What a model costs, in **USD per million tokens**.
+
+    The source (OpenRouter's ``/models``) quotes USD per *single* token as a
+    decimal string - "0.000003". That is unreadable in a picker and lossy as a
+    float, so :mod:`loreline.stt.catalog` parses it as ``Decimal`` and scales
+    it here to the per-million figure every price list actually uses.
+
+    ``min_prompt_tokens`` is None on the base price and set on a tier that only
+    applies above a prompt-length threshold - see ModelInfo.price_tiers.
+    """
+
+    prompt: float | None = None  # input
+    completion: float | None = None  # output
+    min_prompt_tokens: int | None = None
+
+
+class ModelInfo(BaseModel):
+    """One entry in a provider's model list.
+
+    Only ``id`` is ever guaranteed: a curated catalog entry (Deepgram, Google)
+    and a plain OpenAI ``/models`` row carry nothing else, and the pickers must
+    render those exactly as before. Everything below is filled in when the
+    provider volunteers it - in practice OpenRouter, which is the only endpoint
+    here that publishes prices at all.
+    """
+
+    id: str
+    context_length: int | None = None
+    pricing: ModelPrice | None = None
+    # Prices that replace `pricing` above a prompt-length threshold, cheapest
+    # threshold first. Long transcripts cross these - Claude Sonnet 4.5 doubles
+    # above 200k prompt tokens - so a picker showing only the base price would
+    # understate the cost of exactly the sessions this app produces.
+    price_tiers: list[ModelPrice] = Field(default_factory=list["ModelPrice"])
+
+
+class OpenRouterRouting(BaseModel):
+    """OpenRouter provider-routing preferences. Ignored for every other kind.
+
+    OpenRouter fans one model id out across several upstream providers that
+    differ in price, speed and data policy, and picks between them itself.
+    These narrow or reorder that pool; they are sent verbatim as the
+    ``provider`` object of the chat-completions body - see
+    https://openrouter.ai/docs/features/provider-routing.
+
+    Every field defaults to OpenRouter's own default, and
+    :func:`loreline.llm.routing_payload` omits any field still sitting at it,
+    so a provider nobody has configured routing for keeps behaving exactly as
+    before - and a default OpenRouter later changes stays theirs to change.
+
+    Note the two privacy switches are not the same thing: ``data_collection``
+    excludes providers that may *store or train on* the prompt, while ``zdr``
+    additionally requires an endpoint under a Zero Data Retention agreement.
+    Either can leave a given model with no eligible provider at all, in which
+    case OpenRouter rejects the request rather than quietly falling back - the
+    settings UI says so next to the switches.
+    """
+
+    sort: Literal["price", "throughput", "latency"] | None = None
+    data_collection: Literal["allow", "deny"] = "allow"
+    zdr: bool = False
+
+
 class ProviderConfig(BaseModel):
     """User-configured STT provider instance (duplicates allowed)."""
 
@@ -82,6 +148,9 @@ class ProviderConfig(BaseModel):
     sample_rate: int = 16000
     language: str = "de"
     capabilities: ProviderCaps = Field(default_factory=ProviderCaps)
+    # OpenRouter-only, and None until the GM opts in - so the seven STT kinds'
+    # stored JSON gains no field they have no use for.
+    routing: OpenRouterRouting | None = None
     enabled: bool = True
 
 

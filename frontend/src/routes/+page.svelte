@@ -11,11 +11,12 @@ import Dropdown from '$lib/Dropdown.svelte'
 import LogLine from '$lib/LogLine.svelte'
 import ModelPicker from '$lib/ModelPicker.svelte'
 import { formatTime, health, logsWs, speakerColor, transcriptWs } from '$lib/stores'
-import type {
-	ActionDefaults,
-	DiarizationModeKind,
-	ProviderConfig,
-	TranscriptEvent,
+import {
+	isLlmProvider,
+	type ActionDefaults,
+	type DiarizationModeKind,
+	type ProviderConfig,
+	type TranscriptEvent,
 } from '$lib/types'
 import { cn } from '$lib/utils'
 import { connect, type LiveSocket } from '$lib/ws'
@@ -33,8 +34,8 @@ let defaults = $state<ActionDefaults>({
 	summarize_model: '',
 })
 
-// STT providers only - an LLM (openai_chat) provider can't transcribe.
-const sttProviders = $derived(providers.filter((p) => p.kind !== 'openai_chat'))
+// STT providers only - an LLM provider can't transcribe.
+const sttProviders = $derived(providers.filter((p) => !isLlmProvider(p)))
 const primaryProvider = $derived(providers.find((p) => p.id === primary))
 const fallbackProvider = $derived(providers.find((p) => p.id === fallback))
 let diarMode = $state<DiarizationModeKind>('none')

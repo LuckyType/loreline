@@ -11,6 +11,7 @@ import type {
 	Glossary,
 	Health,
 	InputDevice,
+	ModelInfo,
 	ProviderConfig,
 	ProviderCreate,
 	ProviderModelsRequest,
@@ -126,7 +127,7 @@ export const api = {
 	// --- providers ---
 	listProviders: () => request<ProviderConfig[]>('/api/providers'),
 	providerModels: (body: ProviderModelsRequest) =>
-		request<string[]>('/api/providers/models', {
+		request<ModelInfo[]>('/api/providers/models', {
 			method: 'POST',
 			body: JSON.stringify(body),
 		}),

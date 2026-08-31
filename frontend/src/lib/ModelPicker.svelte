@@ -1,7 +1,8 @@
 <script lang="ts">
 import { api } from '$lib/api'
 import Dropdown from '$lib/Dropdown.svelte'
-import type { ProviderConfig } from '$lib/types'
+import { hintFor, priceTitle } from '$lib/modelInfo'
+import type { ModelInfo, ProviderConfig } from '$lib/types'
 
 let {
 	provider,
@@ -21,7 +22,7 @@ let {
 	onpick?: (model: string) => void
 } = $props()
 
-let all = $state<string[]>([])
+let all = $state<ModelInfo[]>([])
 let loadedFor = $state('')
 let loading = $state(false)
 let seededFor = $state('')
@@ -32,7 +33,12 @@ let seededValue = $state('')
 // stored default (defaultModel) is global - it can name a model belonging to
 // a different provider entirely - so only offer it when this provider
 // actually has it.
-const fetched = $derived(provider && loadedFor === provider.id ? all : [])
+const loaded = $derived(provider && loadedFor === provider.id ? all : [])
+const fetched = $derived(loaded.map((m) => m.id))
+// Price/context hints are only known for models the live list actually
+// returned - a favourite or stored default that predates the fetch (or that
+// the provider no longer serves) simply renders without one.
+const detail = $derived(new Map(loaded.map((m) => [m.id, m])))
 const favorites = $derived(provider?.favorite_models ?? [])
 const defaultForThisProvider = $derived(
 	defaultModel && (favorites.includes(defaultModel) || fetched.includes(defaultModel))
@@ -45,7 +51,12 @@ const options = $derived(
 		...new Set(
 			[...defaultForThisProvider, ...favorites, ...fetched].filter((m): m is string => !!m),
 		),
-	].map((m) => ({ value: m, label: m })),
+	].map((m) => ({
+		value: m,
+		label: m,
+		hint: hintFor(detail.get(m)),
+		title: priceTitle(detail.get(m)),
+	})),
 )
 
 $effect(() => {

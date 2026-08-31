@@ -7,6 +7,15 @@ export type ProviderKind =
 	| 'gemini'
 	| 'vosk'
 	| 'openai_chat'
+	| 'openrouter'
+
+/** Kinds that summarize (chat-completions); everything else transcribes. */
+export const LLM_KINDS: ProviderKind[] = ['openai_chat', 'openrouter']
+
+/** True for an LLM provider - negate it to select the STT ones. */
+export function isLlmProvider(p: { kind: ProviderKind }): boolean {
+	return LLM_KINDS.includes(p.kind)
+}
 
 export type ProtocolKind = 'ws' | 'grpc' | 'http_sse' | 'http_batch'
 
@@ -16,6 +25,42 @@ export interface ProviderCaps {
 	streaming: boolean
 	inline_diarization: boolean
 	vocab_param: string | null
+}
+
+/** A model's price, in USD per **million** tokens (the backend scales
+ *  OpenRouter's per-token figures - see ModelPrice in src/loreline/models.py). */
+export interface ModelPrice {
+	/** Input. */
+	prompt: number | null
+	/** Output. */
+	completion: number | null
+	/** Set only on a tier that applies above this prompt length. */
+	min_prompt_tokens: number | null
+}
+
+/** One entry in a provider's model list. Only `id` is ever guaranteed -
+ *  curated catalogs and plain OpenAI `/models` rows carry nothing else. */
+export interface ModelInfo {
+	id: string
+	context_length: number | null
+	pricing: ModelPrice | null
+	/** Prices that take over above a prompt-length threshold; usually empty. */
+	price_tiers: ModelPrice[]
+}
+
+/**
+ * OpenRouter provider-routing preferences (OpenRouter kind only) - OpenRouter
+ * fans one model id out across upstream providers that differ in price, speed
+ * and data policy. Mirrors `OpenRouterRouting` in src/loreline/models.py; the
+ * backend sends only the fields moved off their default.
+ */
+export interface OpenRouterRouting {
+	/** null = OpenRouter's own balanced default; 'price' = cheapest first. */
+	sort: 'price' | 'throughput' | 'latency' | null
+	/** 'deny' excludes providers that may store or train on the prompt. */
+	data_collection: 'allow' | 'deny'
+	/** Restrict to endpoints under a Zero Data Retention agreement. */
+	zdr: boolean
 }
 
 export interface ProviderConfig {
@@ -30,6 +75,7 @@ export interface ProviderConfig {
 	sample_rate: number
 	language: string
 	capabilities: ProviderCaps
+	routing?: OpenRouterRouting | null
 	enabled: boolean
 	secret_set?: boolean
 	secret_hint?: string | null
@@ -44,6 +90,7 @@ export interface ProviderCreate {
 	favorite_models?: string[]
 	sample_rate?: number
 	language?: string
+	routing?: OpenRouterRouting | null
 	enabled?: boolean
 	api_key?: string | null
 }

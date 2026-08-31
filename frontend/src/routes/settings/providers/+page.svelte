@@ -34,13 +34,17 @@ import {
 } from '$lib/components/ui/table'
 import { confirm } from '$lib/confirm.svelte'
 import Dropdown from '$lib/Dropdown.svelte'
+import { hintFor, priceTitle } from '$lib/modelInfo'
 import ModelPicker from '$lib/ModelPicker.svelte'
-import type {
-	ActionDefaults,
-	ProtocolKind,
-	ProviderConfig,
-	ProviderCreate,
-	ProviderKind,
+import {
+	isLlmProvider,
+	type ActionDefaults,
+	type ProtocolKind,
+	type ModelInfo,
+	type OpenRouterRouting,
+	type ProviderConfig,
+	type ProviderCreate,
+	type ProviderKind,
 } from '$lib/types'
 
 type Hosting = 'cloud' | 'selfhosted'
@@ -132,6 +136,15 @@ const CATALOG: ProviderMeta[] = [
 		note: 'LLM for session summaries.',
 	},
 	{
+		kind: 'openrouter',
+		label: 'OpenRouter',
+		hosting: 'cloud',
+		protocol: 'http_batch',
+		apiKey: { label: 'API key', url: 'https://openrouter.ai/settings/keys' },
+		defaultModel: 'anthropic/claude-sonnet-4.5',
+		note: 'One key for many vendors · "vendor/model" ids.',
+	},
+	{
 		kind: 'openai_chat',
 		label: 'Ollama / LM Studio / vLLM',
 		hosting: 'selfhosted',
@@ -142,6 +155,14 @@ const CATALOG: ProviderMeta[] = [
 	},
 ]
 
+/** OpenRouter's own defaults - see OpenRouterRouting in $lib/types. The
+ *  backend drops any field still sitting here, so this is also "send nothing". */
+const blankRouting = (): OpenRouterRouting => ({
+	sort: null,
+	data_collection: 'allow',
+	zdr: false,
+})
+
 const blank = (): ProviderCreate => ({
 	name: '',
 	kind: 'openai_compat',
@@ -151,6 +172,7 @@ const blank = (): ProviderCreate => ({
 	favorite_models: [],
 	sample_rate: 16000,
 	language: 'de',
+	routing: blankRouting(),
 	enabled: true,
 	api_key: '',
 })
@@ -160,7 +182,7 @@ let editing = $state<string | null>(null)
 let message = $state('')
 let testResults = $state<Record<string, 'testing' | 'healthy' | 'down'>>({})
 let form = $state<ProviderCreate>(blank())
-let availableModels = $state<string[]>([])
+let availableModels = $state<ModelInfo[]>([])
 let modelsLoading = $state(false)
 let modelFilter = $state('')
 let step = $state(1)
@@ -182,14 +204,14 @@ let defaults = $state<ActionDefaults>(blankDefaults())
 // reflect what is saved, not the (possibly unsaved) current selection.
 let savedDefaults = $state<ActionDefaults>(blankDefaults())
 let defaultsMsg = $state('')
-const sttProviders = $derived(providers.filter((p) => p.kind !== 'openai_chat'))
-const llmProviders = $derived(providers.filter((p) => p.kind === 'openai_chat'))
+const sttProviders = $derived(providers.filter((p) => !isLlmProvider(p)))
+const llmProviders = $derived(providers.filter((p) => isLlmProvider(p)))
 const sttSrcProvider = $derived(providers.find((p) => p.id === defaults.stt_provider))
 const llmSrcProvider = $derived(providers.find((p) => p.id === defaults.summarize_provider))
 
 const filteredModels = $derived(
 	modelFilter
-		? availableModels.filter((m) => m.toLowerCase().includes(modelFilter.toLowerCase()))
+		? availableModels.filter((m) => m.id.toLowerCase().includes(modelFilter.toLowerCase()))
 		: availableModels,
 )
 
@@ -240,8 +262,8 @@ async function loadModels() {
 			provider_id: editing,
 		})
 		if (availableModels.length) {
-			const present = availableModels
-			form.favorite_models = (form.favorite_models ?? []).filter((m) => present.includes(m))
+			const present = new Set(availableModels.map((m) => m.id))
+			form.favorite_models = (form.favorite_models ?? []).filter((m) => present.has(m))
 		}
 	} catch {
 		availableModels = []
@@ -262,6 +284,9 @@ async function save() {
 			...form,
 			base_url: form.base_url || null,
 			model: form.model || null,
+			// Routing is an OpenRouter body extension - never store it on the
+			// seven STT kinds or on a plain OpenAI-compatible endpoint.
+			routing: form.kind === 'openrouter' ? form.routing : null,
 			api_key: form.api_key || null,
 		}
 		if (editing) await api.updateProvider(editing, body)
@@ -314,6 +339,8 @@ function edit(p: ProviderConfig) {
 		favorite_models: [...p.favorite_models],
 		sample_rate: p.sample_rate,
 		language: p.language,
+		// A provider saved before routing existed (or any STT kind) has none.
+		routing: p.routing ? { ...p.routing } : blankRouting(),
 		enabled: p.enabled,
 		api_key: '',
 	}
@@ -640,13 +667,18 @@ onMount(async () => {
 					{#if availableModels.length}
 						<Input placeholder="filter…" bind:value={modelFilter} />
 						<div class="max-h-45 overflow-auto rounded-md border p-1.5">
-							{#each filteredModels as m (m)}
-								<label class="flex items-center gap-2 px-1 py-0.5">
+							{#each filteredModels as m (m.id)}
+								<label class="flex items-center gap-2 px-1 py-0.5" title={priceTitle(m)}>
 									<Checkbox
-										checked={(form.favorite_models ?? []).includes(m)}
-										onCheckedChange={() => toggleFavorite(m)}
+										checked={(form.favorite_models ?? []).includes(m.id)}
+										onCheckedChange={() => toggleFavorite(m.id)}
 									/>
-									<span>{m}</span>
+									<span class="min-w-0 flex-1 truncate">{m.id}</span>
+									{#if hintFor(m)}
+										<span class="shrink-0 text-xs whitespace-nowrap text-muted-foreground">
+											{hintFor(m)}
+										</span>
+									{/if}
 								</label>
 							{/each}
 							{#if filteredModels.length === 0}
@@ -689,6 +721,59 @@ onMount(async () => {
 							bind:value={form.api_key}
 							placeholder={editing ? '•••• unchanged' : ''}
 						/>
+					</div>
+				{/if}
+				{#if form.kind === 'openrouter' && form.routing}
+					{@const routing = form.routing}
+					<div class="flex flex-col gap-3 rounded-md border p-3">
+						<div class="flex flex-col gap-0.5">
+							<strong class="text-sm">Provider routing</strong>
+							<span class="text-xs text-muted-foreground">
+								OpenRouter serves one model from several upstream providers that differ in price and
+								data policy. These pick between them.
+							</span>
+						</div>
+						<div class="flex flex-col gap-2">
+							<Label for="or-sort">Prefer</Label>
+							<Dropdown
+								id="or-sort"
+								value={routing.sort ?? ''}
+								onpick={(v) => (routing.sort = (v || null) as OpenRouterRouting['sort'])}
+								options={[
+									{ value: '', label: 'Balanced (OpenRouter default)' },
+									{ value: 'price', label: 'Cheapest' },
+									{ value: 'throughput', label: 'Highest throughput' },
+									{ value: 'latency', label: 'Lowest latency' },
+								]}
+							/>
+						</div>
+						<label class="flex items-start gap-2">
+							<Checkbox
+								checked={routing.data_collection === 'deny'}
+								onCheckedChange={(v) => (routing.data_collection = v ? 'deny' : 'allow')}
+							/>
+							<span class="flex flex-col gap-0.5">
+								<span class="text-sm">No data collection</span>
+								<span class="text-xs text-muted-foreground">
+									Skip providers that may store or train on the transcript.
+								</span>
+							</span>
+						</label>
+						<label class="flex items-start gap-2">
+							<Checkbox checked={routing.zdr} onCheckedChange={(v) => (routing.zdr = v === true)} />
+							<span class="flex flex-col gap-0.5">
+								<span class="text-sm">Zero Data Retention only</span>
+								<span class="text-xs text-muted-foreground">
+									Stricter: only endpoints under a ZDR agreement.
+								</span>
+							</span>
+						</label>
+						{#if routing.data_collection === 'deny' || routing.zdr}
+							<span class="text-xs text-muted-foreground">
+								Note: a model with no provider meeting these rules fails the request rather than
+								falling back - worth a Test after saving.
+							</span>
+						{/if}
 					</div>
 				{/if}
 			</div>

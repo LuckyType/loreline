@@ -56,7 +56,11 @@ async def test_provider_models_curated(client: AsyncClient) -> None:
     # (no network involved).
     resp = await client.post("/api/providers/models", json={"kind": "deepgram"})
     assert resp.status_code == 200
-    assert "nova-3" in resp.json()
+    models = resp.json()
+    assert "nova-3" in [m["id"] for m in models]
+    # A curated entry publishes no price or context length - the pickers must
+    # get nulls, never a zero that would render as "free".
+    assert all(m["pricing"] is None and m["context_length"] is None for m in models)
 
 
 async def test_favorite_models_persist(client: AsyncClient) -> None:

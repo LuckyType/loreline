@@ -9,8 +9,8 @@ from fastapi.exceptions import HTTPException
 from pydantic import BaseModel
 from starlette.status import HTTP_400_BAD_REQUEST, HTTP_404_NOT_FOUND
 
-from loreline.llm import chat_health
-from loreline.models import ProviderConfig, ProviderKind
+from loreline.llm import LLM_KINDS, chat_health
+from loreline.models import ModelInfo, ProviderConfig, ProviderKind
 from loreline.secrets import SecretStore
 from loreline.stt.catalog import list_models
 from loreline.stt.registry import create_backend
@@ -133,7 +133,7 @@ async def test_provider(request: Request, provider_id: str) -> TestResult:
     provider = await state.providers.get(provider_id)
     if provider is None:
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="provider not found")
-    if provider.kind is ProviderKind.OPENAI_CHAT:
+    if provider.kind in LLM_KINDS:
         api_key = state.secrets.get(provider.auth_ref) if provider.auth_ref else None
         return TestResult(healthy=await chat_health(config=provider, api_key=api_key))
     try:
@@ -148,8 +148,12 @@ async def test_provider(request: Request, provider_id: str) -> TestResult:
 
 
 @router.post("/models")
-async def provider_models(request: Request, body: ProviderModelsRequest) -> list[str]:
-    """List a provider's available models (live /v1/models, else a curated set)."""
+async def provider_models(request: Request, body: ProviderModelsRequest) -> list[ModelInfo]:
+    """List a provider's available models (live /v1/models, else a curated set).
+
+    Entries carry price/context length only where the provider publishes them
+    (OpenRouter); everywhere else it's the bare id, exactly as before.
+    """
     state = get_state(request)
     api_key = body.api_key
     if not api_key and body.provider_id:

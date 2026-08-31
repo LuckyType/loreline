@@ -8,8 +8,14 @@ import re
 import httpx
 import pytest
 
-from loreline.llm import DEFAULT_SYSTEM_PROMPT, LLMError, chat_health, summarize_transcript
-from loreline.models import Protocol, ProviderConfig, ProviderKind
+from loreline.llm import (
+    DEFAULT_SYSTEM_PROMPT,
+    LLMError,
+    chat_health,
+    routing_payload,
+    summarize_transcript,
+)
+from loreline.models import OpenRouterRouting, Protocol, ProviderConfig, ProviderKind
 
 _BASE_URL = "http://llm:1234/v1"
 
@@ -21,6 +27,17 @@ def _config() -> ProviderConfig:
         kind=ProviderKind.OPENAI_CHAT,
         protocol=Protocol.HTTP_BATCH,
         base_url=_BASE_URL,
+    )
+
+
+def _openrouter_config() -> ProviderConfig:
+    """OpenRouter as the wizard stores it - the kind carries the endpoint, so
+    there is no ``base_url`` of its own."""
+    return ProviderConfig(
+        id="l2",
+        name="OpenRouter",
+        kind=ProviderKind.OPENROUTER,
+        protocol=Protocol.HTTP_BATCH,
     )
 
 
@@ -193,3 +210,115 @@ async def test_chat_health_ok_and_failure() -> None:
         api_key=None,
         client_factory=lambda: _client(httpx.MockTransport(boom)),
     )
+
+
+async def test_openrouter_endpoint_attribution_headers_and_model_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An OpenRouter provider needs nothing configured: it defaults to
+    OpenRouter's endpoint, sends the two optional attribution headers, and
+    falls back to a ``vendor/model`` id."""
+    seen: dict[str, str] = {}
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        seen["model"] = json.loads(request.content)["model"]
+        return httpx.Response(200, json={"choices": [{"message": {"content": "A summary."}}]})
+
+    real_client = httpx.AsyncClient
+
+    def fake_client(
+        *,
+        base_url: str,
+        headers: dict[str, str],
+        timeout: float,
+    ) -> httpx.AsyncClient:
+        # No client_factory here - the point is what llm.py builds itself.
+        seen["base_url"] = base_url
+        seen.update(headers)
+        return real_client(
+            base_url=base_url,
+            headers=headers,
+            timeout=timeout,
+            transport=httpx.MockTransport(handle),
+        )
+
+    monkeypatch.setattr(httpx, "AsyncClient", fake_client)
+    out = await summarize_transcript(
+        config=_openrouter_config(), api_key="k", model=None, transcript="x"
+    )
+
+    assert out == "A summary."
+    assert seen["base_url"] == "https://openrouter.ai/api/v1"
+    assert seen["Authorization"] == "Bearer k"
+    assert seen["HTTP-Referer"].startswith("https://")
+    assert seen["X-Title"] == "Loreline"
+    assert seen["model"] == "openai/gpt-4o-mini"  # a bare OpenAI name is no id there
+
+
+async def test_openrouter_routing_prefs_ride_along_as_the_provider_object() -> None:
+    """The GM's routing choices reach OpenRouter as the body's ``provider``
+    object - that is the only channel OpenRouter offers for "cheapest" and
+    "nobody who stores my transcript"."""
+    captured: dict[str, object] = {}
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        captured["provider"] = json.loads(request.content).get("provider")
+        return httpx.Response(200, json={"choices": [{"message": {"content": "A summary."}}]})
+
+    config = _openrouter_config().model_copy(
+        update={
+            "routing": OpenRouterRouting(sort="price", data_collection="deny", zdr=True),
+        }
+    )
+    transport = httpx.MockTransport(handle)
+    await summarize_transcript(
+        config=config,
+        api_key="k",
+        model=None,
+        transcript="[00:00] GM: You enter the cave.",
+        client_factory=lambda: _client(transport),
+    )
+
+    assert captured["provider"] == {"sort": "price", "data_collection": "deny", "zdr": True}
+
+
+async def test_routing_omits_fields_left_at_their_default() -> None:
+    """Only what the GM actually changed is sent. An ``provider`` object
+    echoing OpenRouter's own defaults back at them would freeze today's
+    behaviour into every request for no reason."""
+    assert routing_payload(_openrouter_config()) is None
+    assert (
+        routing_payload(_openrouter_config().model_copy(update={"routing": OpenRouterRouting()}))
+        is None
+    )
+    assert routing_payload(
+        _openrouter_config().model_copy(update={"routing": OpenRouterRouting(sort="price")})
+    ) == {"sort": "price"}
+    assert routing_payload(
+        _openrouter_config().model_copy(update={"routing": OpenRouterRouting(zdr=True)})
+    ) == {"zdr": True}
+
+
+async def test_routing_is_never_sent_to_a_plain_openai_compatible_endpoint() -> None:
+    """``provider`` is an OpenRouter body extension. A stray one stored on an
+    ``openai_chat`` config (Ollama, LM Studio, OpenAI itself) must not go out -
+    a strict endpoint would reject the unknown field outright."""
+    captured: dict[str, object] = {"seen": "unset"}
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        captured["seen"] = json.loads(request.content).get("provider", "absent")
+        return httpx.Response(200, json={"choices": [{"message": {"content": "A summary."}}]})
+
+    config = _config().model_copy(update={"routing": OpenRouterRouting(sort="price", zdr=True)})
+    assert routing_payload(config) is None
+
+    transport = httpx.MockTransport(handle)
+    await summarize_transcript(
+        config=config,
+        api_key="k",
+        model="gpt-4o-mini",
+        transcript="[00:00] GM: You enter the cave.",
+        client_factory=lambda: _client(transport),
+    )
+
+    assert captured["seen"] == "absent"
