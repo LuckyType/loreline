@@ -29,10 +29,13 @@ from loreline.persistence import (
     TranscriptRepository,
 )
 from loreline.persistence.database import MIGRATIONS
+from loreline.web.deps import ACTION_DEFAULTS_KEY
+from loreline.web.schemas import ActionDefaults
 
 # Migration list indices (0-based) for the scripts exercised directly below.
 _V_DROP_GOOGLE = 10  # v11: delete rows of the removed Google STT v2 kind
 _V_MERGE_KINDS = 11  # v12: fold openrouter_stt / openai_chat onto merged kinds
+_V_DROP_VOSK = 14  # v15: delete rows of the removed vosk kind and what named them
 
 
 @pytest_asyncio.fixture
@@ -54,7 +57,7 @@ async def test_migrations_idempotent(tmp_path: Path) -> None:
         async with database.connection.execute("SELECT MAX(version) FROM schema_version;") as cur:
             row = await cur.fetchone()
         assert row is not None
-        assert row[0] == 14
+        assert row[0] == 15
 
 
 async def test_glossary_get_effective_merges_default_and_campaign(db: Database) -> None:
@@ -215,6 +218,97 @@ async def test_migration_removes_rows_of_the_dropped_google_kind(tmp_path: Path)
         assert row[0] == 0, "the unloadable google row survived the migration"
         # And the repository can read the table again without raising.
         assert await ProviderRepository(database).list() == []
+
+
+async def test_migration_removes_the_dropped_vosk_kind_and_its_references(
+    tmp_path: Path,
+) -> None:
+    """The vosk kind never had a connector, so it is removed rather than fixed.
+
+    Its provider rows have to go for the same reason the google ones did in
+    v11: ProviderKind has no "vosk" member any more, so a survivor would raise
+    on every provider read. What v11 did not have to consider is the rows that
+    name a provider id - a picker default, jobs, sessions - and those must not
+    be left pointing at an id that no longer resolves. Nothing of value is
+    lost: with no backend registered, every use of such a provider failed
+    before any audio was transcribed.
+    """
+    path = tmp_path / "legacy-vosk.db"
+    async with Database(path) as database:
+        conn = database.connection
+        await conn.execute(
+            """
+            INSERT INTO providers
+                (id, name, kind, base_url, auth_ref, protocol, model, sample_rate,
+                 language, capabilities, enabled)
+            VALUES ('v1', 'Vosk server', 'vosk', 'ws://localhost:2700', NULL, 'ws',
+                    NULL, 16000, 'de', '{}', 1);
+            """
+        )
+        await conn.execute(
+            """
+            INSERT INTO sessions
+                (id, status, started_at, started_mono, campaign_id, primary_provider,
+                 fallback_provider, summary_provider, diarization, speaker_names)
+            VALUES ('s1', 'idle', 1.0, 0.0, 'camp1', 'v1', 'v1', 'v1', '{}', '{}');
+            """
+        )
+        await conn.execute(
+            """
+            INSERT INTO reprocess_jobs
+                (id, session_id, provider_id, diarization, status, created_at)
+            VALUES ('j1', 's1', 'v1', '{}', 'error', 1.0);
+            """
+        )
+        await conn.execute(
+            """
+            INSERT INTO transcript_segments
+                (session_id, source, text, speaker, start_ts, end_ts, is_final,
+                 words, created_at)
+            VALUES ('s1', 'reprocess:j1', 'orphan', NULL, 0.0, 1.0, 1, '[]', 1.0);
+            """
+        )
+        await conn.execute(
+            """
+            INSERT INTO video_jobs
+                (id, session_id, provider_id, model, prompt, status, created_at)
+            VALUES ('vj1', 's1', 'v1', 'm', 'p', 'error', 1.0);
+            """
+        )
+        await conn.execute(
+            "INSERT INTO kv_settings (key, value) VALUES (?, ?);",
+            (
+                ACTION_DEFAULTS_KEY,
+                ActionDefaults(stt_provider="v1", stt_model="x").model_dump_json(),
+            ),
+        )
+        # Apply only the migration under test: rewinding schema_version and
+        # reconnecting would replay every later migration too, and an
+        # ALTER TABLE cannot be applied twice.
+        await conn.executescript(MIGRATIONS[_V_DROP_VOSK])
+        await conn.commit()
+
+        assert await ProviderRepository(database).list() == []
+        for table in ("providers", "reprocess_jobs", "video_jobs", "transcript_segments"):
+            async with conn.execute(f"SELECT COUNT(*) FROM {table};") as cur:
+                row = await cur.fetchone()
+            assert row is not None
+            assert row[0] == 0, f"a row referencing the dropped vosk kind survived in {table}"
+
+        stored = await SessionRepository(database).get("s1")
+        assert stored is not None
+        assert stored.primary_provider is None
+        assert stored.fallback_provider is None
+        assert stored.summary_provider is None
+
+        async with conn.execute(
+            "SELECT value FROM kv_settings WHERE key = ?;", (ACTION_DEFAULTS_KEY,)
+        ) as cur:
+            row = await cur.fetchone()
+        assert row is not None
+        defaults = ActionDefaults.model_validate_json(row[0])
+        assert defaults.stt_provider == ""
+        assert defaults.stt_model == "x", "only the provider reference is cleared"
 
 
 async def test_migration_folds_retired_kinds_onto_the_merged_ones(tmp_path: Path) -> None:

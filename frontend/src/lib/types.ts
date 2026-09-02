@@ -1,56 +1,175 @@
+import { capabilities, hasRealtimeTranscription } from './capabilities.svelte'
+
 export type ProviderKind =
 	| 'deepgram'
 	| 'openai'
 	| 'openai_compat'
 	| 'assemblyai'
 	| 'gemini'
-	| 'vosk'
 	| 'openrouter'
 
 /** What a provider is being asked to do. Providers are not interchangeable
  *  across these - mirrors `Interaction` in src/loreline/models.py. */
 export type Interaction = 'transcribe' | 'summarize' | 'video'
 
-/**
- * Which interactions each provider kind can serve - the TS mirror of
- * `INTERACTIONS_BY_KIND` in src/loreline/capabilities.py. Keep the two in step:
- * the backend rejects a combination this table would offer, and the UI hides
- * one this table omits.
- */
-export const INTERACTIONS_BY_KIND: Record<ProviderKind, Interaction[]> = {
-	deepgram: ['transcribe'],
-	assemblyai: ['transcribe'],
-	gemini: ['transcribe'],
-	vosk: ['transcribe'],
-	// One entry per vendor rather than one per role. Every picker is scoped by
-	// interaction, so a single stored provider can serve all of these.
-	openai: ['transcribe', 'summarize'],
-	openai_compat: ['transcribe', 'summarize'],
-	openrouter: ['transcribe', 'summarize', 'video'],
+// --- capability config (GET /api/capabilities) ------------------------------
+//
+// The wire shape of src/loreline/capabilities.yaml, which is the single source
+// of truth for which provider+model combinations exist and what each can do.
+// These are types only: the fetched data lives in $lib/capabilities.svelte,
+// and the helper functions at the bottom of this file read it from there.
+
+export type Hosting = 'cloud' | 'selfhosted'
+
+/** 'optional' is a self-hosted server that may or may not check a key. */
+export type AuthKind = 'api_key' | 'optional' | 'none'
+
+export type LanguageSupport = 'single' | 'multi' | 'codeswitch'
+
+/** The transcription toggles a conflict group may name. */
+export type ConflictFeature = 'glossary' | 'inline_diarization' | 'word_timestamps'
+
+/** Whether keyword biasing exists, and what the vendor calls the field.
+ *  `supported: false` is what disables the "Use glossary" checkbox instead of
+ *  leaving a control that silently does nothing. */
+export interface GlossarySupport {
+	supported: boolean
+	field: string | null
+	/** Term count ceiling; null where the vendor documents none. */
+	max_terms: number | null
+	/** Token budget across the whole list. */
+	max_tokens: number | null
+	/** Per-term character limit. */
+	max_term_chars: number | null
+	/** Override applying only to the streaming transport. */
+	max_terms_realtime: number | null
 }
 
-/** Kinds whose transcription connector streams within an utterance, rather
- *  than posting one complete utterance per result. Mirrors REALTIME_KINDS in
- *  src/loreline/capabilities.py. */
-export const REALTIME_KINDS: ProviderKind[] = ['deepgram', 'assemblyai', 'openai']
+export interface TranscribeCapabilities {
+	/** Streams within an utterance - also what gates a model for live capture. */
+	realtime: boolean
+	batch: boolean
+	inline_diarization: boolean
+	glossary: GlossarySupport
+	word_timestamps: boolean
+	languages: LanguageSupport
+	language_codes: string[]
+	/** Groups of features that may not be enabled together: Gemini rejects a
+	 *  request outright when a custom vocabulary arrives alongside diarization
+	 *  or word timestamps. */
+	conflicts: ConflictFeature[][]
+}
+
+export interface ReasoningSupport {
+	supported: boolean
+	/** The model refuses to have reasoning turned off, so never offer 'none'. */
+	mandatory: boolean
+	/** Empty with `supported` true means the model reasons but exposes no
+	 *  levels - show no dropdown rather than an empty one. */
+	efforts: string[]
+}
+
+export interface LlmCapabilities {
+	reasoning: ReasoningSupport
+	context_length: number | null
+	max_output_tokens: number | null
+	system_prompt: boolean
+	temperature: boolean
+}
+
+export interface VideoCapabilities {
+	/** Seconds. */
+	durations: number[]
+	resolutions: string[]
+	aspect_ratios: string[]
+	/** Null where the vendor publishes no answer, which is not "no audio". */
+	audio: boolean | null
+	image_input: boolean
+	prompt_max_chars: number | null
+	prompt_max_tokens: number | null
+}
+
+/** One curated model. A capability block is null for an interaction it does
+ *  not serve. */
+export interface ModelSpec {
+	id: string
+	label: string | null
+	interactions: Interaction[]
+	/** Present but not offered: the release gate for a connector that is
+	 *  written but unverified. No picker may ever list one. */
+	hidden: boolean
+	/** Vendor-announced sunset, ISO date. Warned about, never hidden. */
+	deprecated: string | null
+	transcribe: TranscribeCapabilities | null
+	llm: LlmCapabilities | null
+	video: VideoCapabilities | null
+}
+
+/** Capabilities for models matched by glob - what a self-hosted endpoint's
+ *  catalogue gets, since nobody can enumerate it. */
+export interface ModelPattern {
+	match: string
+	interactions: Interaction[]
+	transcribe: TranscribeCapabilities | null
+	llm: LlmCapabilities | null
+	video: VideoCapabilities | null
+}
+
+export type ModelAnnotation = ModelSpec | ModelPattern
+
+export interface ProviderSpec {
+	label: string
+	hosting: Hosting
+	auth: AuthKind
+	key_url: string | null
+	/** Null means the operator must supply one (self-hosted). */
+	base_url: string | null
+	/** A string when one endpoint serves every interaction, a mapping when the
+	 *  vendor splits its catalogue, null when the config is the catalogue. */
+	catalog_endpoint: string | Partial<Record<Interaction, string>> | null
+	/** False for a provider allowed for stored audio but never a live session. */
+	live_capture: boolean
+	interactions: Interaction[]
+	models: ModelSpec[]
+	model_patterns: ModelPattern[]
+}
+
+export interface CapabilityConfig {
+	version: number
+	/** Substrings that mark a model id as a transcription model. */
+	transcribe_name_markers: string[]
+	realtime_name_markers: string[]
+	providers: Partial<Record<ProviderKind, ProviderSpec>>
+}
+
+// --- capability helpers -----------------------------------------------------
+//
+// Thin wrappers over the fetched config. Every one of them answers "unknown"
+// permissively: if the config never arrived, the UI offers everything and says
+// so, rather than hiding controls an operator needs.
 
 /** The capability badges shown for a provider, in a stable order. */
 export function capabilityBadges(p: { kind: ProviderKind }): string[] {
+	// Badges describe rather than gate, so with no config they say nothing
+	// instead of guessing. Nothing is hidden by an empty list; the controls
+	// themselves stay permissive.
+	if (!capabilities.config) return []
 	const badges: string[] = []
 	if (supportsInteraction(p, 'transcribe')) {
-		badges.push(REALTIME_KINDS.includes(p.kind) ? 'Realtime' : 'Batch')
+		badges.push(hasRealtimeTranscription(p.kind) ? 'Realtime' : 'Batch')
 	}
 	if (supportsInteraction(p, 'summarize')) badges.push('Summarizing')
 	if (supportsInteraction(p, 'video')) badges.push('Video')
 	return badges
 }
 
-/** Kinds that transcribe stored audio but must never drive a live capture -
- *  OpenRouter's STT has no streaming mode. Mirrors `LIVE_CAPTURE_EXCLUDED`. */
-export const LIVE_CAPTURE_EXCLUDED: ProviderKind[] = ['openrouter']
-
 export function supportsInteraction(p: { kind: ProviderKind }, interaction: Interaction): boolean {
-	return (INTERACTIONS_BY_KIND[p.kind] ?? []).includes(interaction)
+	const spec = capabilities.provider(p.kind)
+	// No config (or a kind it has never heard of): allow it. The backend still
+	// refuses a combination it cannot serve, and an error beats a provider that
+	// silently vanished from every picker.
+	if (!spec) return true
+	return spec.interactions.includes(interaction)
 }
 
 /** Providers offerable for one interaction. */
@@ -61,19 +180,17 @@ export function providersFor<T extends { kind: ProviderKind }>(
 	return providers.filter((p) => supportsInteraction(p, interaction))
 }
 
-/** Providers that can drive a *live* capture (excludes re-process-only STT). */
+/** Providers that can drive a *live* capture (excludes re-process-only STT -
+ *  OpenRouter's transcription has no streaming mode). */
 export function liveSttProviders<T extends { kind: ProviderKind }>(providers: T[]): T[] {
 	return providersFor(providers, 'transcribe').filter(
-		(p) => !LIVE_CAPTURE_EXCLUDED.includes(p.kind),
+		(p) => capabilities.provider(p.kind)?.live_capture !== false,
 	)
 }
 
-/** Kinds that summarize (chat-completions); everything else transcribes. */
-export const LLM_KINDS: ProviderKind[] = ['openai', 'openai_compat', 'openrouter']
-
-/** True for an LLM provider - negate it to select the STT ones. */
+/** True for a provider that summarizes - negate it to select the STT ones. */
 export function isLlmProvider(p: { kind: ProviderKind }): boolean {
-	return LLM_KINDS.includes(p.kind)
+	return supportsInteraction(p, 'summarize')
 }
 
 export type ProtocolKind = 'ws' | 'grpc' | 'http_sse' | 'http_batch'
@@ -99,18 +216,6 @@ export interface ModelPrice {
 
 /** One entry in a provider's model list. Only `id` is ever guaranteed -
  *  curated catalogs and plain OpenAI `/models` rows carry nothing else. */
-/** Reasoning-effort levels, in picker order. Mirrors REASONING_EFFORTS in
- *  src/loreline/llm.py. */
-export const REASONING_EFFORTS = [
-	'none',
-	'minimal',
-	'low',
-	'medium',
-	'high',
-	'xhigh',
-	'max',
-] as const
-
 export interface ModelInfo {
 	id: string
 	context_length: number | null

@@ -18,7 +18,6 @@ class ProviderKind(StrEnum):
     OPENAI_COMPAT = "openai_compat"
     ASSEMBLYAI = "assemblyai"
     GEMINI = "gemini"  # Gemini API transcription (accepts a plain API key)
-    VOSK = "vosk"  # self-hosted vosk-server
     OPENROUTER = "openrouter"  # OpenRouter gateway: transcription, summaries and video
 
 

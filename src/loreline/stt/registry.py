@@ -69,6 +69,15 @@ def create_backend(config: ProviderConfig, secrets: SecretStore) -> STTBackend:
     raise ValueError(msg)
 
 
+def registered_transports() -> frozenset[tuple[ProviderKind, bool]]:
+    """Every (kind, realtime) pair that has a backend.
+
+    Exposed so the capability config can be checked against what can actually
+    run, rather than that check reaching into the registry's internals.
+    """
+    return frozenset(_REGISTRY)
+
+
 def registered_kinds() -> list[ProviderKind]:
     """Return the provider kinds with at least one registered backend."""
     _load_backends()

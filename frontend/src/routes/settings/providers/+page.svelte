@@ -49,11 +49,19 @@ import Dropdown from '$lib/Dropdown.svelte'
 import { hintFor, priceTitle } from '$lib/modelInfo'
 import ModelPicker from '$lib/ModelPicker.svelte'
 import {
+	capabilities,
+	deprecationFor,
+	inlineDiarizationFor,
+	interactionsFor,
+	isHiddenModel,
+	reasoningEffortsFor,
+} from '$lib/capabilities.svelte'
+import {
 	providersFor,
 	type ActionDefaults,
+	type AuthKind,
+	type Hosting,
 	type ProtocolKind,
-	INTERACTIONS_BY_KIND,
-	REASONING_EFFORTS,
 	capabilityBadges,
 	type ModelInfo,
 	type OpenRouterRouting,
@@ -62,82 +70,74 @@ import {
 	type ProviderKind,
 } from '$lib/types'
 
-type Hosting = 'cloud' | 'selfhosted'
-
-interface ProviderMeta {
-	kind: ProviderKind
-	label: string
-	hosting: Hosting
+/**
+ * Copy the capability config does not carry, and only that: which transport
+ * this kind's connector speaks, what its base-URL box should suggest, and the
+ * one-line pitch in the wizard's list. Label, hosting, key URL and base URL
+ * come from /api/capabilities - keeping a second copy of those here is what
+ * let the two drift apart in the first place.
+ */
+interface ProviderPresentation {
 	protocol: ProtocolKind
-	baseUrl?: { label: string; placeholder: string }
-	apiKey?: { label: string; url?: string }
-	defaultModel?: string
+	/** Only for a kind the operator has to point somewhere. */
+	baseUrlPlaceholder?: string
 	note: string
 }
 
-const CATALOG: ProviderMeta[] = [
-	{
-		kind: 'deepgram',
-		label: 'Deepgram',
-		hosting: 'cloud',
-		protocol: 'ws',
-		apiKey: { label: 'API key', url: 'https://console.deepgram.com/' },
-		defaultModel: 'nova-2',
-		note: 'Streaming WS · inline diarization.',
-	},
-	{
-		kind: 'assemblyai',
-		label: 'AssemblyAI',
-		hosting: 'cloud',
-		protocol: 'ws',
-		apiKey: { label: 'API key', url: 'https://www.assemblyai.com/dashboard/api-keys' },
-		note: 'Streaming WS · inline diarization.',
-	},
-	{
-		kind: 'openai',
-		label: 'OpenAI',
-		hosting: 'cloud',
-		protocol: 'ws',
-		apiKey: { label: 'API key', url: 'https://platform.openai.com/api-keys' },
-		defaultModel: 'gpt-realtime-whisper',
-		note: 'Realtime transcription and session summaries.',
-	},
-	{
-		kind: 'gemini',
-		label: 'Google Gemini',
-		hosting: 'cloud',
+// Also the wizard's running order, which stays put whether or not the config
+// loaded.
+const PRESENTATION: Record<ProviderKind, ProviderPresentation> = {
+	deepgram: { protocol: 'ws', note: 'Streaming WS · inline diarization.' },
+	assemblyai: { protocol: 'ws', note: 'Streaming WS · inline diarization.' },
+	openai: { protocol: 'ws', note: 'Realtime transcription and session summaries.' },
+	gemini: { protocol: 'http_batch', note: 'API key · diarization · word timestamps.' },
+	openrouter: {
 		protocol: 'http_batch',
-		apiKey: { label: 'API key', url: 'https://aistudio.google.com/api-keys' },
-		defaultModel: 'gemini-3.5-transcribe',
-		note: 'API key · diarization · word timestamps.',
-	},
-	{
-		kind: 'openai_compat',
-		label: 'Self-hosted (OpenAI-compatible)',
-		hosting: 'selfhosted',
-		protocol: 'http_batch',
-		baseUrl: { label: 'Base URL', placeholder: 'http://localhost:8000/v1' },
-		apiKey: { label: 'API key (optional)' },
-		note: 'Speaches, whisper.cpp, Ollama, LM Studio, vLLM. Transcription and/or summaries.',
-	},
-	{
-		kind: 'vosk',
-		label: 'Vosk server',
-		hosting: 'selfhosted',
-		protocol: 'ws',
-		baseUrl: { label: 'Base URL', placeholder: 'ws://localhost:2700' },
-		note: 'Offline, lightweight, ARM-friendly.',
-	},
-	{
-		kind: 'openrouter',
-		label: 'OpenRouter',
-		hosting: 'cloud',
-		protocol: 'http_batch',
-		apiKey: { label: 'API key', url: 'https://openrouter.ai/settings/keys' },
-		defaultModel: 'anthropic/claude-sonnet-4.5',
 		note: 'One key for many vendors. Transcription, summaries and video.',
 	},
-]
+	openai_compat: {
+		protocol: 'http_batch',
+		baseUrlPlaceholder: 'http://localhost:8000/v1',
+		note: 'Speaches, whisper.cpp, Ollama, LM Studio, vLLM. Transcription and/or summaries.',
+	},
+}
+
+/** One row of the wizard's provider list: the served facts, joined to the copy. */
+interface ProviderChoice {
+	kind: ProviderKind
+	label: string
+	/** Null when the config never loaded - such a row shows under both hosting
+	 *  steps rather than disappearing from the wizard entirely. */
+	hosting: Hosting | null
+	auth: AuthKind
+	keyUrl: string | null
+	protocol: ProtocolKind
+	baseUrlPlaceholder: string | null
+	note: string
+	/** Seed for the model field: the first model the config vouches for, so a
+	 *  retired id cannot linger here the way a hardcoded one did. */
+	defaultModel: string
+}
+
+const catalog = $derived(
+	(Object.keys(PRESENTATION) as ProviderKind[]).map((kind): ProviderChoice => {
+		const spec = capabilities.provider(kind)
+		const copy = PRESENTATION[kind]
+		// A base URL the config leaves null is one only the operator can supply.
+		const needsBaseUrl = spec ? spec.base_url === null : !!copy.baseUrlPlaceholder
+		return {
+			kind,
+			label: spec?.label ?? kind,
+			hosting: spec?.hosting ?? null,
+			auth: spec?.auth ?? 'optional',
+			keyUrl: spec?.key_url ?? null,
+			protocol: copy.protocol,
+			baseUrlPlaceholder: needsBaseUrl ? (copy.baseUrlPlaceholder ?? '') : null,
+			note: copy.note,
+			defaultModel: spec?.models.find((m) => !m.hidden)?.id ?? '',
+		}
+	}),
+)
 
 /** OpenRouter's own defaults - see OpenRouterRouting in $lib/types. The
  *  backend drops any field still sitting here, so this is also "send nothing". */
@@ -171,8 +171,11 @@ let modelsLoading = $state(false)
 let modelFilter = $state('')
 let step = $state(1)
 let hosting = $state<Hosting>('cloud')
-let selected = $state<ProviderMeta | null>(null)
+let selectedKind = $state<ProviderKind | null>(null)
 let wizardOpen = $state(false)
+// Derived rather than captured, so a wizard opened before /api/capabilities
+// answered picks up the real label and key link the moment it arrives.
+const selected = $derived(catalog.find((c) => c.kind === selectedKind))
 
 const blankDefaults = (): ActionDefaults => ({
 	stt_provider: '',
@@ -209,12 +212,44 @@ const videoSrcProvider = $derived(providers.find((p) => p.id === defaults.video_
 // names the provider after its type ("OpenRouter"), which is what most people
 // want for their first one. Save stays enabled accordingly.
 const effectiveName = $derived(form.name.trim() || selected?.label || '')
+const wizardChoices = $derived(catalog.filter((c) => c.hosting === null || c.hosting === hosting))
+// 'optional' is a self-hosted endpoint that may or may not check a key.
+const apiKeyLabel = $derived(
+	`${selected?.auth === 'optional' ? 'API key (optional)' : 'API key'}${
+		editing ? ' - blank = keep current' : ''
+	}`,
+)
 // Set by the summary model picker when the chosen model advertises reasoning.
 let llmModelInfo = $state<ModelInfo | undefined>(undefined)
 // Set by the STT model picker: inline diarization only yields speakers for
 // some provider+model pairs, so the default must not be settable otherwise.
 let sttModelInfo = $state<ModelInfo | undefined>(undefined)
-const inlineDiarizationAvailable = $derived(sttModelInfo?.inline_diarization === true)
+const inlineDiarizationAvailable = $derived(
+	inlineDiarizationFor(sttSrcProvider?.kind, defaults.stt_model, sttModelInfo?.inline_diarization),
+)
+// The effort levels this model accepts, in config order; empty means offer no
+// dropdown at all rather than an empty one.
+const llmEfforts = $derived(
+	reasoningEffortsFor(
+		llmSrcProvider?.kind,
+		defaults.summarize_model,
+		llmModelInfo?.supports_reasoning,
+	),
+)
+
+// A level saved against another model, that this one does not accept, would
+// fail every summary started from the default. Only ever narrowed against a
+// list we actually have: an empty one means "no levels known", and clearing a
+// saved setting on that basis would lose it for nothing.
+$effect(() => {
+	if (
+		llmEfforts.length &&
+		defaults.summarize_reasoning_effort &&
+		!llmEfforts.includes(defaults.summarize_reasoning_effort)
+	) {
+		defaults.summarize_reasoning_effort = ''
+	}
+})
 
 // Never leave a stored "inline" default pointing at a model that cannot serve
 // it - the session-start guard would reject every session using it.
@@ -224,10 +259,13 @@ $effect(() => {
 	}
 })
 
+// Hidden models are held back from every picker, favourites included: the
+// flag is the release gate for a connector nobody has verified yet.
+const offeredModels = $derived(availableModels.filter((m) => !isHiddenModel(form.kind, m.id)))
 const filteredModels = $derived(
 	modelFilter
-		? availableModels.filter((m) => m.id.toLowerCase().includes(modelFilter.toLowerCase()))
-		: availableModels,
+		? offeredModels.filter((m) => m.id.toLowerCase().includes(modelFilter.toLowerCase()))
+		: offeredModels,
 )
 
 $effect(() => {
@@ -281,7 +319,7 @@ async function loadModels() {
 		// ones. Load each interaction the kind actually supports and merge,
 		// de-duplicated, so a favourite can be picked for any of its roles.
 		const catalogues = await Promise.all(
-			(INTERACTIONS_BY_KIND[form.kind] ?? []).map((interaction) =>
+			interactionsFor(form.kind).map((interaction) =>
 				api
 					.providerModels({
 						kind: form.kind,
@@ -295,7 +333,11 @@ async function loadModels() {
 			),
 		)
 		const seen = new Set<string>()
-		availableModels = catalogues.flat().filter((m) => !seen.has(m.id) && seen.add(m.id))
+		// Hidden models are dropped here as well as in the list below, so one can
+		// never survive as a stored favourite either.
+		availableModels = catalogues
+			.flat()
+			.filter((m) => !seen.has(m.id) && seen.add(m.id) && !isHiddenModel(form.kind, m.id))
 		if (availableModels.length) {
 			const present = new Set(availableModels.map((m) => m.id))
 			form.favorite_models = (form.favorite_models ?? []).filter((m) => present.has(m))
@@ -336,7 +378,7 @@ async function save() {
 
 function openWizard() {
 	editing = null
-	selected = null
+	selectedKind = null
 	form = blank()
 	availableModels = []
 	modelFilter = ''
@@ -349,15 +391,15 @@ function pickHosting(h: Hosting) {
 	step = 2
 }
 
-function pickProvider(meta: ProviderMeta) {
-	selected = meta
-	form = { ...blank(), kind: meta.kind, protocol: meta.protocol, model: meta.defaultModel ?? '' }
+function pickProvider(meta: ProviderChoice) {
+	selectedKind = meta.kind
+	form = { ...blank(), kind: meta.kind, protocol: meta.protocol, model: meta.defaultModel }
 	step = 3
 }
 
 function resetWizard() {
 	editing = null
-	selected = null
+	selectedKind = null
 	form = blank()
 	step = 1
 	wizardOpen = false
@@ -365,7 +407,7 @@ function resetWizard() {
 
 function edit(p: ProviderConfig) {
 	editing = p.id
-	selected = CATALOG.find((m) => m.kind === p.kind) ?? null
+	selectedKind = p.kind
 	form = {
 		name: p.name,
 		kind: p.kind,
@@ -607,7 +649,7 @@ onMount(async () => {
 						autoseed={false}
 						onselect={(m) => (llmModelInfo = m)}
 					/>
-					{#if llmModelInfo?.supports_reasoning}
+					{#if llmEfforts.length}
 						<Label class="text-xs text-muted-foreground" for="def-llm-effort">
 							Reasoning effort
 						</Label>
@@ -617,7 +659,7 @@ onMount(async () => {
 							defaultValue={savedDefaults.summarize_reasoning_effort ?? ''}
 							options={[
 								{ value: '', label: "Model's default" },
-								...REASONING_EFFORTS.map((e) => ({ value: e, label: e })),
+								...llmEfforts.map((e) => ({ value: e, label: e })),
 							]}
 						/>
 					{/if}
@@ -736,7 +778,7 @@ onMount(async () => {
 				<Button variant="outline" size="sm" onclick={() => (step = 1)}>← Back</Button>
 			</div>
 			<div class="mt-2 flex flex-col gap-1.5">
-				{#each CATALOG.filter((m) => m.hosting === hosting) as meta, i (`${meta.kind}-${i}`)}
+				{#each wizardChoices as meta (meta.kind)}
 					<Button
 						variant="outline"
 						class="h-auto flex-col items-start gap-0.5 py-2"
@@ -763,10 +805,10 @@ onMount(async () => {
 					<Label for="name">Name</Label>
 					<Input id="name" bind:value={form.name} placeholder={sel.label} />
 				</div>
-				{#if sel.baseUrl}
+				{#if sel.baseUrlPlaceholder !== null}
 					<div class="flex flex-col gap-2">
-						<Label for="url">{sel.baseUrl.label}</Label>
-						<Input id="url" bind:value={form.base_url} placeholder={sel.baseUrl.placeholder} />
+						<Label for="url">Base URL</Label>
+						<Input id="url" bind:value={form.base_url} placeholder={sel.baseUrlPlaceholder} />
 					</div>
 				{/if}
 				<div class="flex flex-col gap-2">
@@ -784,12 +826,21 @@ onMount(async () => {
 						<Input placeholder="filter…" bind:value={modelFilter} />
 						<div class="max-h-45 overflow-auto rounded-md border p-1.5">
 							{#each filteredModels as m (m.id)}
+								{@const sunset = deprecationFor(form.kind, m.id)}
 								<label class="flex items-center gap-2 px-1 py-0.5" title={priceTitle(m)}>
 									<Checkbox
 										checked={(form.favorite_models ?? []).includes(m.id)}
 										onCheckedChange={() => toggleFavorite(m.id)}
 									/>
 									<span class="min-w-0 flex-1 truncate">{m.id}</span>
+									{#if sunset}
+										<span
+											class="shrink-0 text-xs whitespace-nowrap text-amber-500"
+											title="The vendor is retiring this model on {sunset}."
+										>
+											retiring {sunset}
+										</span>
+									{/if}
 									{#if hintFor(m)}
 										<span class="shrink-0 text-xs whitespace-nowrap text-muted-foreground">
 											{hintFor(m)}
@@ -813,15 +864,13 @@ onMount(async () => {
 						Deepgram/AssemblyAI).
 					</span>
 				</div>
-				{#if sel.apiKey}
+				{#if sel.auth !== 'none'}
 					<div class="flex flex-col gap-2">
 						<div class="flex items-center justify-between">
-							<Label for="apikey"
-								>{sel.apiKey.label}{editing ? ' - blank = keep current' : ''}</Label
-							>
-							{#if sel.apiKey.url}
+							<Label for="apikey">{apiKeyLabel}</Label>
+							{#if sel.keyUrl}
 								<a
-									href={sel.apiKey.url}
+									href={sel.keyUrl}
 									target="_blank"
 									rel="noreferrer"
 									class="text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"

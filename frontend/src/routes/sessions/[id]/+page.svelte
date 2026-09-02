@@ -3,6 +3,7 @@ import { ChevronDown } from '@lucide/svelte'
 import { onDestroy, onMount } from 'svelte'
 import { page } from '$app/stores'
 import { ApiError, api } from '$lib/api'
+import { featureBlockedReason, reasoningEffortsFor } from '$lib/capabilities.svelte'
 import { Badge } from '$lib/components/ui/badge'
 import { Button } from '$lib/components/ui/button'
 import { Card, CardContent } from '$lib/components/ui/card'
@@ -40,7 +41,6 @@ import {
 	type ExportFormat,
 	type ProviderConfig,
 	type ReprocessJob,
-	REASONING_EFFORTS,
 	type ModelInfo,
 	type SessionDetail,
 	type TranscriptEvent,
@@ -75,6 +75,16 @@ const formatLabels: Record<ExportFormat, string> = {
 }
 const hasAudio = $derived(!!detail?.session.audio_path)
 const rpSelectedProvider = $derived(providers.find((p) => p.id === rpProvider))
+// Not every model can take a glossary: OpenRouter's transcription API accepts
+// a prompt field and ignores it, so the checkbox there was a silent no-op.
+// Disabled with the reason, rather than left to do nothing.
+const rpGlossaryBlocked = $derived(
+	featureBlockedReason(rpSelectedProvider?.kind, rpModel, 'glossary'),
+)
+
+$effect(() => {
+	if (rpUseGlossary && rpGlossaryBlocked) rpUseGlossary = false
+})
 
 let exportOpen = $state(false)
 
@@ -311,7 +321,8 @@ let summarizeOpen = $state(false)
 let sumProvider = $state('')
 let sumModel = $state('')
 let sumEffort = $state('')
-// Set by the model picker when the chosen model advertises reasoning support.
+// Set by the model picker; the fallback for a model the capability config
+// does not annotate.
 let sumModelInfo = $state<ModelInfo | undefined>(undefined)
 let sumBusy = $state(false)
 let sumError = $state('')
@@ -322,6 +333,19 @@ let defaults = $state<ActionDefaults>({
 	summarize_model: '',
 })
 const selectedLlm = $derived(llmProviders.find((p) => p.id === sumProvider))
+// The levels this model actually accepts, in config order. Empty means no
+// dropdown at all: either it does not reason, or it reasons without exposing
+// levels, and an empty selector would be a dead control in both cases.
+const sumEfforts = $derived(
+	reasoningEffortsFor(selectedLlm?.kind, sumModel, sumModelInfo?.supports_reasoning),
+)
+
+// A level carried over from another model that does not offer it would fail
+// the request. An empty list means the selector is hidden and nothing is sent,
+// so leave the pick alone rather than forgetting it on the way past.
+$effect(() => {
+	if (sumEfforts.length && sumEffort && !sumEfforts.includes(sumEffort)) sumEffort = ''
+})
 
 /** Re-processing replays stored audio, so it accepts every transcribe-capable
  *  provider - including the ones excluded from live capture. */
@@ -473,7 +497,7 @@ async function runSummarize() {
 		await api.summarizeSession(id, {
 			provider_id: sumProvider,
 			model: sumModel || null,
-			reasoning_effort: sumModelInfo?.supports_reasoning ? sumEffort || null : null,
+			reasoning_effort: sumEfforts.length ? sumEffort || null : null,
 		})
 		detail = await api.getSession(id) // refresh to show the stored summary
 		summarizeOpen = false
@@ -716,13 +740,15 @@ onDestroy(() => {
 						/>
 						<label
 							class="flex items-center gap-2"
-							title="Sends the campaign's terms to the provider as keyterms or a prompt."
+							title={rpGlossaryBlocked ||
+								"Sends the campaign's terms to the provider as keyterms or a prompt."}
 						>
 							<Checkbox
 								checked={rpUseGlossary}
+								disabled={!!rpGlossaryBlocked}
 								onCheckedChange={(v) => (rpUseGlossary = v === true)}
 							/>
-							<span>Use glossary</span>
+							<span class={rpGlossaryBlocked ? 'text-muted-foreground' : ''}>Use glossary</span>
 						</label>
 						<Button variant="outline" onclick={reprocess} disabled={rpBusy || !rpProvider}>
 							{rpBusy ? 'Queuing…' : 'Re-process audio'}
@@ -1001,7 +1027,7 @@ onDestroy(() => {
 				onselect={(m) => (sumModelInfo = m)}
 			/>
 		</div>
-		{#if sumModelInfo?.supports_reasoning}
+		{#if sumEfforts.length}
 			<div class="mt-3 flex flex-col gap-2">
 				<Label>Reasoning effort</Label>
 				<Dropdown
@@ -1009,7 +1035,7 @@ onDestroy(() => {
 					defaultValue={defaults.summarize_reasoning_effort ?? ''}
 					options={[
 						{ value: '', label: "Model's default" },
-						...REASONING_EFFORTS.map((e) => ({ value: e, label: e })),
+						...sumEfforts.map((e) => ({ value: e, label: e })),
 					]}
 				/>
 				<span class="text-xs text-muted-foreground">

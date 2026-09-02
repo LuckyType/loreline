@@ -8,7 +8,7 @@ import pytest
 
 from loreline.models import Protocol, ProviderConfig, ProviderKind
 from loreline.secrets import SecretStore
-from loreline.stt import create_backend
+from loreline.stt import create_backend, registry
 from loreline.stt.backends.gemini import GeminiSTTBackend
 from loreline.stt.backends.gemini_live import GeminiLiveBackend
 from loreline.stt.backends.openai_compat import OpenAICompatBackend
@@ -41,11 +41,22 @@ def test_create_backend_returns_connector(tmp_path: Path) -> None:
     assert backend.config.id == "p1"
 
 
-def test_create_backend_unknown_kind_raises(tmp_path: Path) -> None:
+def test_create_backend_unknown_kind_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every shipped kind has a connector now, so the guard is provoked by
+    emptying the registry. It still has to hold: a stored config whose kind
+    lost its backend must fail with a message naming the kind, which is what
+    the vosk kind did for real until it was removed in migration v15.
+    """
     secrets = SecretStore(tmp_path / "secrets.json")
-    config = _config(ProviderKind.VOSK)  # no backend registered yet
+    # Also stub the loader: the backend modules may not be imported yet, and
+    # importing them would re-run their @register decorators into the empty
+    # dict this test just installed.
+    monkeypatch.setattr(registry, "_REGISTRY", {})
+    monkeypatch.setattr(registry, "_load_backends", lambda: None)
     with pytest.raises(ValueError, match="no STT backend registered"):
-        create_backend(config, secrets)
+        create_backend(_config(ProviderKind.OPENAI_COMPAT), secrets)
 
 
 class TestModelResolution:

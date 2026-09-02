@@ -1,7 +1,7 @@
 """List the models a provider offers, for the on-demand model pickers.
 
 OpenAI-compatible endpoints (OpenAI cloud, OpenRouter, Speaches, Ollama, LM Studio,
-…) expose ``GET /v1/models``; the others (Deepgram, AssemblyAI, Google, vosk) don't, so a
+…) expose ``GET /v1/models``; the others (Deepgram, AssemblyAI, Gemini) don't, so a
 small curated catalog per kind is the fallback. Best-effort: a failed live fetch
 falls back to the curated list (or an empty list).
 """
@@ -97,9 +97,6 @@ _CURATED: dict[ProviderKind, list[str]] = {
     # 2027-02-26), so a fallback should not seed them into new configs.
     # https://developers.openai.com/api/docs/guides/realtime-transcription
     ProviderKind.OPENAI: ["gpt-live-transcribe", "gpt-realtime-whisper", "gpt-transcribe"],
-    # Self-hosted: whatever the operator loaded, discoverable only from their
-    # own server's /models.
-    ProviderKind.VOSK: [],
 }
 
 ClientFactory = Callable[[], httpx.AsyncClient]

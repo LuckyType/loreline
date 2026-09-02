@@ -47,6 +47,7 @@ from loreline.web.auth import LoginRateLimiter, ensure_jwt_secret
 from loreline.web.routes import (
     audio,
     auth,
+    capabilities,
     glossary,
     logs_ws,
     providers,
@@ -271,6 +272,7 @@ def create_app(
     )
 
     app.include_router(system.router)
+    app.include_router(capabilities.router)
     app.include_router(auth.router)
     app.include_router(audio.router)
     app.include_router(providers.router)

@@ -15,6 +15,7 @@ from loreline.capabilities import (
     interactions_for,
     is_realtime_model,
     kinds_for,
+    kinds_with_inline_diarization,
     supports,
     supports_batch,
     supports_inline_diarization,
@@ -77,7 +78,6 @@ class TestLiveCapture:
             ProviderKind.OPENAI,
             ProviderKind.OPENAI_COMPAT,
             ProviderKind.GEMINI,
-            ProviderKind.VOSK,
         ],
     )
     def test_every_other_stt_kind_still_drives_live_capture(self, kind: ProviderKind) -> None:
@@ -264,11 +264,21 @@ class TestInlineDiarization:
         unlabelled transcript."""
         assert not supports_inline_diarization(ProviderKind.GEMINI, "gemini-3.5-transcribe-live")
 
-    def test_openrouter_grok_stt_diarizes(self) -> None:
-        """The one model in OpenRouter's transcription catalogue that
-        advertises diarization. Needs no request flag - the labels ride along
-        on the verbose_json body, which the connector now parses."""
-        assert supports_inline_diarization(ProviderKind.OPENROUTER, "x-ai/grok-stt-1.0")
+    def test_openrouter_surfaces_no_diarization_at_all(self) -> None:
+        """Not even for the model whose description advertises it.
+
+        x-ai/grok-stt-1.0's OpenRouter page says it "supports transcription
+        with word-level timestamps, optional speaker diarization, and
+        multichannel audio", and this repo believed it. Checked against the
+        gateway on 2026-09-02: the transcription request schema has no
+        diarization field, the model's supported_parameters are only
+        max_tokens/temperature/top_p/seed/logprobs/top_logprobs/response_format,
+        and the response body carries no speaker structure. Diarization is a
+        native-provider feature the gateway does not pass through, so offering
+        "Inline (from STT)" here produced an unlabelled transcript and no
+        warning."""
+        assert not supports_inline_diarization(ProviderKind.OPENROUTER, "x-ai/grok-stt-1.0")
+        assert ProviderKind.OPENROUTER not in kinds_with_inline_diarization()
 
     def test_models_that_return_no_speakers_report_false(self) -> None:
         """Parsing speakers does not conjure them: Whisper produces none, and

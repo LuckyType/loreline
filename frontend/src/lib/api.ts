@@ -6,6 +6,7 @@ import type {
 	AlertChannelWrite,
 	AlertTestResult,
 	AutostartState,
+	CapabilityConfig,
 	DeviceSetting,
 	ExportFormat,
 	Glossary,
@@ -127,6 +128,13 @@ export const api = {
 			method: 'PUT',
 			body: JSON.stringify({ device }),
 		}),
+
+	// --- capabilities ---
+	// The whole of src/loreline/capabilities.yaml: which provider+model
+	// combinations exist and what each can do. Unauthenticated and unchanging
+	// for the life of the process, so $lib/capabilities.svelte fetches it once
+	// and shares it. Do not call this directly - use loadCapabilities().
+	capabilities: () => request<CapabilityConfig>('/api/capabilities'),
 
 	// --- providers ---
 	listProviders: () => request<ProviderConfig[]>('/api/providers'),

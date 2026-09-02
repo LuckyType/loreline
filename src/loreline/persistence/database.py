@@ -196,6 +196,61 @@ MIGRATIONS: list[str] = [
     """
     ALTER TABLE reprocess_jobs ADD COLUMN use_glossary INTEGER NOT NULL DEFAULT 1;
     """,
+    # v15 - drop the vosk provider kind. Same reasoning as v11 (the dropped
+    # google kind): ProviderKind no longer has a "vosk" member, so a surviving
+    # row would raise on every provider read. vosk was only ever offered in the
+    # wizard - no connector was ever registered for the kind, so every attempt
+    # to use such a provider failed with "no STT backend registered" before any
+    # audio reached it. That is why the rows pointing at one can be cleared
+    # rather than preserved: none of them can hold a transcript, a summary or a
+    # video, only a failed or never-started attempt.
+    #
+    # Everything that names a provider id is cleaned before the rows go, so no
+    # dangling reference is left behind:
+    #   * kv_settings 'action_defaults' - a picker default naming a vosk
+    #     provider would render as a stale, unselectable choice. Only the
+    #     transcription slot could ever hold one (vosk declared `transcribe`
+    #     alone), but all three provider slots are cleared so a hand-edited
+    #     value cannot survive either.
+    #   * reprocess_jobs / video_jobs - jobs that could only have failed, plus
+    #     the per-version segment tags (reprocess:<job_id>) that would point at
+    #     a job that no longer exists.
+    #   * sessions.primary_provider / fallback_provider / summary_provider -
+    #     nullable already, and NULL is what "no provider" means there.
+    # (As in v11, an orphaned `provider:<id>` entry may remain in secrets.json;
+    # harmless, and a DB migration has no reach into that file.)
+    """
+    UPDATE kv_settings SET value = json_set(value, '$.stt_provider', '')
+        WHERE key = 'action_defaults' AND json_valid(value)
+          AND json_extract(value, '$.stt_provider')
+              IN (SELECT id FROM providers WHERE kind = 'vosk');
+    UPDATE kv_settings SET value = json_set(value, '$.summarize_provider', '')
+        WHERE key = 'action_defaults' AND json_valid(value)
+          AND json_extract(value, '$.summarize_provider')
+              IN (SELECT id FROM providers WHERE kind = 'vosk');
+    UPDATE kv_settings SET value = json_set(value, '$.video_provider', '')
+        WHERE key = 'action_defaults' AND json_valid(value)
+          AND json_extract(value, '$.video_provider')
+              IN (SELECT id FROM providers WHERE kind = 'vosk');
+
+    DELETE FROM transcript_segments WHERE source IN (
+        SELECT 'reprocess:' || j.id FROM reprocess_jobs j
+        WHERE j.provider_id IN (SELECT id FROM providers WHERE kind = 'vosk')
+    );
+    DELETE FROM reprocess_jobs
+        WHERE provider_id IN (SELECT id FROM providers WHERE kind = 'vosk');
+    DELETE FROM video_jobs
+        WHERE provider_id IN (SELECT id FROM providers WHERE kind = 'vosk');
+
+    UPDATE sessions SET primary_provider = NULL
+        WHERE primary_provider IN (SELECT id FROM providers WHERE kind = 'vosk');
+    UPDATE sessions SET fallback_provider = NULL
+        WHERE fallback_provider IN (SELECT id FROM providers WHERE kind = 'vosk');
+    UPDATE sessions SET summary_provider = NULL
+        WHERE summary_provider IN (SELECT id FROM providers WHERE kind = 'vosk');
+
+    DELETE FROM providers WHERE kind = 'vosk';
+    """,
 ]
 
 

@@ -6,6 +6,7 @@ import { onDestroy, onMount } from 'svelte'
 import { goto } from '$app/navigation'
 import { page } from '$app/stores'
 import { ApiError, api } from '$lib/api'
+import { capabilities, loadCapabilities } from '$lib/capabilities.svelte'
 import ConfirmDialog from '$lib/ConfirmDialog.svelte'
 import { Badge } from '$lib/components/ui/badge'
 import { Button } from '$lib/components/ui/button'
@@ -72,6 +73,9 @@ let magicCleanup: (() => void) | null = null
 onMount(() => {
 	poll()
 	timer = setInterval(poll, 5000)
+	// One fetch per page load, shared by every picker. It fails soft: the
+	// pickers stay populated and the banner below says the gating is off.
+	loadCapabilities()
 	magicCleanup = initMagicBento()
 })
 onDestroy(() => {
@@ -206,6 +210,16 @@ function hms(seconds: number | undefined): string {
 				</nav>
 			{/if}
 			<main class="overflow-auto p-6">
+				{#if capabilities.error}
+					<div
+						class="mb-4 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-600"
+					>
+						<span>{capabilities.error}</span>
+						<button class="underline underline-offset-2" onclick={() => capabilities.reload()}>
+							Retry
+						</button>
+					</div>
+				{/if}
 				{@render children()}
 			</main>
 		</div>

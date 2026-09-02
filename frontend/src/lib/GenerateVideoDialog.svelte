@@ -12,10 +12,13 @@
  *    differ in which durations, resolutions and aspect ratios they accept
  *    (some accept no duration at all), and a model handed a parameter it does
  *    not support rejects the whole request - so anything the model does not
- *    list simply is not offered, and is not sent.
+ *    list simply is not offered, and is not sent. The vouched-for answer is
+ *    the model's video block in capabilities.yaml; the vendor catalogue's own
+ *    lists are the fallback for a model that file does not annotate.
  */
 
 import { ApiError, api } from '$lib/api'
+import { deprecationNote, isHiddenModel, videoCapsFor } from '$lib/capabilities.svelte'
 import Dropdown from '$lib/Dropdown.svelte'
 import { Button } from '$lib/components/ui/button'
 import { Checkbox } from '$lib/components/ui/checkbox'
@@ -63,10 +66,25 @@ let loadingModels = $state(false)
 let busy = $state(false)
 let error = $state('')
 
-const model = $derived(models.find((m) => m.id === modelId))
-const durations = $derived(model?.supported_durations ?? [])
-const resolutions = $derived(model?.supported_resolutions ?? [])
-const aspectRatios = $derived(model?.supported_aspect_ratios ?? [])
+const providerKind = $derived(providers.find((p) => p.id === providerId)?.kind)
+// A hidden model is one whose connector is unverified; it must never be listed.
+const offered = $derived(models.filter((m) => !isHiddenModel(providerKind, m.id)))
+const model = $derived(offered.find((m) => m.id === modelId))
+const caps = $derived(videoCapsFor(providerKind, modelId))
+const durations = $derived(
+	caps?.durations.length ? caps.durations : (model?.supported_durations ?? []),
+)
+const resolutions = $derived(
+	caps?.resolutions.length ? caps.resolutions : (model?.supported_resolutions ?? []),
+)
+const aspectRatios = $derived(
+	caps?.aspect_ratios.length ? caps.aspect_ratios : (model?.supported_aspect_ratios ?? []),
+)
+// `audio: null` in the config means the vendor publishes no answer, which is
+// not the same as "no audio" - fall back to the catalogue rather than promise
+// silence.
+const audioOffered = $derived(caps?.audio ?? model?.generate_audio === true)
+const sunset = $derived(deprecationNote(providerKind, modelId))
 
 // Re-seed the prompt and pick a provider each time the dialog opens, but never
 // while it is open - that would wipe an edit in progress.
@@ -92,11 +110,14 @@ $effect(() => {
 		.then((loaded) => {
 			models = loaded
 			modelsFor = pid
-			if (!loaded.some((m) => m.id === modelId)) {
+			const pickable = loaded.filter(
+				(m) => !isHiddenModel(providers.find((p) => p.id === pid)?.kind, m.id),
+			)
+			if (!pickable.some((m) => m.id === modelId)) {
 				const preferred = defaults?.video_model
 				modelId =
-					(preferred && loaded.some((m) => m.id === preferred) ? preferred : '') ||
-					loaded[0]?.id ||
+					(preferred && pickable.some((m) => m.id === preferred) ? preferred : '') ||
+					pickable[0]?.id ||
 					''
 			}
 		})
@@ -113,15 +134,14 @@ $effect(() => {
 // back to its own first supported value. Carrying "1080p" over to a model that
 // only does 720p would fail the request at submit time.
 $effect(() => {
-	const m = model
-	if (!m) return
-	if (duration !== null && !(m.supported_durations ?? []).includes(duration)) duration = null
-	if (duration === null && m.supported_durations?.length) duration = m.supported_durations[0]
-	if (resolution && !(m.supported_resolutions ?? []).includes(resolution)) resolution = ''
-	if (!resolution && m.supported_resolutions?.length) resolution = m.supported_resolutions[0]
-	if (aspectRatio && !(m.supported_aspect_ratios ?? []).includes(aspectRatio)) aspectRatio = ''
-	if (!aspectRatio && m.supported_aspect_ratios?.length) aspectRatio = m.supported_aspect_ratios[0]
-	if (!m.generate_audio) generateAudio = false
+	if (!model) return
+	if (duration !== null && !durations.includes(duration)) duration = null
+	if (duration === null && durations.length) duration = durations[0]
+	if (resolution && !resolutions.includes(resolution)) resolution = ''
+	if (!resolution && resolutions.length) resolution = resolutions[0]
+	if (aspectRatio && !aspectRatios.includes(aspectRatio)) aspectRatio = ''
+	if (!aspectRatio && aspectRatios.length) aspectRatio = aspectRatios[0]
+	if (!audioOffered) generateAudio = false
 })
 
 async function submit() {
@@ -180,13 +200,16 @@ async function submit() {
 						bind:value={modelId}
 						loading={loadingModels}
 						filterable
-						options={models.map((m) => ({ value: m.id, label: m.name || m.id }))}
+						options={offered.map((m) => ({ value: m.id, label: m.name || m.id }))}
 						placeholder={loadingModels ? 'Loading models…' : 'Select model…'}
 					/>
-					{#if !loadingModels && models.length === 0 && modelsFor}
+					{#if !loadingModels && offered.length === 0 && modelsFor}
 						<span class="text-xs text-muted-foreground">
 							No video models available - check the provider's API key.
 						</span>
+					{/if}
+					{#if sunset}
+						<span class="text-xs text-amber-500">{sunset}</span>
 					{/if}
 				</div>
 
@@ -229,7 +252,7 @@ async function submit() {
 							</div>
 						{/if}
 					</div>
-					{#if model.generate_audio}
+					{#if audioOffered}
 						<label class="flex items-center gap-2">
 							<Checkbox
 								checked={generateAudio}

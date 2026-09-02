@@ -2,6 +2,7 @@
 import { ArrowDownToLine, ChevronDown, Filter, Trash2, WrapText } from '@lucide/svelte'
 import { onDestroy, onMount } from 'svelte'
 import { ApiError, api } from '$lib/api'
+import { featureBlockedReason, inlineDiarizationFor } from '$lib/capabilities.svelte'
 import { Button } from '$lib/components/ui/button'
 import { Card, CardContent } from '$lib/components/ui/card'
 import { Checkbox } from '$lib/components/ui/checkbox'
@@ -42,15 +43,43 @@ const sttProviders = $derived(liveSttProviders(providers))
 const primaryProvider = $derived(providers.find((p) => p.id === primary))
 const fallbackProvider = $derived(providers.find((p) => p.id === fallback))
 let diarMode = $state<DiarizationModeKind>('none')
-// Set by the primary model picker: inline diarization only yields speakers for
-// some provider+model pairs (see src/loreline/capabilities.py), so the option
-// is offered only when the chosen model actually returns them.
+// Set by the primary model picker, and used only as the fallback for a model
+// the capability config does not annotate.
 let primaryModelInfo = $state<ModelInfo | undefined>(undefined)
-const inlineAvailable = $derived(primaryModelInfo?.inline_diarization === true)
+const primaryKind = $derived(primaryProvider?.kind)
+// Inline diarization only yields speakers for some provider+model pairs, so
+// the option is offered only when the chosen model actually returns them.
+const inlineAvailable = $derived(
+	inlineDiarizationFor(primaryKind, model, primaryModelInfo?.inline_diarization),
+)
 let diarEndpoint = $state('')
 // On by default: capture always fed the campaign glossary to the provider, and
 // turning it off is the deliberate choice (hear the audio unbiased).
 let useGlossary = $state(true)
+// Some models cannot take a glossary at all (the field is simply ignored), and
+// some reject it in combination with another feature - Gemini's batch model
+// refuses a custom vocabulary sent alongside diarization. Either way the
+// checkbox is disabled and says why, rather than being a silent no-op.
+const glossaryBlocked = $derived(
+	featureBlockedReason(
+		primaryKind,
+		model,
+		'glossary',
+		diarMode === 'inline' ? ['inline_diarization'] : [],
+	),
+)
+// The mirror image: with the glossary on, a model that cannot combine the two
+// keeps the inline option visible but greyed, so the reason is discoverable.
+const inlineConflict = $derived(
+	inlineAvailable
+		? featureBlockedReason(
+				primaryKind,
+				model,
+				'inline_diarization',
+				useGlossary ? ['glossary'] : [],
+			)
+		: '',
+)
 let error = $state('')
 let busy = $state(false)
 
@@ -67,6 +96,14 @@ const endpointMissing = $derived(diarMode === 'remote' && !diarEndpoint.trim())
 // to a model that returns no speakers - the backend would reject the start.
 $effect(() => {
 	if (diarMode === 'inline' && primaryModelInfo && !inlineAvailable) diarMode = 'none'
+})
+
+// The glossary is the default-on convenience and diarization the deliberate
+// pick, so when the two cannot be combined it is the glossary that gives way -
+// silently sending a request the vendor rejects is the one option that helps
+// nobody.
+$effect(() => {
+	if (useGlossary && glossaryBlocked) useGlossary = false
 })
 
 function setDiarMode(mode: string) {
@@ -377,7 +414,9 @@ onDestroy(() => {
 					>
 					<span class="text-muted-foreground">·</span>
 					<span class="text-muted-foreground">Glossary</span>
-					<span class="text-foreground">{useGlossary ? 'On' : 'Off'}</span>
+					<span class="text-foreground"
+						>{useGlossary ? 'On' : glossaryBlocked ? 'Unsupported' : 'Off'}</span
+					>
 					<Button
 						variant="ghost"
 						size="sm"
@@ -423,7 +462,14 @@ onDestroy(() => {
 								options={[
 									{ value: 'none', label: 'None' },
 									...(inlineAvailable
-										? [{ value: 'inline', label: 'Inline (from STT)' }]
+										? [
+												{
+													value: 'inline',
+													label: 'Inline (from STT)',
+													disabled: !!inlineConflict,
+													title: inlineConflict,
+												},
+											]
 										: []),
 									{ value: 'remote', label: 'Remote service' },
 								]}
@@ -432,20 +478,29 @@ onDestroy(() => {
 								<span class="text-xs text-muted-foreground">
 									This model returns no speaker labels, so inline diarization isn't offered.
 								</span>
+							{:else if inlineConflict}
+								<span class="text-xs text-muted-foreground">
+									{inlineConflict}
+									Turn the glossary off to use it.
+								</span>
 							{/if}
 						</div>
 						<div class="flex flex-col gap-2">
 							<Label for="use-glossary">Glossary</Label>
-							<label class="flex items-center gap-2">
+							<label class="flex items-center gap-2" title={glossaryBlocked}>
 								<Checkbox
 									id="use-glossary"
 									checked={useGlossary}
+									disabled={!!glossaryBlocked}
 									onCheckedChange={(v) => (useGlossary = v === true)}
 								/>
-								<span class="text-sm">Use glossary</span>
+								<span class={cn('text-sm', glossaryBlocked && 'text-muted-foreground')}>
+									Use glossary
+								</span>
 							</label>
 							<span class="text-xs text-muted-foreground">
-								Sends the campaign's terms to the provider as keyterms or a prompt.
+								{glossaryBlocked ||
+									"Sends the campaign's terms to the provider as keyterms or a prompt."}
 							</span>
 						</div>
 						{#if diarMode === 'remote'}

@@ -1,5 +1,6 @@
 <script lang="ts">
 import { api } from '$lib/api'
+import { deprecationFor, deprecationNote, withoutHidden } from '$lib/capabilities.svelte'
 import Dropdown from '$lib/Dropdown.svelte'
 import { hintFor, priceTitle } from '$lib/modelInfo'
 import type { Interaction, ModelInfo, ProviderConfig } from '$lib/types'
@@ -49,12 +50,22 @@ let seededValue = $state('')
 // actually has it.
 const cacheKey = $derived(`${provider?.id ?? ''}:${interaction}:${String(refreshToken)}`)
 const loaded = $derived(provider && loadedFor === cacheKey ? all : [])
-const fetched = $derived(loaded.map((m) => m.id))
+const kind = $derived(provider?.kind)
+// A hidden model is one whose connector is written but unverified against the
+// real API (see capabilities.yaml). It must never reach a picker - listing it
+// is exactly what the flag exists to prevent - so every source of ids here is
+// filtered, the live catalogue and the stored favourites alike.
+const fetched = $derived(
+	withoutHidden(
+		kind,
+		loaded.map((m) => m.id),
+	),
+)
 // Price/context hints are only known for models the live list actually
 // returned - a favourite or stored default that predates the fetch (or that
 // the provider no longer serves) simply renders without one.
 const detail = $derived(new Map(loaded.map((m) => [m.id, m])))
-const favorites = $derived(provider?.favorite_models ?? [])
+const favorites = $derived(withoutHidden(kind, provider?.favorite_models ?? []))
 
 // Report the selected model's metadata upward once the list has resolved.
 $effect(() => {
@@ -66,18 +77,27 @@ const defaultForThisProvider = $derived(
 		: [],
 )
 
+// A retiring model keeps its place in the list - a GM mid-campaign should not
+// lose it - but says so, in the row and again under the trigger once picked.
 const options = $derived(
 	[
 		...new Set(
 			[...defaultForThisProvider, ...favorites, ...fetched].filter((m): m is string => !!m),
 		),
-	].map((m) => ({
-		value: m,
-		label: m,
-		hint: hintFor(detail.get(m)),
-		title: priceTitle(detail.get(m)),
-	})),
+	].map((m) => {
+		const sunset = deprecationFor(kind, m)
+		return {
+			value: m,
+			label: m,
+			hint: [hintFor(detail.get(m)), sunset ? `retiring ${sunset}` : '']
+				.filter(Boolean)
+				.join(' · '),
+			title: [priceTitle(detail.get(m)), deprecationNote(kind, m)].filter(Boolean).join(' '),
+		}
+	}),
 )
+
+const selectedSunset = $derived(deprecationNote(kind, value))
 
 $effect(() => {
 	if (!autoseed) return
@@ -85,7 +105,11 @@ $effect(() => {
 	if (!pid) return
 	// Same rule as `options`: never seed a model the selected provider can't
 	// serve. Falls through to its favourites, then its own stored model.
-	const prefs = [...defaultForThisProvider, ...favorites, provider?.model ?? ''].filter(Boolean)
+	const prefs = withoutHidden(kind, [
+		...defaultForThisProvider,
+		...favorites,
+		provider?.model ?? '',
+	]).filter(Boolean)
 	const want = prefs[0] ?? ''
 	const userOverrode = !!value && value !== seededValue
 	if (pid !== seededFor || !userOverrode) {
@@ -126,16 +150,21 @@ async function loadAll() {
 }
 </script>
 
-<Dropdown
-	{id}
-	{disabled}
-	{loading}
-	bind:value
-	{options}
-	{favorites}
-	defaultValue={defaultForThisProvider[0] ?? ''}
-	filterable
-	placeholder="Select model…"
-	onopen={loadAll}
-	{onpick}
-/>
+<div class="flex flex-col gap-1">
+	<Dropdown
+		{id}
+		{disabled}
+		{loading}
+		bind:value
+		{options}
+		{favorites}
+		defaultValue={defaultForThisProvider[0] ?? ''}
+		filterable
+		placeholder="Select model…"
+		onopen={loadAll}
+		{onpick}
+	/>
+	{#if selectedSunset}
+		<span class="text-xs text-amber-500">{selectedSunset}</span>
+	{/if}
+</div>

@@ -364,9 +364,40 @@ async def test_openai_transcription_falls_back_to_curated_when_the_fetch_fails()
 
 
 async def test_live_transcription_lists_carry_inline_diarization_flags() -> None:
-    """grok-stt-1.0 is the one OpenRouter transcription model that returns
-    speaker labels; the flag has to survive the live-fetch path or the picker
-    refuses inline diarization for a model that supports it."""
+    """The diarization flag has to survive the live-fetch path.
+
+    Otherwise the picker refuses inline diarization for a model that supports
+    it, or worse offers it for one that does not.
+    """
+
+    def handle(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"data": [{"id": "gemini-3.5-transcribe"}, {"id": "some-unknown-asr"}]},
+        )
+
+    models = await list_models(
+        kind=ProviderKind.GEMINI,
+        base_url=None,
+        api_key="k",
+        interaction=Interaction.TRANSCRIBE,
+        client_factory=lambda: _factory(httpx.MockTransport(handle)),
+    )
+    by_id = {m.id: m for m in models}
+    assert by_id["gemini-3.5-transcribe"].inline_diarization is True
+    # This kind publishes no usable catalogue, so the curated list stands and
+    # an id the server volunteered is not smuggled into the picker.
+    assert "some-unknown-asr" not in by_id
+
+
+async def test_openrouter_transcription_never_claims_diarization() -> None:
+    """Including for the model whose own description advertises it.
+
+    x-ai/grok-stt-1.0's OpenRouter page claims "optional speaker diarization",
+    and this repo believed it. The gateway exposes no diarization parameter and
+    returns no speaker structure, so the claim does not survive contact with
+    the API and the flag must stay false through the live-fetch path.
+    """
 
     def handle(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -381,6 +412,4 @@ async def test_live_transcription_lists_carry_inline_diarization_flags() -> None
         interaction=Interaction.TRANSCRIBE,
         client_factory=lambda: _factory(httpx.MockTransport(handle)),
     )
-    by_id = {m.id: m for m in models}
-    assert by_id["x-ai/grok-stt-1.0"].inline_diarization is True
-    assert by_id["openai/whisper-large-v3-turbo"].inline_diarization is False
+    assert all(m.inline_diarization is False for m in models)

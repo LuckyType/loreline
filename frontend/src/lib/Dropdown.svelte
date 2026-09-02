@@ -14,6 +14,10 @@ export type DropdownOption = {
 	hint?: string
 	/** Native tooltip for the row, for detail too long to show inline. */
 	title?: string
+	/** Greyed out and unpickable, while still visible: an option the selected
+	 *  model cannot combine with something already switched on. Say why in
+	 *  `title` - a dead row with no explanation is worse than none. */
+	disabled?: boolean
 }
 
 let {
@@ -149,7 +153,8 @@ function pick(v: string) {
 					{#each shownFavorites as o (o.value)}
 						<button
 							type="button"
-							class="flex w-full items-center justify-between gap-2 rounded-sm px-2 py-1.5 text-left hover:bg-accent {o.value ===
+							disabled={o.disabled}
+							class="flex w-full items-center justify-between gap-2 rounded-sm px-2 py-1.5 text-left hover:bg-accent disabled:pointer-events-none disabled:opacity-50 {o.value ===
               value
                 ? 'border border-primary'
                 : 'border border-transparent'}"
@@ -182,7 +187,8 @@ function pick(v: string) {
 					{#each shownRest as o (o.value)}
 						<button
 							type="button"
-							class="flex w-full items-center justify-between gap-2 rounded-sm px-2 py-1.5 text-left hover:bg-accent {o.value ===
+							disabled={o.disabled}
+							class="flex w-full items-center justify-between gap-2 rounded-sm px-2 py-1.5 text-left hover:bg-accent disabled:pointer-events-none disabled:opacity-50 {o.value ===
               value
                 ? 'border border-primary'
                 : 'border border-transparent'}"
