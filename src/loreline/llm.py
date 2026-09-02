@@ -24,6 +24,22 @@ log = get_logger(__name__)
 
 _DEFAULT_BASE_URL = "https://api.openai.com/v1"
 _OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+# Google's OpenAI-compatible shim. It is a sibling path of the native REST base
+# the STT connector talks to (".../v1beta"), not the same URL: verified against
+# the live API, ".../v1beta/openai" answers both GET /models and
+# POST /chat/completions, while the native base answers neither. The two
+# connectors therefore each apply their own default, which works because the
+# settings UI offers no base_url field for a cloud kind (see the provider form:
+# the input appears only where capabilities.yaml records base_url: null), so a
+# stored Gemini config carries none for either to collide over.
+# Auth is the plain `Authorization: Bearer <key>` header this module already
+# sends; the `x-goog-api-key` header is the native surface's spelling.
+_GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai"
+# Kinds whose chat endpoint is not OpenAI's. Everything else defaults to OpenAI.
+_BASE_URLS: dict[ProviderKind, str] = {
+    ProviderKind.OPENROUTER: _OPENROUTER_BASE_URL,
+    ProviderKind.GEMINI: _GEMINI_BASE_URL,
+}
 _TIMEOUT_S = 120.0
 
 # Provider kinds that summarize, i.e. speak chat-completions rather than STT.
@@ -72,7 +88,7 @@ class LLMError(Exception):
 
 def default_base_url(kind: ProviderKind) -> str:
     """Endpoint an LLM kind talks to when its config names no ``base_url``."""
-    return _OPENROUTER_BASE_URL if kind is ProviderKind.OPENROUTER else _DEFAULT_BASE_URL
+    return _BASE_URLS.get(kind, _DEFAULT_BASE_URL)
 
 
 def routing_payload(config: ProviderConfig) -> dict[str, object] | None:
@@ -220,17 +236,38 @@ async def _post_completion(client: httpx.AsyncClient, payload: dict[str, object]
         raise LLMError(f"could not reach {client.base_url}: {exc}") from exc
 
 
+def _error_body(response: httpx.Response) -> dict[str, object] | None:
+    """The error envelope of a failed response, unwrapped, or None if unreadable.
+
+    Google's OpenAI-compatible endpoint wraps it in a one-element JSON array,
+    ``[{"error": {...}}]``, where every other endpoint here returns the bare
+    object - verified against the live API, and inconsistently even there: the
+    same base URL's ``/models`` errors come back unwrapped. Without this a
+    Gemini failure would surface as a bare "404 Not Found" instead of the
+    message naming the model that does not exist.
+
+    Note Google's error object carries ``code``/``message``/``status`` and no
+    ``param``, so :func:`_rejects_parameter` never fires for it. That costs
+    nothing as long as capabilities.yaml keeps its per-model effort lists
+    honest, which is where the retry would otherwise be the safety net.
+    """
+    try:
+        payload: object = response.json()
+    except ValueError:
+        return None
+    if isinstance(payload, list) and payload:
+        payload = cast("list[object]", payload)[0]
+    return cast("dict[str, object]", payload) if isinstance(payload, dict) else None
+
+
 def _rejects_parameter(response: httpx.Response, name: str) -> bool:
     """True if the model rejected this specific parameter (not some other 400)."""
     if response.status_code != HTTPStatus.BAD_REQUEST:
         return False
-    try:
-        payload = response.json()
-    except ValueError:
+    payload = _error_body(response)
+    if payload is None:
         return False
-    if not isinstance(payload, dict):
-        return False
-    error = cast("dict[str, object]", payload).get("error")
+    error = payload.get("error")
     if not isinstance(error, dict):
         return False
     return cast("dict[str, object]", error).get("param") == name
@@ -238,12 +275,9 @@ def _rejects_parameter(response: httpx.Response, name: str) -> bool:
 
 def _error_detail(response: httpx.Response) -> str:
     """Pull the message out of an OpenAI-compatible error body, else fall back."""
-    try:
-        payload = response.json()
-    except ValueError:
-        payload = None
-    if isinstance(payload, dict):
-        error = cast("dict[str, object]", payload).get("error")
+    payload = _error_body(response)
+    if payload is not None:
+        error = payload.get("error")
         if isinstance(error, dict):
             message = cast("dict[str, object]", error).get("message")
             if isinstance(message, str) and message:

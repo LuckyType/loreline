@@ -43,7 +43,13 @@ async def test_hidden_models_are_not_offered(client: AsyncClient) -> None:
     live = next(m for m in gemini["models"] if m["id"] == "gemini-3.5-transcribe-live")
     assert live["hidden"] is True
     offered = [m["id"] for m in gemini["models"] if not m["hidden"]]
-    assert offered == ["gemini-3.5-transcribe"]
+    assert "gemini-3.5-transcribe-live" not in offered
+    # Scoped to the transcription picker: the same provider also offers chat
+    # models, and hiding is a per-model gate, not a per-provider one.
+    transcribers = [
+        m["id"] for m in gemini["models"] if not m["hidden"] and "transcribe" in m["interactions"]
+    ]
+    assert transcribers == ["gemini-3.5-transcribe"]
 
 
 async def test_glossary_support_is_stated_per_model(client: AsyncClient) -> None:

@@ -1046,12 +1046,17 @@ providers:
     key_url: https://aistudio.google.com/api-keys
     # REST base; auth header is `x-goog-api-key`. Current generation surface is the
     # Interactions API (`POST {base_url}/interactions`, client.interactions.create).
+    # This is the TRANSCRIPTION base only. Summaries go to Google's
+    # OpenAI-compatible shim one path segment further down,
+    # ".../v1beta/openai", which the native base does not serve and which does
+    # not serve the native surface - loreline.llm.default_base_url holds it,
+    # since one provider row cannot carry two base URLs.
     base_url: https://generativelanguage.googleapis.com/v1beta
     # models.list -> Model{name, inputTokenLimit, outputTokenLimit,
     # supportedGenerationMethods[], temperature, maxTemperature, topP, topK, thinking}
     catalog_endpoint: https://generativelanguage.googleapis.com/v1beta/models
-    # Transcription only: see the note after the transcription models.
-    interactions: [transcribe]
+    # No video: see the note where the Veo models would otherwise be listed.
+    interactions: [transcribe, summarize]
     models:
       # ---- TRANSCRIBE ------------------------------------------------------
       # Unary/file variant. GA. Audio <=1h per request, <=30min when diarization
@@ -1106,73 +1111,103 @@ providers:
           word_timestamps: false            # "not supported over the Live API"; utterance-level only
           languages: multi
         deprecated: null
-      # NOT OFFERED YET: no connector exists for either interaction.
+      # ---- SUMMARIZE -------------------------------------------------------
+      #
+      # Served through Google's OpenAI-compatible shim, not the native
+      # Interactions API: `POST .../v1beta/openai/chat/completions`, which the
+      # existing summarizer speaks unchanged once loreline.llm points the kind
+      # at that base URL.
+      #
+      # Every claim below was checked against the live API on 2026-09-02, one
+      # request per model per parameter, because a compatibility shim's
+      # behaviour is not the vendor doc's behaviour:
+      #
+      # * temperature is accepted (0.3) by all four, so `temperature: true` is
+      #   observed rather than assumed.
+      # * `system` role messages are accepted by all four, hence
+      #   `system_prompt: true`.
+      # * reasoning_effort maps onto Gemini's thinking level and is validated
+      #   TWICE - once against the shim's own value set ("Invalid
+      #   reasoning_effort: xhigh. Valid values are: high, low, medium,
+      #   minimal, none", so OpenAI's `xhigh` and `max` are rejected for every
+      #   Gemini model), and once against the model, which is where the lists
+      #   below differ from each other.
+      #
+      # The efforts are per-model observations, NOT a copy of the thinking-page
+      # table, which claims a uniform low/medium/high everywhere and is wrong
+      # in both directions: it omits `none`, which 3.8 Flash and 3.5 Flash
+      # accept, and it does not say that Flash-Lite and 3.1 Pro reject it.
+      # https://ai.google.dev/gemini-api/docs/openai
+      - id: gemini-3.8-flash
+        label: Gemini 3.8 Flash
+        interactions: [summarize]
+        llm:
+          reasoning:
+            supported: true
+            # 400: "Thinking level MINIMAL is not supported for this model."
+            efforts: [none, low, medium, high]
+          context_length: 1048576         # models.list inputTokenLimit
+          max_output_tokens: 65536        # models.list outputTokenLimit
+          system_prompt: true
+          temperature: true
+      - id: gemini-3.5-flash
+        label: Gemini 3.5 Flash
+        interactions: [summarize]
+        # The summarize default: the only Gemini model that accepts every
+        # reasoning effort the OpenAI-compatible shim can send, so it is the
+        # one that cannot fail a request over a level carried across from
+        # another provider. 3.8-flash rejects "minimal", flash-lite rejects
+        # "none", and 3.1-pro rejects both.
+        default: true
+        llm:
+          reasoning:
+            supported: true
+            # The only Gemini model here that takes the shim's full value set.
+            efforts: [none, minimal, low, medium, high]
+          context_length: 1048576
+          max_output_tokens: 65536
+          system_prompt: true
+          temperature: true
+      - id: gemini-3.5-flash-lite
+        label: Gemini 3.5 Flash-Lite
+        interactions: [summarize]
+        llm:
+          reasoning:
+            supported: true
+            # Rejects effort "none" with a bare "Request contains an invalid
+            # argument", so the picker must never offer it.
+            mandatory: true
+            efforts: [minimal, low, medium, high]
+          context_length: 1048576
+          max_output_tokens: 65536
+          system_prompt: true
+          temperature: true
+      - id: gemini-3.1-pro-preview
+        label: Gemini 3.1 Pro (Preview)
+        interactions: [summarize]
+        llm:
+          reasoning:
+            supported: true
+            # 400: "Budget 0 is invalid. This model only works in thinking
+            # mode." MINIMAL is refused as on 3.8 Flash.
+            mandatory: true
+            efforts: [low, medium, high]
+          context_length: 1048576
+          max_output_tokens: 65536
+          system_prompt: true
+          temperature: true
+      # NOT OFFERED YET: no video connector exists for this provider.
       #
       # The research below is current and correct, but this repo cannot serve
-      # it. The summarizer talks OpenAI-compatible chat and sends every kind
-      # except OpenRouter to OpenAI's base URL (see loreline/llm.py), and the
-      # video client speaks OpenRouter's /videos API (loreline/video/client.py).
-      # Declaring the interactions here would put Gemini in both pickers and
-      # fail at request time. Google does publish an OpenAI-compatible chat
-      # endpoint, so enabling summarize is mostly a base-url change; Veo needs
-      # a real connector. Until then the interactions stay off the provider and
-      # these entries stay commented, so the facts are not researched twice.
+      # it: the video client speaks OpenRouter's /videos API
+      # (loreline/video/client.py), which Google does not publish - the
+      # OpenAI-compatible shim that carries the summarize models above covers
+      # chat only. Declaring `video` here would put Gemini in that picker and
+      # fail at request time. Veo needs a real connector against the native
+      # predict/operations surface; until someone writes one the interaction
+      # stays off the provider and these entries stay commented, so the facts
+      # are not researched twice.
       #
-      # # ---- SUMMARIZE -------------------------------------------------------
-      # # All four: system_instruction and generation_config.temperature supported.
-      # # thinking_level is the reasoning control (there is no thinkingBudget in the
-      # # current docs). Values below are per the thinking-page model table.
-      # - id: gemini-3.8-flash
-      # label: Gemini 3.8 Flash
-      # interactions: [summarize]
-      # llm:
-      # reasoning:
-      # supported: true
-      # efforts: [low, medium, high]    # "minimal" NOT supported on 3.8; default medium
-      # context_length: 1048576
-      # max_output_tokens: 65536
-      # system_prompt: true
-      # temperature: true
-      # - id: gemini-3.5-flash
-      # label: Gemini 3.5 Flash
-      # interactions: [summarize]
-      # # The summarize default when this block is enabled: the only model
-      # # here that accepts every reasoning effort the OpenAI-compatible shim
-      # # can send (3.8-flash rejects "minimal", flash-lite rejects "none",
-      # # 3.1-pro rejects both), so it is the one that cannot fail a request
-      # # over a level carried across from another provider. Marked rather
-      # # than inferred, and the loader will insist on exactly one here.
-      # default: true
-      # llm:
-      # reasoning:
-      # supported: true
-      # efforts: [minimal, low, medium, high]   # default medium
-      # context_length: 1048576
-      # max_output_tokens: 65536
-      # system_prompt: true
-      # temperature: true
-      # - id: gemini-3.5-flash-lite
-      # label: Gemini 3.5 Flash-Lite
-      # interactions: [summarize]
-      # llm:
-      # reasoning:
-      # supported: true
-      # efforts: [minimal, low, medium, high]   # default minimal
-      # context_length: 1048576
-      # max_output_tokens: 65536
-      # system_prompt: true
-      # temperature: true
-      # - id: gemini-3.1-pro-preview
-      # label: Gemini 3.1 Pro (Preview)
-      # interactions: [summarize]
-      # llm:
-      # reasoning:
-      # supported: true
-      # efforts: [low, medium, high]    # default high
-      # context_length: 1048576
-      # max_output_tokens: 65536
-      # system_prompt: true
-      # temperature: true
       # # ---- VIDEO -----------------------------------------------------------
       # # Veo 3.1 family. Audio is always generated and cannot be disabled.
       # # durationSeconds must be 8 for 1080p/4k or when reference images are used.

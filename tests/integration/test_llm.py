@@ -41,6 +41,18 @@ def _openrouter_config() -> ProviderConfig:
     )
 
 
+def _gemini_config() -> ProviderConfig:
+    """Gemini as the wizard stores it. No ``base_url``: the settings form shows
+    that field only for a kind whose capabilities entry records none, so a
+    cloud kind carries whatever llm.py defaults to."""
+    return ProviderConfig(
+        id="l3",
+        name="Gemini",
+        kind=ProviderKind.GEMINI,
+        protocol=Protocol.HTTP_BATCH,
+    )
+
+
 def _client(transport: httpx.MockTransport) -> httpx.AsyncClient:
     # The injected client owns its base_url, just like the real one in llm.py.
     return httpx.AsyncClient(transport=transport, base_url=_BASE_URL)
@@ -255,6 +267,80 @@ async def test_openrouter_endpoint_attribution_headers_and_model_id(
     assert seen["HTTP-Referer"].startswith("https://")
     assert seen["X-Title"] == "Loreline"
     assert seen["model"] == "openai/gpt-5.6-luna"  # a bare OpenAI name is no id there
+
+
+async def test_gemini_summarizes_through_googles_openai_compatible_base(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Google serves chat under ".../v1beta/openai", a sibling of the native
+    ".../v1beta" the transcription connector posts to. One provider row cannot
+    carry both, so the kind's default is what has to be right - and the
+    "/openai" segment has to survive being joined with "/chat/completions".
+    None of OpenRouter's attribution headers belong on it."""
+    seen: dict[str, str] = {}
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        return httpx.Response(200, json={"choices": [{"message": {"content": "A summary."}}]})
+
+    real_client = httpx.AsyncClient
+
+    def fake_client(
+        *,
+        base_url: str,
+        headers: dict[str, str],
+        timeout: float,
+    ) -> httpx.AsyncClient:
+        seen["base_url"] = base_url
+        seen.update(headers)
+        return real_client(
+            base_url=base_url,
+            headers=headers,
+            timeout=timeout,
+            transport=httpx.MockTransport(handle),
+        )
+
+    monkeypatch.setattr(httpx, "AsyncClient", fake_client)
+    out = await summarize_transcript(
+        config=_gemini_config(), api_key="k", model="gemini-3.5-flash", transcript="x"
+    )
+
+    assert out == "A summary."
+    assert seen["base_url"] == "https://generativelanguage.googleapis.com/v1beta/openai"
+    assert seen["path"] == "/v1beta/openai/chat/completions"
+    assert seen["Authorization"] == "Bearer k"
+    assert "HTTP-Referer" not in seen
+
+
+async def test_error_message_survives_an_array_wrapped_error_envelope() -> None:
+    """Google's compatible endpoint answers /chat/completions with
+    ``[{"error": {...}}]`` where every other endpoint sends the bare object.
+    Read literally, that has no "error" key at all, and every Gemini failure
+    would reach the GM as "404 Not Found" with the reason discarded."""
+
+    def handle(_r: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            404,
+            json=[
+                {
+                    "error": {
+                        "code": 404,
+                        "message": "models/nope-9 is not found for API version v1main",
+                        "status": "NOT_FOUND",
+                    }
+                }
+            ],
+        )
+
+    transport = httpx.MockTransport(handle)
+    with pytest.raises(LLMError, match=re.escape("models/nope-9 is not found")):
+        await summarize_transcript(
+            config=_gemini_config(),
+            api_key="k",
+            model="nope-9",
+            transcript="x",
+            client_factory=lambda: _client(transport),
+        )
 
 
 async def test_openrouter_routing_prefs_ride_along_as_the_provider_object() -> None:

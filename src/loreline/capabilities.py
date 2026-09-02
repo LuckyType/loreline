@@ -136,6 +136,18 @@ def kinds_for(interaction: Interaction) -> frozenset[ProviderKind]:
     return frozenset(k for k in config().providers if supports(k, interaction))
 
 
+def curated_models(kind: ProviderKind, interaction: Interaction) -> list[str]:
+    """Model ids this file offers for one interaction, hidden entries excluded.
+
+    The fallback catalogue for a kind whose models are not discovered live -
+    Gemini publishes no list this app fetches, so its chat models exist only
+    here. Empty for a kind that lists none, which is not the same as "offer
+    everything": see :mod:`loreline.stt.catalog` for what that falls back to.
+    """
+    spec = _provider(kind)
+    return [m.id for m in spec.models_for(interaction)] if spec else []
+
+
 def _offered_transcribers(kind: ProviderKind) -> list[object]:
     """Transcription models this kind actually lists in a picker."""
     spec = _provider(kind)
