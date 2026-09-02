@@ -51,7 +51,7 @@ async def _llm_provider(client: AsyncClient) -> str:
             "/api/providers",
             json={
                 "name": "LLM",
-                "kind": "openai_chat",
+                "kind": "openai_compat",
                 "protocol": "http_batch",
                 "base_url": "http://llm:1234/v1",
             },
@@ -132,7 +132,8 @@ async def test_summarize_rejects_non_llm_provider(client: AsyncClient) -> None:
     stt = (
         await client.post(
             "/api/providers",
-            json={"name": "STT2", "kind": "openai_compat", "protocol": "http_batch"},
+            # Deepgram transcribes only; openai_compat now summarizes too.
+            json={"name": "STT2", "kind": "deepgram", "protocol": "ws"},
         )
     ).json()["id"]
     resp = await client.post(f"/api/session/{sid}/summarize", json={"provider_id": stt})

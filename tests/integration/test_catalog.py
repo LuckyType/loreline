@@ -50,7 +50,7 @@ async def test_live_failure_falls_back_to_empty() -> None:
     assert models == []  # openai_compat has no curated list; a failed fetch yields nothing
 
 
-async def test_live_openai_chat_models() -> None:
+async def test_live_openai_compatible_chat_models() -> None:
     def handle(request: httpx.Request) -> httpx.Response:
         assert request.url.host == "llm"  # self-hosted base_url is honoured
         assert request.url.path.endswith("/models")
@@ -58,7 +58,7 @@ async def test_live_openai_chat_models() -> None:
 
     transport = httpx.MockTransport(handle)
     models = await list_models(
-        kind=ProviderKind.OPENAI_CHAT,
+        kind=ProviderKind.OPENAI_COMPAT,
         base_url="http://llm:1234/v1",
         api_key="k",
         client_factory=lambda: _factory(transport),
@@ -186,8 +186,8 @@ async def test_models_without_pricing_still_list_cleanly() -> None:
         )
 
     models = await list_models(
-        kind=ProviderKind.OPENAI,
-        base_url=None,
+        kind=ProviderKind.OPENAI_COMPAT,
+        base_url="http://stt:8000/v1",
         api_key="k",
         client_factory=lambda: _factory(httpx.MockTransport(handle)),
     )
@@ -227,7 +227,7 @@ async def test_transcription_models_report_no_price() -> None:
         )
 
     models = await list_models(
-        kind=ProviderKind.OPENROUTER_STT,
+        kind=ProviderKind.OPENROUTER,
         base_url=None,
         api_key="k",
         interaction=Interaction.TRANSCRIBE,

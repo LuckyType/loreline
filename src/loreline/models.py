@@ -12,18 +12,14 @@ class ProviderKind(StrEnum):
     """Supported provider kinds (STT + LLM)."""
 
     DEEPGRAM = "deepgram"
-    OPENAI = "openai"
-    OPENAI_COMPAT = "openai_compat"  # Speaches / whisper.cpp / any OpenAI-compatible endpoint
+    OPENAI = "openai"  # OpenAI cloud: realtime + batch transcription, and summaries
+    # Any OpenAI-compatible endpoint you host yourself: Speaches, whisper.cpp,
+    # Ollama, LM Studio, vLLM. Batch transcription and/or chat, per the server.
+    OPENAI_COMPAT = "openai_compat"
     ASSEMBLYAI = "assemblyai"
     GEMINI = "gemini"  # Gemini API transcription (accepts a plain API key)
     VOSK = "vosk"  # self-hosted vosk-server
-    OPENAI_CHAT = "openai_chat"  # LLM chat for summaries (OpenAI / Ollama / LM Studio / vLLM)
-    OPENROUTER = "openrouter"  # OpenRouter LLM gateway for summaries + video ("vendor/model" ids)
-    # OpenRouter's transcription API. A separate kind from OPENROUTER above
-    # rather than a second role on it, mirroring the existing OPENAI (STT) vs
-    # OPENAI_CHAT (LLM) split for that vendor: one ProviderConfig has one model
-    # list, and OpenRouter's chat and transcription catalogues are disjoint.
-    OPENROUTER_STT = "openrouter_stt"
+    OPENROUTER = "openrouter"  # OpenRouter gateway: transcription, summaries and video
 
 
 class Interaction(StrEnum):

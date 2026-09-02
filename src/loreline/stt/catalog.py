@@ -25,19 +25,17 @@ _OPENROUTER_BASE = "https://openrouter.ai/api/v1"
 _LIVE_KINDS = {
     ProviderKind.OPENAI,
     ProviderKind.OPENAI_COMPAT,
-    ProviderKind.OPENAI_CHAT,
     ProviderKind.OPENROUTER,
-    ProviderKind.OPENROUTER_STT,
 }
 
 # OpenRouter serves a different catalogue per interaction, so the right one is
 # fetched rather than filtering a mixed list after the fact - its chat and
 # transcription model sets are disjoint, and video lives on its own endpoint
 # entirely (see loreline.video.client.list_video_models).
-_OPENROUTER_KINDS = {ProviderKind.OPENROUTER, ProviderKind.OPENROUTER_STT}
+_OPENROUTER_KINDS = {ProviderKind.OPENROUTER}
 _OPENROUTER_TRANSCRIBE_QUERY = "?output_modalities=transcription"
 # Kinds whose base URL is user-supplied (self-hostable), falling back to the kind's own cloud.
-_CUSTOM_BASE_KINDS = {ProviderKind.OPENAI_COMPAT, ProviderKind.OPENAI_CHAT}
+_CUSTOM_BASE_KINDS = {ProviderKind.OPENAI_COMPAT}
 
 # Curated model lists for providers with no ``/v1/models`` endpoint to ask.
 #
@@ -87,6 +85,10 @@ _CURATED: dict[ProviderKind, list[str]] = {
     # OPENAI_COMPAT kind instead. Note whisper-1 and the gpt-4o-*-transcribe
     # family were deprecated on 2026-08-26 (removal 2027-02-26).
     # https://developers.openai.com/api/docs/guides/realtime-transcription
+    # Realtime-only on purpose: this kind's transcription connector is the
+    # Realtime WebSocket session, which cannot run the batch-only models
+    # (gpt-transcribe, whisper-1). Those are reachable through OPENAI_COMPAT
+    # pointed at api.openai.com, which speaks /audio/transcriptions.
     ProviderKind.OPENAI: ["gpt-live-transcribe", "gpt-realtime-whisper"],
     # Self-hosted: whatever the operator loaded, discoverable only from their
     # own server's /models.
@@ -128,7 +130,12 @@ async def list_models(
     (OpenRouter does; plain OpenAI ``/models`` and the curated lists do not) -
     everything past ``id`` is optional, so a caller can always just read ids.
     """
-    if kind in _LIVE_KINDS:
+    # OpenAI's live /models lists batch transcription models its Realtime
+    # connector cannot drive, so that one pairing keeps the curated list.
+    use_live = kind in _LIVE_KINDS and not (
+        kind is ProviderKind.OPENAI and interaction is Interaction.TRANSCRIBE
+    )
+    if use_live:
         live = await _fetch_openai_models(kind, base_url, api_key, interaction, client_factory)
         if live:
             return filter_models(live, kind=kind, interaction=interaction, strict=strict_filtering)

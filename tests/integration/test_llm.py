@@ -24,7 +24,7 @@ def _config() -> ProviderConfig:
     return ProviderConfig(
         id="l1",
         name="LLM",
-        kind=ProviderKind.OPENAI_CHAT,
+        kind=ProviderKind.OPENAI_COMPAT,
         protocol=Protocol.HTTP_BATCH,
         base_url=_BASE_URL,
     )
@@ -301,7 +301,7 @@ async def test_routing_omits_fields_left_at_their_default() -> None:
 
 async def test_routing_is_never_sent_to_a_plain_openai_compatible_endpoint() -> None:
     """``provider`` is an OpenRouter body extension. A stray one stored on an
-    ``openai_chat`` config (Ollama, LM Studio, OpenAI itself) must not go out -
+    ``openai_compat`` config (Ollama, LM Studio, self-hosted) must not go out -
     a strict endpoint would reject the unknown field outright."""
     captured: dict[str, object] = {"seen": "unset"}
 

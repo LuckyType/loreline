@@ -5,9 +5,7 @@ export type ProviderKind =
 	| 'assemblyai'
 	| 'gemini'
 	| 'vosk'
-	| 'openai_chat'
 	| 'openrouter'
-	| 'openrouter_stt'
 
 /** What a provider is being asked to do. Providers are not interchangeable
  *  across these - mirrors `Interaction` in src/loreline/models.py. */
@@ -21,19 +19,35 @@ export type Interaction = 'transcribe' | 'summarize' | 'video'
  */
 export const INTERACTIONS_BY_KIND: Record<ProviderKind, Interaction[]> = {
 	deepgram: ['transcribe'],
-	openai: ['transcribe'],
-	openai_compat: ['transcribe'],
 	assemblyai: ['transcribe'],
 	gemini: ['transcribe'],
 	vosk: ['transcribe'],
-	openai_chat: ['summarize'],
-	openrouter: ['summarize', 'video'],
-	openrouter_stt: ['transcribe'],
+	// One entry per vendor rather than one per role. Every picker is scoped by
+	// interaction, so a single stored provider can serve all of these.
+	openai: ['transcribe', 'summarize'],
+	openai_compat: ['transcribe', 'summarize'],
+	openrouter: ['transcribe', 'summarize', 'video'],
+}
+
+/** Kinds whose transcription connector streams within an utterance, rather
+ *  than posting one complete utterance per result. Mirrors REALTIME_KINDS in
+ *  src/loreline/capabilities.py. */
+export const REALTIME_KINDS: ProviderKind[] = ['deepgram', 'assemblyai', 'openai']
+
+/** The capability badges shown for a provider, in a stable order. */
+export function capabilityBadges(p: { kind: ProviderKind }): string[] {
+	const badges: string[] = []
+	if (supportsInteraction(p, 'transcribe')) {
+		badges.push(REALTIME_KINDS.includes(p.kind) ? 'Realtime' : 'Batch')
+	}
+	if (supportsInteraction(p, 'summarize')) badges.push('Summarizing')
+	if (supportsInteraction(p, 'video')) badges.push('Video')
+	return badges
 }
 
 /** Kinds that transcribe stored audio but must never drive a live capture -
  *  OpenRouter's STT has no streaming mode. Mirrors `LIVE_CAPTURE_EXCLUDED`. */
-export const LIVE_CAPTURE_EXCLUDED: ProviderKind[] = ['openrouter_stt']
+export const LIVE_CAPTURE_EXCLUDED: ProviderKind[] = ['openrouter']
 
 export function supportsInteraction(p: { kind: ProviderKind }, interaction: Interaction): boolean {
 	return (INTERACTIONS_BY_KIND[p.kind] ?? []).includes(interaction)
@@ -55,7 +69,7 @@ export function liveSttProviders<T extends { kind: ProviderKind }>(providers: T[
 }
 
 /** Kinds that summarize (chat-completions); everything else transcribes. */
-export const LLM_KINDS: ProviderKind[] = ['openai_chat', 'openrouter']
+export const LLM_KINDS: ProviderKind[] = ['openai', 'openai_compat', 'openrouter']
 
 /** True for an LLM provider - negate it to select the STT ones. */
 export function isLlmProvider(p: { kind: ProviderKind }): boolean {

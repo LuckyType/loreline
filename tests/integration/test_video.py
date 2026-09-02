@@ -93,7 +93,7 @@ async def video_repos(tmp_path: Path) -> AsyncIterator[Repos]:
     await repos.providers.upsert(_openrouter())
     await repos.providers.upsert(
         ProviderConfig(
-            id="chat", name="Ollama", kind=ProviderKind.OPENAI_CHAT, protocol=Protocol.HTTP_BATCH
+            id="chat", name="Ollama", kind=ProviderKind.OPENAI_COMPAT, protocol=Protocol.HTTP_BATCH
         )
     )
     await repos.sessions.create(Session(id="s1", started_at=0.0))
@@ -106,7 +106,7 @@ class TestCapability:
         """A plain OpenAI-compatible chat endpoint has no video API; offering
         it would produce a request that can only ever fail."""
         assert supports_video(ProviderKind.OPENROUTER) is True
-        assert supports_video(ProviderKind.OPENAI_CHAT) is False
+        assert supports_video(ProviderKind.OPENAI_COMPAT) is False
         assert supports_video(ProviderKind.DEEPGRAM) is False
 
 
@@ -535,7 +535,7 @@ class TestVideoRoutes:
         chat = (
             await client.post(
                 "/api/providers",
-                json={"name": "Ollama", "kind": "openai_chat", "protocol": "http_batch"},
+                json={"name": "Ollama", "kind": "openai_compat", "protocol": "http_batch"},
             )
         ).json()
         resp = await client.get("/api/video/models", params={"provider_id": chat["id"]})
@@ -649,7 +649,7 @@ class TestInteractionScoping:
             return httpx.Response(200, json={"data": [{"id": "openai/whisper-large-v3-turbo"}]})
 
         models = await list_models(
-            kind=ProviderKind.OPENROUTER_STT,
+            kind=ProviderKind.OPENROUTER,
             base_url=None,
             api_key="k",
             interaction=Interaction.TRANSCRIBE,
@@ -692,7 +692,7 @@ class TestLiveCaptureGuard:
                         "/api/providers",
                         json={
                             "name": "OpenRouter STT",
-                            "kind": "openrouter_stt",
+                            "kind": "openrouter",
                             "protocol": "http_batch",
                         },
                     )

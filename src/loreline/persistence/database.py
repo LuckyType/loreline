@@ -168,6 +168,18 @@ MIGRATIONS: list[str] = [
     """
     DELETE FROM providers WHERE kind = 'google';
     """,
+    # v12 - one provider kind per vendor. `openrouter_stt` folds back into
+    # `openrouter`, and `openai_chat` splits by where it pointed: no base_url
+    # meant OpenAI's own API, a base_url meant a self-hosted OpenAI-compatible
+    # server (Ollama, LM Studio, vLLM), which is what `openai_compat` is for.
+    # Capabilities are declared per kind now (see loreline.capabilities), so one
+    # row can serve transcription, summaries and video at once.
+    """
+    UPDATE providers SET kind = 'openrouter' WHERE kind = 'openrouter_stt';
+    UPDATE providers SET kind = 'openai'
+        WHERE kind = 'openai_chat' AND (base_url IS NULL OR base_url = '');
+    UPDATE providers SET kind = 'openai_compat' WHERE kind = 'openai_chat';
+    """,
 ]
 
 

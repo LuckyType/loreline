@@ -15,8 +15,10 @@ from loreline.capabilities import (
     interactions_for,
     kinds_for,
     supports,
+    supports_batch,
     supports_inline_diarization,
     supports_live_capture,
+    supports_realtime,
 )
 from loreline.models import Interaction, ModelInfo, ProviderKind
 
@@ -28,35 +30,43 @@ class TestCapabilityTable:
         assert set(INTERACTIONS_BY_KIND) == set(ProviderKind)
         assert all(INTERACTIONS_BY_KIND[k] for k in ProviderKind), "a kind declares no interaction"
 
-    def test_stt_and_llm_kinds_do_not_overlap(self) -> None:
-        """The split that makes the pickers meaningful: nothing both
-        transcribes and summarizes."""
-        assert not kinds_for(Interaction.TRANSCRIBE) & kinds_for(Interaction.SUMMARIZE)
+    def test_a_kind_may_serve_several_interactions(self) -> None:
+        """One provider entry per vendor, not one per role: OpenAI and
+        OpenRouter both transcribe and summarize from a single stored config.
+        What keeps the pickers meaningful is that each is scoped by interaction,
+        not that the kinds are disjoint."""
+        both = kinds_for(Interaction.TRANSCRIBE) & kinds_for(Interaction.SUMMARIZE)
+        assert both == {
+            ProviderKind.OPENAI,
+            ProviderKind.OPENAI_COMPAT,
+            ProviderKind.OPENROUTER,
+        }
 
     def test_only_openrouter_generates_video(self) -> None:
         assert kinds_for(Interaction.VIDEO) == {ProviderKind.OPENROUTER}
 
-    def test_openrouter_is_split_by_role(self) -> None:
-        """One ProviderConfig has one model list, and OpenRouter's chat and
-        transcription catalogues are disjoint - hence two kinds, mirroring the
-        existing OPENAI / OPENAI_CHAT split."""
+    def test_openrouter_is_a_single_kind_doing_everything(self) -> None:
+        """One entry, three abilities. Its chat, transcription and video
+        catalogues are disjoint, which is handled by scoping each picker to an
+        interaction rather than by splitting the vendor into several kinds."""
         assert interactions_for(ProviderKind.OPENROUTER) == {
+            Interaction.TRANSCRIBE,
             Interaction.SUMMARIZE,
             Interaction.VIDEO,
         }
-        assert interactions_for(ProviderKind.OPENROUTER_STT) == {Interaction.TRANSCRIBE}
 
-    def test_unknown_kind_supports_nothing(self) -> None:
+    def test_a_kind_does_not_claim_what_it_cannot_do(self) -> None:
         assert not supports(ProviderKind.DEEPGRAM, Interaction.VIDEO)
-        assert not supports(ProviderKind.OPENAI_CHAT, Interaction.TRANSCRIBE)
+        assert not supports(ProviderKind.DEEPGRAM, Interaction.SUMMARIZE)
+        assert not supports(ProviderKind.OPENAI, Interaction.VIDEO)
 
 
 class TestLiveCapture:
     def test_openrouter_stt_is_reprocess_only(self) -> None:
         """OpenRouter transcription is a single request/response upload with no
         streaming mode, so it must never be picked for a live session."""
-        assert supports(ProviderKind.OPENROUTER_STT, Interaction.TRANSCRIBE)
-        assert not supports_live_capture(ProviderKind.OPENROUTER_STT)
+        assert supports(ProviderKind.OPENROUTER, Interaction.TRANSCRIBE)
+        assert not supports_live_capture(ProviderKind.OPENROUTER)
 
     @pytest.mark.parametrize(
         "kind",
@@ -72,8 +82,15 @@ class TestLiveCapture:
     def test_every_other_stt_kind_still_drives_live_capture(self, kind: ProviderKind) -> None:
         assert supports_live_capture(kind)
 
-    def test_a_non_stt_kind_is_not_live_capable_either(self) -> None:
-        assert not supports_live_capture(ProviderKind.OPENAI_CHAT)
+    def test_realtime_and_batch_are_reported_per_kind(self) -> None:
+        """What the UI badges read. Realtime means the connector streams within
+        an utterance; batch means one round trip per utterance. Both drive a
+        live session - only OpenRouter is barred from that."""
+        assert supports_realtime(ProviderKind.DEEPGRAM)
+        assert supports_realtime(ProviderKind.OPENAI)
+        assert supports_batch(ProviderKind.OPENAI_COMPAT)
+        assert supports_batch(ProviderKind.OPENROUTER)
+        assert not supports_realtime(ProviderKind.OPENROUTER)
 
 
 def _models(*ids: str) -> list[ModelInfo]:
@@ -113,7 +130,7 @@ class TestModelFiltering:
         already correct - name matching would only corrupt it."""
         listed = _models("openai/whisper-large-v3-turbo", "nvidia/nemotron-3.5-asr-streaming")
         kept = filter_models(
-            listed, kind=ProviderKind.OPENROUTER_STT, interaction=Interaction.TRANSCRIBE
+            listed, kind=ProviderKind.OPENROUTER, interaction=Interaction.TRANSCRIBE
         )
         assert [m.id for m in kept] == [m.id for m in listed]
 
@@ -157,7 +174,7 @@ class TestStrictToggle:
         for strict in (True, False):
             kept = filter_models(
                 listed,
-                kind=ProviderKind.OPENROUTER_STT,
+                kind=ProviderKind.OPENROUTER,
                 interaction=Interaction.TRANSCRIBE,
                 strict=strict,
             )
@@ -194,12 +211,12 @@ class TestInlineDiarization:
         """The one model in OpenRouter's transcription catalogue that
         advertises diarization. Needs no request flag - the labels ride along
         on the verbose_json body, which the connector now parses."""
-        assert supports_inline_diarization(ProviderKind.OPENROUTER_STT, "x-ai/grok-stt-1.0")
+        assert supports_inline_diarization(ProviderKind.OPENROUTER, "x-ai/grok-stt-1.0")
 
     def test_models_that_return_no_speakers_report_false(self) -> None:
         """Parsing speakers does not conjure them: Whisper produces none, and
         neither does OpenAI's realtime transcription model."""
-        assert not supports_inline_diarization(ProviderKind.OPENROUTER_STT, "openai/whisper-1")
+        assert not supports_inline_diarization(ProviderKind.OPENROUTER, "openai/whisper-1")
         assert not supports_inline_diarization(ProviderKind.OPENAI_COMPAT, "whisper-1")
         assert not supports_inline_diarization(ProviderKind.OPENAI, "gpt-live-transcribe")
 

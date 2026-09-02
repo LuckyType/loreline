@@ -48,7 +48,7 @@ async def test_migrations_idempotent(tmp_path: Path) -> None:
         async with database.connection.execute("SELECT MAX(version) FROM schema_version;") as cur:
             row = await cur.fetchone()
         assert row is not None
-        assert row[0] == 11
+        assert row[0] == 12
 
 
 async def test_glossary_get_effective_merges_default_and_campaign(db: Database) -> None:
@@ -197,7 +197,7 @@ async def test_migration_removes_rows_of_the_dropped_google_kind(tmp_path: Path)
         )
         # Rewind past the removal migration so re-connecting replays it, the
         # way an upgrade of an install that already had this provider does.
-        await conn.execute("DELETE FROM schema_version WHERE version = 11;")
+        await conn.execute("DELETE FROM schema_version WHERE version >= 11;")
         await conn.commit()
 
     async with Database(path) as database:
@@ -207,3 +207,41 @@ async def test_migration_removes_rows_of_the_dropped_google_kind(tmp_path: Path)
         assert row[0] == 0, "the unloadable google row survived the migration"
         # And the repository can read the table again without raising.
         assert await ProviderRepository(database).list() == []
+
+
+async def test_migration_folds_retired_kinds_onto_the_merged_ones(tmp_path: Path) -> None:
+    """Provider kinds are one-per-vendor now, with capabilities declared per
+    kind. Stored rows naming a retired kind must be converted, not orphaned:
+    ProviderKind no longer has them, so a survivor would raise on every read.
+
+    `openai_chat` splits by where it pointed. No base_url meant OpenAI's own
+    API; a base_url meant a self-hosted OpenAI-compatible server, which is what
+    `openai_compat` covers.
+    """
+    path = tmp_path / "legacy-kinds.db"
+    rows = [
+        ("a", "openrouter_stt", None, "openrouter", None),
+        ("b", "openai_chat", None, "openai", None),
+        ("c", "openai_chat", "http://ollama:11434/v1", "openai_compat", "http://ollama:11434/v1"),
+    ]
+    async with Database(path) as database:
+        conn = database.connection
+        for pid, kind, base_url, _, _ in rows:
+            await conn.execute(
+                """
+                INSERT INTO providers
+                    (id, name, kind, base_url, auth_ref, protocol, model, sample_rate,
+                     language, capabilities, enabled)
+                VALUES (?, ?, ?, ?, NULL, 'http_batch', NULL, 16000, 'de', '{}', 1);
+                """,
+                (pid, pid, kind, base_url),
+            )
+        await conn.execute("DELETE FROM schema_version WHERE version >= 12;")
+        await conn.commit()
+
+    async with Database(path) as database:
+        stored = {p.id: p for p in await ProviderRepository(database).list()}
+        assert len(stored) == len(rows)
+        for pid, _, _, expected_kind, expected_url in rows:
+            assert stored[pid].kind.value == expected_kind
+            assert stored[pid].base_url == expected_url

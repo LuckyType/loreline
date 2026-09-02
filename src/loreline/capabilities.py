@@ -32,14 +32,19 @@ from loreline.models import Interaction, ModelInfo, ProviderKind
 # offered for that interaction anywhere in the UI or accepted by the API.
 INTERACTIONS_BY_KIND: dict[ProviderKind, frozenset[Interaction]] = {
     ProviderKind.DEEPGRAM: frozenset({Interaction.TRANSCRIBE}),
-    ProviderKind.OPENAI: frozenset({Interaction.TRANSCRIBE}),
-    ProviderKind.OPENAI_COMPAT: frozenset({Interaction.TRANSCRIBE}),
     ProviderKind.ASSEMBLYAI: frozenset({Interaction.TRANSCRIBE}),
     ProviderKind.GEMINI: frozenset({Interaction.TRANSCRIBE}),
     ProviderKind.VOSK: frozenset({Interaction.TRANSCRIBE}),
-    ProviderKind.OPENAI_CHAT: frozenset({Interaction.SUMMARIZE}),
-    ProviderKind.OPENROUTER: frozenset({Interaction.SUMMARIZE, Interaction.VIDEO}),
-    ProviderKind.OPENROUTER_STT: frozenset({Interaction.TRANSCRIBE}),
+    # One entry per vendor rather than one per role. A provider that can do
+    # several things says so here, and every picker is scoped by interaction
+    # (see filter_models and the model catalogues), so a single stored
+    # ProviderConfig can serve all of them without offering a chat model for
+    # transcription.
+    ProviderKind.OPENAI: frozenset({Interaction.TRANSCRIBE, Interaction.SUMMARIZE}),
+    ProviderKind.OPENAI_COMPAT: frozenset({Interaction.TRANSCRIBE, Interaction.SUMMARIZE}),
+    ProviderKind.OPENROUTER: frozenset(
+        {Interaction.TRANSCRIBE, Interaction.SUMMARIZE, Interaction.VIDEO}
+    ),
 }
 
 # Kinds that can transcribe stored audio but must never drive a live capture.
@@ -52,7 +57,7 @@ INTERACTIONS_BY_KIND: dict[ProviderKind, frozenset[Interaction]] = {
 # technical impossibility: a cloud round trip per utterance during play is the
 # wrong trade when purpose-built streaming backends (Deepgram, AssemblyAI,
 # OpenAI Realtime) exist. Re-processing stored audio has no such deadline.
-LIVE_CAPTURE_EXCLUDED: frozenset[ProviderKind] = frozenset({ProviderKind.OPENROUTER_STT})
+LIVE_CAPTURE_EXCLUDED: frozenset[ProviderKind] = frozenset({ProviderKind.OPENROUTER})
 
 # Substrings identifying a transcription model on an endpoint that publishes no
 # capability metadata (OpenAI's cloud ``/models``, and self-hosted Speaches /
@@ -112,7 +117,7 @@ _INLINE_DIARIZATION_MODELS: dict[ProviderKind, frozenset[str]] = {
         }
     ),
     ProviderKind.GEMINI: frozenset({"gemini-3.5-transcribe"}),
-    ProviderKind.OPENROUTER_STT: frozenset({"x-ai/grok-stt-1.0"}),
+    ProviderKind.OPENROUTER: frozenset({"x-ai/grok-stt-1.0"}),
 }
 
 
@@ -146,6 +151,28 @@ def supports(kind: ProviderKind, interaction: Interaction) -> bool:
 def kinds_for(interaction: Interaction) -> frozenset[ProviderKind]:
     """Every provider kind that can serve an interaction."""
     return frozenset(k for k, v in INTERACTIONS_BY_KIND.items() if interaction in v)
+
+
+# Kinds whose transcription connector is a streaming transport, i.e. it emits
+# transcript updates *within* an utterance rather than one result per utterance.
+#
+# This is not the same question as "can it drive a live session": loreline feeds
+# every connector VAD-chunked utterances, so a batch connector works live too
+# (that is how the self-hosted OPENAI_COMPAT kind has always run). Realtime is
+# about latency within an utterance, and it is what the UI badges report.
+REALTIME_KINDS: frozenset[ProviderKind] = frozenset(
+    {ProviderKind.DEEPGRAM, ProviderKind.ASSEMBLYAI, ProviderKind.OPENAI}
+)
+
+
+def supports_realtime(kind: ProviderKind) -> bool:
+    """Whether this kind transcribes over a streaming transport."""
+    return kind in REALTIME_KINDS
+
+
+def supports_batch(kind: ProviderKind) -> bool:
+    """Whether this kind transcribes by posting a complete utterance."""
+    return supports(kind, Interaction.TRANSCRIBE) and not supports_realtime(kind)
 
 
 def supports_live_capture(kind: ProviderKind) -> bool:

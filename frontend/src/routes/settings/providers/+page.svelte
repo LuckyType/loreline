@@ -54,6 +54,7 @@ import {
 	type ActionDefaults,
 	type ProtocolKind,
 	REASONING_EFFORTS,
+	capabilityBadges,
 	type ModelInfo,
 	type OpenRouterRouting,
 	type ProviderConfig,
@@ -94,12 +95,12 @@ const CATALOG: ProviderMeta[] = [
 	},
 	{
 		kind: 'openai',
-		label: 'OpenAI Realtime',
+		label: 'OpenAI',
 		hosting: 'cloud',
 		protocol: 'ws',
 		apiKey: { label: 'API key', url: 'https://platform.openai.com/api-keys' },
 		defaultModel: 'gpt-realtime-whisper',
-		note: 'Streaming transcription.',
+		note: 'Realtime transcription and session summaries.',
 	},
 	{
 		kind: 'gemini',
@@ -112,12 +113,12 @@ const CATALOG: ProviderMeta[] = [
 	},
 	{
 		kind: 'openai_compat',
-		label: 'Speaches / OpenAI-compatible',
+		label: 'Self-hosted (OpenAI-compatible)',
 		hosting: 'selfhosted',
 		protocol: 'http_batch',
 		baseUrl: { label: 'Base URL', placeholder: 'http://localhost:8000/v1' },
 		apiKey: { label: 'API key (optional)' },
-		note: 'faster-whisper / whisper.cpp server.',
+		note: 'Speaches, whisper.cpp, Ollama, LM Studio, vLLM. Transcription and/or summaries.',
 	},
 	{
 		kind: 'vosk',
@@ -128,39 +129,13 @@ const CATALOG: ProviderMeta[] = [
 		note: 'Offline, lightweight, ARM-friendly.',
 	},
 	{
-		kind: 'openai_chat',
-		label: 'OpenAI (chat / LLM)',
-		hosting: 'cloud',
-		protocol: 'http_batch',
-		apiKey: { label: 'API key', url: 'https://platform.openai.com/api-keys' },
-		note: 'LLM for session summaries.',
-	},
-	{
 		kind: 'openrouter',
 		label: 'OpenRouter',
 		hosting: 'cloud',
 		protocol: 'http_batch',
 		apiKey: { label: 'API key', url: 'https://openrouter.ai/settings/keys' },
 		defaultModel: 'anthropic/claude-sonnet-4.5',
-		note: 'One key for many vendors · "vendor/model" ids.',
-	},
-	{
-		kind: 'openrouter_stt',
-		label: 'OpenRouter (transcription)',
-		hosting: 'cloud',
-		protocol: 'http_batch',
-		apiKey: { label: 'API key', url: 'https://openrouter.ai/settings/keys' },
-		defaultModel: 'openai/whisper-large-v3-turbo',
-		note: 'Whisper, Nova, Chirp & more · re-processing only (no live capture).',
-	},
-	{
-		kind: 'openai_chat',
-		label: 'Ollama / LM Studio / vLLM',
-		hosting: 'selfhosted',
-		protocol: 'http_batch',
-		baseUrl: { label: 'Base URL', placeholder: 'http://localhost:11434/v1' },
-		apiKey: { label: 'API key (optional)' },
-		note: 'OpenAI-compatible chat for summaries.',
+		note: 'One key for many vendors. Transcription, summaries and video.',
 	},
 ]
 
@@ -449,7 +424,7 @@ onMount(async () => {
 		<Table>
 			<TableHeader>
 				<TableRow>
-					<TableHead>Name</TableHead><TableHead>Kind</TableHead><TableHead>Endpoint</TableHead
+					<TableHead>Name</TableHead><TableHead>Supports</TableHead><TableHead>Endpoint</TableHead
 					><TableHead>API key</TableHead><TableHead>Status</TableHead><TableHead></TableHead>
 				</TableRow>
 			</TableHeader>
@@ -457,7 +432,13 @@ onMount(async () => {
 				{#each providers as p (p.id)}
 					<TableRow>
 						<TableCell>{p.name}</TableCell>
-						<TableCell>{p.kind}</TableCell>
+						<TableCell>
+							<span class="flex flex-wrap gap-1">
+								{#each capabilityBadges(p) as badge (badge)}
+									<Badge variant="secondary">{badge}</Badge>
+								{/each}
+							</span>
+						</TableCell>
 						<TableCell class="text-muted-foreground">{p.base_url ?? 'default'}</TableCell>
 						<TableCell
 							><code class="text-muted-foreground">{p.secret_hint ?? '- none -'}</code></TableCell

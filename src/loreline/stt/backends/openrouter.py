@@ -34,7 +34,7 @@ _HEADERS = {
 }
 
 
-@register(ProviderKind.OPENROUTER_STT)
+@register(ProviderKind.OPENROUTER)
 def _factory(  # pyright: ignore[reportUnusedFunction]
     config: ProviderConfig, secrets: SecretStore
 ) -> OpenAICompatBackend:
