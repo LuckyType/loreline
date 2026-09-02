@@ -18,6 +18,7 @@ import pytest
 import pytest_asyncio
 from asgi_lifespan import LifespanManager
 from httpx import ASGITransport, AsyncClient
+from test_web_session import FakeBackend, FakeDiarizer, capture_factory
 
 from loreline.models import (
     Interaction,
@@ -711,12 +712,21 @@ class TestInlineDiarizationGuard:
 
     @pytest_asyncio.fixture
     async def client(self, tmp_path: Path) -> AsyncIterator[AsyncClient]:
+        # Fake capture + STT, so a session that gets *past* the guard does not
+        # try to open a real microphone - CI runners have none, and a genuine
+        # start would hang the lifespan on PortAudioError.
         settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="x")
-        app = create_app(settings)
+        app = create_app(
+            settings,
+            capture_factory=capture_factory,  # type: ignore[arg-type]
+            backend_factory=FakeBackend,  # type: ignore[arg-type]
+            diarizer_factory=lambda _cfg: FakeDiarizer(),
+        )
         async with LifespanManager(app):
             transport = ASGITransport(app=app)
             async with AsyncClient(transport=transport, base_url="http://test") as ac:
                 yield ac
+                await ac.post("/api/session/stop")
 
     @staticmethod
     async def _deepgram(client: AsyncClient, model: str) -> str:
@@ -747,11 +757,9 @@ class TestInlineDiarizationGuard:
         """Only inline is gated - remote diarization works off the audio, not
         the STT response, so the model's speaker labels are irrelevant to it.
 
-        Needs the audio extra, since it gets far enough to build the capture
-        pipeline - skipped without it, the same way the other tests that reach
-        real audio are.
+        Runs against the fake capture pipeline, so it exercises the guard
+        without touching audio hardware.
         """
-        pytest.importorskip("numpy", reason="audio extra not installed")
         provider = await self._deepgram(client, "flux-general-en")
         resp = await client.post(
             "/api/session/start",
