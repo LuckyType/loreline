@@ -67,6 +67,10 @@ class StartSessionRequest(BaseModel):
     fallback_model: str | None = None
     """Same, for the fallback provider - it has its own model list."""
     diarization: DiarizationConfig = Field(default_factory=DiarizationConfig)
+    use_glossary: bool = True
+    """Feed the campaign glossary to the STT provider (as keyterms or a prompt).
+    Defaults to on, which is what capture always did before the option existed;
+    turn it off to hear what the provider makes of the audio unbiased."""
 
 
 class DeviceSetting(BaseModel):
@@ -141,6 +145,10 @@ class ReprocessRequest(BaseModel):
     """Override the provider's model for this job (chosen on demand), "transcribe" only."""
     target: str = ORIGINAL_VERSION
     """Transcript version a "diarize" job relabels ("original" or a transcribe job id)."""
+    use_glossary: bool = True
+    """Feed the campaign glossary to the STT provider, "transcribe" only.
+    Defaults to on, matching what re-processing always did before the option
+    existed; off produces a version comparable against a glossary-biased one."""
 
 
 class VideoGenerateRequest(BaseModel):

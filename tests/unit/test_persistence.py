@@ -54,7 +54,7 @@ async def test_migrations_idempotent(tmp_path: Path) -> None:
         async with database.connection.execute("SELECT MAX(version) FROM schema_version;") as cur:
             row = await cur.fetchone()
         assert row is not None
-        assert row[0] == 13
+        assert row[0] == 14
 
 
 async def test_glossary_get_effective_merges_default_and_campaign(db: Database) -> None:

@@ -6,6 +6,7 @@ import { ApiError, api } from '$lib/api'
 import { Badge } from '$lib/components/ui/badge'
 import { Button } from '$lib/components/ui/button'
 import { Card, CardContent } from '$lib/components/ui/card'
+import { Checkbox } from '$lib/components/ui/checkbox'
 import {
 	Dialog,
 	DialogContent,
@@ -55,6 +56,9 @@ let rpDiarKind = $state<DiarizationModeKind>('remote')
 let rpDiarEndpoint = $state('')
 let rpDiarMin = $state('')
 let rpDiarMax = $state('')
+// On by default: re-processing always fed the campaign glossary to the
+// provider, and turning it off is the deliberate choice.
+let rpUseGlossary = $state(true)
 let rpBusy = $state(false)
 let poll: ReturnType<typeof setInterval> | undefined
 
@@ -295,7 +299,12 @@ async function reprocess() {
 	rpBusy = true
 	error = ''
 	try {
-		await api.enqueueReprocess({ session_id: id, provider_id: rpProvider, model: rpModel || null })
+		await api.enqueueReprocess({
+			session_id: id,
+			provider_id: rpProvider,
+			model: rpModel || null,
+			use_glossary: rpUseGlossary,
+		})
 		await refreshJobs()
 		if (!poll) poll = setInterval(refreshJobs, 1500)
 	} catch (err) {
@@ -551,6 +560,16 @@ onDestroy(() => {
 							defaultModel={defaults.stt_model}
 							interaction="transcribe"
 						/>
+						<label
+							class="flex items-center gap-2"
+							title="Sends the campaign's terms to the provider as keyterms or a prompt."
+						>
+							<Checkbox
+								checked={rpUseGlossary}
+								onCheckedChange={(v) => (rpUseGlossary = v === true)}
+							/>
+							<span>Use glossary</span>
+						</label>
 						<Button variant="outline" onclick={reprocess} disabled={rpBusy || !rpProvider}>
 							{rpBusy ? 'Queuing…' : 'Re-process audio'}
 						</Button>

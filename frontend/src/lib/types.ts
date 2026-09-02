@@ -306,6 +306,7 @@ export interface StartSessionRequest {
 	model?: string | null
 	fallback_model?: string | null
 	diarization?: DiarizationConfig
+	use_glossary?: boolean
 }
 
 export type JobStatusKind = 'queued' | 'running' | 'done' | 'error'
@@ -317,6 +318,7 @@ export interface ReprocessJob {
 	operation: 'transcribe' | 'diarize'
 	model?: string | null
 	target?: string
+	use_glossary?: boolean
 	diarization: DiarizationConfig
 	status: JobStatusKind
 	created_at: number
@@ -333,6 +335,7 @@ export interface ReprocessRequest {
 	diarization?: DiarizationConfig
 	model?: string | null
 	target?: string
+	use_glossary?: boolean
 }
 
 /**

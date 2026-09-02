@@ -280,9 +280,10 @@ class ReprocessRepository:
         await self._db.connection.execute(
             """
             INSERT INTO reprocess_jobs
-                (id, session_id, provider_id, operation, model, target, diarization,
-                 status, created_at, started_at, finished_at, segments_added, error)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                (id, session_id, provider_id, operation, model, target, use_glossary,
+                 diarization, status, created_at, started_at, finished_at, segments_added,
+                 error)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
             """,
             (
                 job.id,
@@ -291,6 +292,7 @@ class ReprocessRepository:
                 job.operation,
                 job.model,
                 job.target,
+                int(job.use_glossary),
                 job.diarization.model_dump_json(),
                 job.status.value,
                 job.created_at,
@@ -433,6 +435,7 @@ def _row_to_job(row: aiosqlite.Row) -> ReprocessJob:
         operation=row["operation"],
         model=row["model"],
         target=row["target"],
+        use_glossary=bool(row["use_glossary"]),
         diarization=DiarizationConfig.model_validate_json(row["diarization"]),
         status=JobStatus(row["status"]),
         created_at=row["created_at"],

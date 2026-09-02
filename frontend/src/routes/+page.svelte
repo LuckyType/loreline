@@ -4,6 +4,7 @@ import { onDestroy, onMount } from 'svelte'
 import { ApiError, api } from '$lib/api'
 import { Button } from '$lib/components/ui/button'
 import { Card, CardContent } from '$lib/components/ui/card'
+import { Checkbox } from '$lib/components/ui/checkbox'
 import { Input } from '$lib/components/ui/input'
 import { Label } from '$lib/components/ui/label'
 import { confirm } from '$lib/confirm.svelte'
@@ -47,6 +48,9 @@ let diarMode = $state<DiarizationModeKind>('none')
 let primaryModelInfo = $state<ModelInfo | undefined>(undefined)
 const inlineAvailable = $derived(primaryModelInfo?.inline_diarization === true)
 let diarEndpoint = $state('')
+// On by default: capture always fed the campaign glossary to the provider, and
+// turning it off is the deliberate choice (hear the audio unbiased).
+let useGlossary = $state(true)
 let error = $state('')
 let busy = $state(false)
 
@@ -240,6 +244,7 @@ async function start() {
 				min_speakers: null,
 				max_speakers: null,
 			},
+			use_glossary: useGlossary,
 		})
 		await refresh()
 	} catch (err) {
@@ -370,6 +375,9 @@ onDestroy(() => {
 					<span class={advancedProblem ? 'text-destructive' : 'text-foreground'}
 						>{diarSummary}</span
 					>
+					<span class="text-muted-foreground">·</span>
+					<span class="text-muted-foreground">Glossary</span>
+					<span class="text-foreground">{useGlossary ? 'On' : 'Off'}</span>
 					<Button
 						variant="ghost"
 						size="sm"
@@ -425,6 +433,20 @@ onDestroy(() => {
 									This model returns no speaker labels, so inline diarization isn't offered.
 								</span>
 							{/if}
+						</div>
+						<div class="flex flex-col gap-2">
+							<Label for="use-glossary">Glossary</Label>
+							<label class="flex items-center gap-2">
+								<Checkbox
+									id="use-glossary"
+									checked={useGlossary}
+									onCheckedChange={(v) => (useGlossary = v === true)}
+								/>
+								<span class="text-sm">Use glossary</span>
+							</label>
+							<span class="text-xs text-muted-foreground">
+								Sends the campaign's terms to the provider as keyterms or a prompt.
+							</span>
 						</div>
 						{#if diarMode === 'remote'}
 							<div class="flex flex-col gap-2">

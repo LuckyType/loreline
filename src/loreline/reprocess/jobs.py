@@ -136,6 +136,9 @@ class ReprocessManager:
             # row records what the run actually used, not just the request.
             model=provider.model if provider is not None else None,
             target=req.target if req.operation == "diarize" else ORIGINAL_VERSION,
+            # Same reason as `model`: the row says whether this version was
+            # produced with the glossary, not merely what was asked for.
+            use_glossary=req.use_glossary if req.operation == "transcribe" else True,
             diarization=req.diarization,
             status=JobStatus.QUEUED,
             created_at=time.time(),
@@ -206,7 +209,9 @@ class ReprocessManager:
             raise ProviderNotFoundError(msg)
         backend = self._backend_factory(provider, self._secrets)
         diarizer = await self._build_diarizer(job.diarization)
-        glossary = await self._glossaries.get_effective(campaign_id)
+        # Not loaded at all when the job opted out, so no glossary reaches the
+        # backend as keyterms or as a prompt.
+        glossary = await self._glossaries.get_effective(campaign_id) if job.use_glossary else None
         bus: EventBus[TranscriptEvent] = EventBus()
         router = SttRouter(
             backend,

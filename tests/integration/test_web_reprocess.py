@@ -12,6 +12,7 @@ from httpx import ASGITransport, AsyncClient
 from test_web_session import (  # type: ignore[import-not-found]
     FakeBackend,
     FakeDiarizer,
+    GlossaryRecordingBackend,
     capture_factory,
 )
 
@@ -116,6 +117,53 @@ async def test_reprocess_transcribe_with_on_demand_model(tmp_path: Path) -> None
             assert captured["model"] == "nova-9000"
             # The override is recorded on the job row as the model that ran.
             assert job["model"] == "nova-9000"
+
+
+async def test_reprocess_applies_the_glossary_unless_switched_off(tmp_path: Path) -> None:
+    """`use_glossary` defaults to on, matching what re-processing did before the
+    option existed; off hands the backend no glossary at all. Either way the
+    choice is recorded on the job row, like `model`, so a stored version can be
+    read as glossary-biased or not."""
+    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t")
+    seen: list[object] = []
+
+    def factory(config: ProviderConfig, secrets: SecretStore) -> GlossaryRecordingBackend:
+        return GlossaryRecordingBackend(config, secrets, seen)
+
+    app = create_app(
+        settings,
+        capture_factory=capture_factory,  # type: ignore[arg-type]
+        backend_factory=factory,  # type: ignore[arg-type]
+        diarizer_factory=lambda _cfg: FakeDiarizer(),
+    )
+    async with LifespanManager(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            pid = await _provider(client)
+            sid = await _run_session(client, pid)
+            await client.put("/api/glossary", json={"terms": ["Drakonia"]})
+            ctx = app.state.ctx  # pyright: ignore[reportAny]
+
+            seen.clear()
+            enqueue = await client.post(
+                "/api/reprocess", json={"session_id": sid, "provider_id": pid}
+            )
+            await ctx.reprocess.wait(enqueue.json()["id"])
+            job = (await client.get(f"/api/reprocess/{enqueue.json()['id']}")).json()
+            assert job["status"] == "done"
+            assert job["use_glossary"] is True
+            assert seen and [getattr(g, "terms", None) for g in seen] == [["Drakonia"]] * len(seen)
+
+            seen.clear()
+            enqueue = await client.post(
+                "/api/reprocess",
+                json={"session_id": sid, "provider_id": pid, "use_glossary": False},
+            )
+            await ctx.reprocess.wait(enqueue.json()["id"])
+            job = (await client.get(f"/api/reprocess/{enqueue.json()['id']}")).json()
+            assert job["status"] == "done"
+            assert job["use_glossary"] is False
+            assert seen and all(g is None for g in seen)
 
 
 async def test_reprocess_job(tmp_path: Path) -> None:

@@ -356,6 +356,7 @@ class ReprocessJob(BaseModel):
     provider_id: str
     operation: str = "transcribe"  # "transcribe" (re-STT) | "diarize" (per version)
     model: str | None = None  # the model the job ran with ("transcribe" only)
+    use_glossary: bool = True  # whether the run fed the campaign glossary to the backend
     target: str = ORIGINAL_VERSION  # transcript version a "diarize" job relabels
     diarization: DiarizationConfig = Field(default_factory=DiarizationConfig)
     status: JobStatus = JobStatus.QUEUED

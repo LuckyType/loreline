@@ -189,6 +189,13 @@ MIGRATIONS: list[str] = [
     """
     ALTER TABLE providers ADD COLUMN routing TEXT;
     """,
+    # v14 - record whether a re-transcription ran with the campaign glossary.
+    # The glossary is optional per job now, and the row has to say which way it
+    # went so a stored version can be read as glossary-biased or not. Existing
+    # rows predate the choice and were all produced with it, hence DEFAULT 1.
+    """
+    ALTER TABLE reprocess_jobs ADD COLUMN use_glossary INTEGER NOT NULL DEFAULT 1;
+    """,
 ]
 
 

@@ -60,6 +60,31 @@ class FakeBackend:
         return None
 
 
+class GlossaryRecordingBackend(FakeBackend):
+    """FakeBackend that records the glossary handed to each transcribe call.
+
+    The router is where the choice becomes observable: an opted-out run must
+    reach the backend with ``glossary=None``, not with an empty one.
+    """
+
+    def __init__(
+        self, config: ProviderConfig, secrets: SecretStore, seen: list[object] | None = None
+    ) -> None:
+        super().__init__(config, secrets)
+        self.seen: list[object] = seen if seen is not None else []
+
+    async def transcribe(
+        self,
+        audio: AsyncIterator[Utterance],
+        *,
+        session_id: str,
+        glossary: object = None,
+    ) -> AsyncIterator[TranscriptEvent]:
+        self.seen.append(glossary)
+        async for event in super().transcribe(audio, session_id=session_id, glossary=glossary):
+            yield event
+
+
 class FakeSource:
     """Finite frame source emitting a fixed number of frames then stopping."""
 
@@ -218,6 +243,40 @@ async def test_start_overrides_fallback_model(session_settings: Settings) -> Non
             assert start.status_code == 201
             assert seen == ["primary-model", "fallback-model"]
             await ac.post("/api/session/stop")
+
+
+async def test_start_applies_the_glossary_unless_switched_off(session_settings: Settings) -> None:
+    """`use_glossary` defaults to on (the behaviour before the option existed);
+    off means the backend is handed no glossary at all, not an empty one."""
+    seen: list[object] = []
+
+    def factory(config: ProviderConfig, secrets: SecretStore) -> GlossaryRecordingBackend:
+        return GlossaryRecordingBackend(config, secrets, seen)
+
+    app = create_app(
+        session_settings,
+        capture_factory=capture_factory,  # type: ignore[arg-type]
+        backend_factory=factory,  # type: ignore[arg-type]
+        diarizer_factory=lambda _cfg: FakeDiarizer(),
+    )
+    async with LifespanManager(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            pid = await _create_provider(ac)
+            await ac.put("/api/glossary", json={"terms": ["Drakonia"]})
+
+            await ac.post("/api/session/start", json={"primary_provider": pid})
+            await ac.post("/api/session/stop")
+            assert seen, "the backend was never asked to transcribe"
+            assert [getattr(g, "terms", None) for g in seen] == [["Drakonia"]] * len(seen)
+
+            seen.clear()
+            await ac.post(
+                "/api/session/start", json={"primary_provider": pid, "use_glossary": False}
+            )
+            await ac.post("/api/session/stop")
+            assert seen, "the backend was never asked to transcribe"
+            assert all(g is None for g in seen)
 
 
 async def test_stop_without_session(session_client: AsyncClient) -> None:

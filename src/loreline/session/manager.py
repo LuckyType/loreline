@@ -263,7 +263,11 @@ class SessionManager:
 
             primary_cfg, fallback_cfg = await self._resolve_providers(req)
             primary, fallback, backends = self._build_backends(primary_cfg, fallback_cfg)
-            glossary = await self._glossaries.get_effective(req.campaign_id)
+            # Skipped entirely when the GM opted out, so no glossary reaches the
+            # backend as keyterms or as a prompt.
+            glossary = (
+                await self._glossaries.get_effective(req.campaign_id) if req.use_glossary else None
+            )
             diarizer = self._build_diarizer(req.diarization)
             sample_rate = primary_cfg.sample_rate
 
