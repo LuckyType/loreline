@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import httpx
 
-from loreline.models import ModelInfo, ProviderKind
+from loreline.models import Interaction, ModelInfo, ProviderKind
 from loreline.stt.catalog import list_models
 
 
@@ -199,3 +199,70 @@ async def test_models_without_pricing_still_list_cleanly() -> None:
 
     curated = await list_models(kind=ProviderKind.DEEPGRAM, base_url=None, api_key=None)
     assert all(m.pricing is None and m.context_length is None for m in curated)
+
+
+async def test_transcription_models_report_no_price() -> None:
+    """Audio models are priced per unit of audio, not per token, and the
+    catalogue does not say which unit: measured against the live API,
+    deepgram/nova-3's "0.0043" bills per minute while nvidia/nemotron-3.5-asr's
+    "0.00000333" bills per second. Treating either as a per-token rate produced
+    "$4300 / $0" in the picker. No price beats a wrong one.
+    """
+
+    def handle(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {
+                        "id": "deepgram/nova-3",
+                        "architecture": {
+                            "input_modalities": ["audio"],
+                            "output_modalities": ["transcription"],
+                        },
+                        "pricing": {"prompt": "0.0043", "completion": "0"},
+                    }
+                ]
+            },
+        )
+
+    models = await list_models(
+        kind=ProviderKind.OPENROUTER_STT,
+        base_url=None,
+        api_key="k",
+        interaction=Interaction.TRANSCRIBE,
+        client_factory=lambda: _factory(httpx.MockTransport(handle)),
+    )
+    assert models[0].pricing is None
+
+
+async def test_chat_models_keep_their_per_token_price() -> None:
+    """The suppression is scoped to audio: text models really are per-token,
+    and $3/$15 per million is the figure people compare."""
+
+    def handle(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {
+                        "id": "anthropic/claude-sonnet-4.5",
+                        "architecture": {
+                            "input_modalities": ["text"],
+                            "output_modalities": ["text"],
+                        },
+                        "pricing": {"prompt": "0.000003", "completion": "0.000015"},
+                    }
+                ]
+            },
+        )
+
+    models = await list_models(
+        kind=ProviderKind.OPENROUTER,
+        base_url=None,
+        api_key="k",
+        interaction=Interaction.SUMMARIZE,
+        client_factory=lambda: _factory(httpx.MockTransport(handle)),
+    )
+    assert models[0].pricing is not None
+    assert (models[0].pricing.prompt, models[0].pricing.completion) == (3.0, 15.0)

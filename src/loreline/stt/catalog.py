@@ -235,11 +235,30 @@ def _supports_reasoning(item: dict[str, object]) -> bool:
     return any(isinstance(p, str) and p in _REASONING_PARAMS for p in cast("list[object]", params))
 
 
+def _is_transcription_model(item: dict[str, object]) -> bool:
+    architecture = item.get("architecture")
+    if not isinstance(architecture, dict):
+        return False
+    outputs = cast("dict[str, object]", architecture).get("output_modalities")
+    if not isinstance(outputs, list):
+        return False
+    return "transcription" in cast("list[object]", outputs)
+
+
 def _parse_model(item: dict[str, object]) -> ModelInfo | None:
     model_id = item.get("id")
     if not isinstance(model_id, str):
         return None
     pricing = item.get("pricing")
+    # Transcription models are priced per unit of *audio*, not per token, and
+    # OpenRouter does not say which unit in the catalogue: measured against the
+    # live API, deepgram/nova-3's "0.0043" bills per minute while
+    # nvidia/nemotron-3.5-asr's "0.00000333" bills per second. Nothing in the
+    # payload distinguishes the two, so any figure shown here would be wrong by
+    # a factor of 60 for some models. Reporting no price is the honest option;
+    # OpenRouter's own model page is the place to check an audio rate.
+    if _is_transcription_model(item):
+        pricing = None
     context_length = item.get("context_length")
     return ModelInfo(
         id=model_id,
