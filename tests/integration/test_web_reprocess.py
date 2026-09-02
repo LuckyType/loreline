@@ -187,6 +187,40 @@ async def test_reprocess_job(tmp_path: Path) -> None:
             assert {f"reprocess:{job_id}", f"reprocess:{second_id}"} <= raw_sources
 
 
+async def test_reprocess_accepts_a_kind_barred_from_live_capture(client: AsyncClient) -> None:
+    """Re-processing replays stored audio, so the live-capture exclusion must
+    not reach it: OpenRouter transcription has no streaming mode and is
+    rejected for a live session, but re-processing a recording is exactly what
+    it is for (see loreline.capabilities.LIVE_CAPTURE_EXCLUDED). The provider
+    pickers mirror this split, so a regression here would silently strand every
+    batch provider on the session page."""
+    live_pid = await _provider(client)
+    sid = await _run_session(client, live_pid)
+    batch = await client.post(
+        "/api/providers",
+        json={"name": "OpenRouter", "kind": "openrouter", "protocol": "http_batch"},
+    )
+    batch_pid = batch.json()["id"]
+
+    start = await client.post("/api/session/start", json={"primary_provider": batch_pid})
+    assert start.status_code == 400
+    assert "live" in start.json()["detail"]
+
+    enqueue = await client.post(
+        "/api/reprocess", json={"session_id": sid, "provider_id": batch_pid}
+    )
+    assert enqueue.status_code == 202
+    job_id = enqueue.json()["id"]
+    job: dict[str, object] = {}
+    for _ in range(50):
+        job = (await client.get(f"/api/reprocess/{job_id}")).json()
+        if job["status"] in {"done", "error"}:
+            break
+        await asyncio.sleep(0.02)
+    assert job["status"] == "done"
+    assert int(job["segments_added"]) >= 1  # type: ignore[arg-type]
+
+
 async def test_reprocess_unknown_session(client: AsyncClient) -> None:
     pid = await _provider(client)
     resp = await client.post("/api/reprocess", json={"session_id": "missing", "provider_id": pid})

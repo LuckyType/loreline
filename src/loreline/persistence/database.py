@@ -180,6 +180,15 @@ MIGRATIONS: list[str] = [
         WHERE kind = 'openai_chat' AND (base_url IS NULL OR base_url = '');
     UPDATE providers SET kind = 'openai_compat' WHERE kind = 'openai_chat';
     """,
+    # v13 - persist OpenRouter provider-routing preferences. The column was
+    # missed when the feature landed, so the API accepted `routing`, the
+    # settings UI wrote it, and it was silently dropped on save: every request
+    # went out with OpenRouter's default routing regardless of what the GM
+    # picked. NULL means "never configured", which is what the model already
+    # treats as "send no routing".
+    """
+    ALTER TABLE providers ADD COLUMN routing TEXT;
+    """,
 ]
 
 

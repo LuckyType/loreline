@@ -181,6 +181,21 @@ const durationText = $derived.by(() => {
 	return h > 0 ? `${h}:${String(m).padStart(2, '0')}:${sec}` : `${m}:${sec}`
 })
 
+// Status of the "original" row. That version is the live capture itself, so
+// its state is the *session's*, not a job's: "live" is only true while the
+// capture is actually running (see SessionStatus in src/loreline/models.py) -
+// on a session that ended hours ago the badge read "live" forever, which is
+// exactly the wrong thing to say about a finished recording. Same variants the
+// session list uses, so the two badges agree at a glance.
+const originalStatus = $derived.by(() => {
+	const status = detail?.session.status
+	if (status === 'capturing' || status === 'stopping') {
+		return { label: 'live', variant: 'outline' } as const
+	}
+	if (status === 'error') return { label: 'error', variant: 'destructive' } as const
+	return { label: 'complete', variant: 'secondary' } as const
+})
+
 const selectedJob = $derived(transcribeJobs.find((j) => j.id === selectedVersion))
 const selectedProviderName = $derived(
 	selectedVersion === 'original'
@@ -218,6 +233,22 @@ const selectedLlm = $derived(llmProviders.find((p) => p.id === sumProvider))
 /** Re-processing replays stored audio, so it accepts every transcribe-capable
  *  provider - including the ones excluded from live capture. */
 const reprocessProviders = $derived(providersFor(providers, 'transcribe'))
+
+/** Which provider the re-process row comes up on.
+ *
+ * The stored transcription default wins: Settings promises it is pre-selected
+ * "when starting or re-processing a session", and it is the only way to say
+ * "re-run my sessions on the batch provider". Re-running whatever captured the
+ * session is the fallback, not the rule - a capture provider is by definition
+ * one that can drive a live session, so preferring it buried the batch
+ * providers behind a manual switch every single time. A default naming a
+ * provider that has since been deleted (or lost its transcribe ability) is
+ * ignored rather than selected into a dead id. */
+function initialReprocessProvider(): string {
+	const wanted = defaults.stt_provider
+	if (wanted && reprocessProviders.some((p) => p.id === wanted)) return wanted
+	return detail?.session.primary_provider ?? reprocessProviders[0]?.id ?? ''
+}
 
 // --- video generation ---
 // Only OpenRouter can generate video (see supports_video in
@@ -359,12 +390,13 @@ onMount(async () => {
 	try {
 		detail = await api.getSession(id)
 		providers = await api.listProviders()
-		rpProvider = detail.session.primary_provider ?? reprocessProviders[0]?.id ?? ''
 		try {
 			defaults = await api.getDefaults()
 		} catch {
 			/* defaults are optional */
 		}
+		// After the defaults load, since the stored one is the first choice.
+		rpProvider = initialReprocessProvider()
 		await refreshJobs()
 		await refreshVideoJobs()
 	} catch (err) {
@@ -464,7 +496,9 @@ onDestroy(() => {
 							<TableCell class="text-muted-foreground"
 								>{fmtWhen(detail.session.started_at)}</TableCell
 							>
-							<TableCell><Badge variant="outline">live</Badge></TableCell>
+							<TableCell>
+								<Badge variant={originalStatus.variant}>{originalStatus.label}</Badge>
+							</TableCell>
 						</TableRow>
 						{#each transcribeJobs as j (j.id)}
 							<TableRow

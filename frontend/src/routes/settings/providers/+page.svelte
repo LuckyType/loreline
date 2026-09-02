@@ -49,7 +49,6 @@ import Dropdown from '$lib/Dropdown.svelte'
 import { hintFor, priceTitle } from '$lib/modelInfo'
 import ModelPicker from '$lib/ModelPicker.svelte'
 import {
-	liveSttProviders,
 	providersFor,
 	type ActionDefaults,
 	type ProtocolKind,
@@ -192,7 +191,14 @@ let defaults = $state<ActionDefaults>(blankDefaults())
 // reflect what is saved, not the (possibly unsaved) current selection.
 let savedDefaults = $state<ActionDefaults>(blankDefaults())
 let defaultsMsg = $state('')
-const sttProviders = $derived(liveSttProviders(providers))
+// This default is pre-selected when *starting or re-processing* a session (the
+// card below says so), and re-processing replays stored audio - the
+// live-capture exclusion has no business narrowing it. Offering only
+// live-capable providers here made the batch/re-process-only ones (OpenRouter)
+// impossible to set as the transcription default at all. The live pickers on
+// the dashboard apply the live-capture rule themselves, and ignore a stored
+// default that cannot drive a capture.
+const sttProviders = $derived(providersFor(providers, 'transcribe'))
 const llmProviders = $derived(providersFor(providers, 'summarize'))
 const videoProviders = $derived(providersFor(providers, 'video'))
 const sttSrcProvider = $derived(providers.find((p) => p.id === defaults.stt_provider))

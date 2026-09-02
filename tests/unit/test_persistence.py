@@ -11,6 +11,7 @@ import pytest_asyncio
 from loreline.models import (
     DEFAULT_GLOSSARY_CAMPAIGN,
     Glossary,
+    OpenRouterRouting,
     Protocol,
     ProviderCaps,
     ProviderConfig,
@@ -27,6 +28,11 @@ from loreline.persistence import (
     SessionRepository,
     TranscriptRepository,
 )
+from loreline.persistence.database import MIGRATIONS
+
+# Migration list indices (0-based) for the scripts exercised directly below.
+_V_DROP_GOOGLE = 10  # v11: delete rows of the removed Google STT v2 kind
+_V_MERGE_KINDS = 11  # v12: fold openrouter_stt / openai_chat onto merged kinds
 
 
 @pytest_asyncio.fixture
@@ -48,7 +54,7 @@ async def test_migrations_idempotent(tmp_path: Path) -> None:
         async with database.connection.execute("SELECT MAX(version) FROM schema_version;") as cur:
             row = await cur.fetchone()
         assert row is not None
-        assert row[0] == 12
+        assert row[0] == 13
 
 
 async def test_glossary_get_effective_merges_default_and_campaign(db: Database) -> None:
@@ -197,11 +203,13 @@ async def test_migration_removes_rows_of_the_dropped_google_kind(tmp_path: Path)
         )
         # Rewind past the removal migration so re-connecting replays it, the
         # way an upgrade of an install that already had this provider does.
-        await conn.execute("DELETE FROM schema_version WHERE version >= 11;")
+        # Run just the migration under test, rather than rewinding
+        # schema_version and reconnecting: that would replay every later
+        # migration too, and an ALTER TABLE cannot be applied twice.
+        await conn.executescript(MIGRATIONS[_V_DROP_GOOGLE])
         await conn.commit()
 
-    async with Database(path) as database:
-        async with database.connection.execute("SELECT COUNT(*) FROM providers;") as cur:
+        async with conn.execute("SELECT COUNT(*) FROM providers;") as cur:
             row = await cur.fetchone()
         assert row is not None
         assert row[0] == 0, "the unloadable google row survived the migration"
@@ -236,12 +244,50 @@ async def test_migration_folds_retired_kinds_onto_the_merged_ones(tmp_path: Path
                 """,
                 (pid, pid, kind, base_url),
             )
-        await conn.execute("DELETE FROM schema_version WHERE version >= 12;")
+        # As above: apply only the migration under test.
+        await conn.executescript(MIGRATIONS[_V_MERGE_KINDS])
         await conn.commit()
 
-    async with Database(path) as database:
         stored = {p.id: p for p in await ProviderRepository(database).list()}
         assert len(stored) == len(rows)
         for pid, _, _, expected_kind, expected_url in rows:
             assert stored[pid].kind.value == expected_kind
             assert stored[pid].base_url == expected_url
+
+
+async def test_provider_routing_survives_a_round_trip(db: Database) -> None:
+    """OpenRouter routing preferences must actually persist.
+
+    They did not: the API accepted `routing`, the settings UI wrote it, and the
+    repository dropped it on the floor because the column did not exist, so
+    every request went out with OpenRouter's default routing no matter what the
+    GM picked. The unit tests covered routing_payload() on an in-memory config
+    and never crossed the persistence seam, which is exactly where it broke.
+    """
+    repo = ProviderRepository(db)
+    await repo.upsert(
+        ProviderConfig(
+            id="or1",
+            name="OpenRouter",
+            kind=ProviderKind.OPENROUTER,
+            protocol=Protocol.HTTP_BATCH,
+            routing=OpenRouterRouting(sort="price", data_collection="deny", zdr=True),
+        )
+    )
+    stored = await repo.get("or1")
+    assert stored is not None
+    assert stored.routing is not None
+    assert (stored.routing.sort, stored.routing.data_collection, stored.routing.zdr) == (
+        "price",
+        "deny",
+        True,
+    )
+
+    # A provider that never configured routing keeps None, which is what the
+    # request builder reads as "send no routing object at all".
+    await repo.upsert(
+        ProviderConfig(id="dg1", name="Deepgram", kind=ProviderKind.DEEPGRAM, protocol=Protocol.WS)
+    )
+    plain = await repo.get("dg1")
+    assert plain is not None
+    assert plain.routing is None
