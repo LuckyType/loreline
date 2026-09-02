@@ -15,6 +15,7 @@ _BACKEND_MODULES = (
     "loreline.stt.backends.deepgram",
     "loreline.stt.backends.assemblyai",
     "loreline.stt.backends.gemini",
+    "loreline.stt.backends.gemini_live",
 )
 
 

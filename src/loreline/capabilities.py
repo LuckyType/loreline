@@ -83,6 +83,11 @@ _TRANSCRIBE_NAME_MARKERS = ("whisper", "transcribe", "parakeet", "asr", "stt", "
 #   it among its supported parameters.
 # - https://www.assemblyai.com/docs/streaming/label-speakers-and-separate-channels
 #   - `speaker_labels: true` works on all three streaming models.
+# - https://ai.google.dev/gemini-api/docs/live-api/live-transcribe - "Speaker
+#   diarization is not supported in live streaming sessions", Google's words,
+#   so the GEMINI set carries only the batch gemini-3.5-transcribe and must
+#   never gain the -live model; the inline-diarization guard then refuses
+#   "Inline (from STT)" on it instead of producing an unlabelled transcript.
 #
 # Not listed, and why (openai_compat): Speaches exposes speaker *embeddings*
 # (POST /v1/audio/speech/embedding, 512-d vectors) but no diarization and no
@@ -165,6 +170,11 @@ def kinds_for(interaction: Interaction) -> frozenset[ProviderKind]:
 # OpenAI also serves batch-only transcription models (whisper-1,
 # gpt-transcribe), which is why connector selection is per model, not per kind
 # (see is_realtime_model and loreline.stt.registry).
+# Gemini stays out even though gemini-3.5-transcribe-live now has a streaming
+# connector: that model is hidden as unverified (see the gate in
+# loreline.stt.catalog._CURATED), and is_realtime_model's unset-model branch
+# reads this set - a Gemini config with no model has always meant the batch
+# connector, which listing the kind here would silently flip.
 REALTIME_KINDS: frozenset[ProviderKind] = frozenset(
     {ProviderKind.DEEPGRAM, ProviderKind.ASSEMBLYAI, ProviderKind.OPENAI}
 )
@@ -178,15 +188,14 @@ _REALTIME_ONLY_KINDS: frozenset[ProviderKind] = frozenset(
 
 # For kinds that split their catalogue across two transports: the models that
 # ride the streaming one. A kind absent here is single-transport, so its models
-# need no per-model classification. Gemini is listed even though this app has
-# no Live API connector yet: classifying gemini-3.5-transcribe-live as
-# streaming makes the registry refuse it with a message that says what is
-# missing, instead of posting it to the batch endpoint and surfacing whatever
-# error Google returns for a transport mismatch.
+# need no per-model classification. Classifying gemini-3.5-transcribe-live as
+# streaming is what routes it to the Live API connector
+# (stt/backends/gemini_live.py) instead of posting it to the batch endpoint.
 #
 # Checked against provider documentation on 2026-09-02:
 # - https://developers.openai.com/api/docs/guides/realtime-transcription
 # - https://ai.google.dev/gemini-api/docs/transcribe
+# - https://ai.google.dev/gemini-api/docs/live-api/live-transcribe
 _REALTIME_MODELS: dict[ProviderKind, frozenset[str]] = {
     ProviderKind.OPENAI: frozenset({"gpt-live-transcribe", "gpt-realtime-whisper"}),
     ProviderKind.GEMINI: frozenset({"gemini-3.5-transcribe-live"}),

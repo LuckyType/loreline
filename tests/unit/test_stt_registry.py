@@ -10,6 +10,7 @@ from loreline.models import Protocol, ProviderConfig, ProviderKind
 from loreline.secrets import SecretStore
 from loreline.stt import create_backend
 from loreline.stt.backends.gemini import GeminiSTTBackend
+from loreline.stt.backends.gemini_live import GeminiLiveBackend
 from loreline.stt.backends.openai_compat import OpenAICompatBackend
 from loreline.stt.backends.openai_realtime import OpenAIRealtimeBackend
 from loreline.stt.registry import registered_kinds
@@ -103,11 +104,22 @@ class TestModelResolution:
         )
         assert isinstance(backend, GeminiSTTBackend)
 
-    def test_gemini_live_model_is_refused_with_the_reason(self, tmp_path: Path) -> None:
-        """gemini-3.5-transcribe-live is reachable only over the Live API's
-        WebSocket, which this app has no connector for. The refusal must say
-        so, instead of posting to the batch endpoint and surfacing whatever
-        Google answers for a transport mismatch."""
-        config = _config(ProviderKind.GEMINI, model="gemini-3.5-transcribe-live", base_url=None)
-        with pytest.raises(ValueError, match="streaming connector"):
-            create_backend(config, self._secrets(tmp_path))
+    def test_gemini_live_model_resolves_to_the_live_connector(self, tmp_path: Path) -> None:
+        """gemini-3.5-transcribe-live rides the Live API's WebSocket. The model
+        is hidden from the pickers until verified against the real service (see
+        the gate in loreline.stt.catalog), but a config that names it
+        explicitly must still reach the connector - that is how the
+        verification run is switched on without a code change."""
+        backend = create_backend(
+            _config(ProviderKind.GEMINI, model="gemini-3.5-transcribe-live", base_url=None),
+            self._secrets(tmp_path),
+        )
+        assert isinstance(backend, GeminiLiveBackend)
+
+    def test_gemini_without_a_model_keeps_the_batch_connector(self, tmp_path: Path) -> None:
+        """Stored Gemini configs predate the Live connector, and for this kind
+        an unset model has always meant the batch Interactions API."""
+        backend = create_backend(
+            _config(ProviderKind.GEMINI, base_url=None), self._secrets(tmp_path)
+        )
+        assert isinstance(backend, GeminiSTTBackend)

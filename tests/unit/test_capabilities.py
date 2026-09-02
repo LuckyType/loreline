@@ -257,6 +257,13 @@ class TestInlineDiarization:
     def test_gemini_transcribe_diarizes(self) -> None:
         assert supports_inline_diarization(ProviderKind.GEMINI, "gemini-3.5-transcribe")
 
+    def test_gemini_live_does_not_diarize(self) -> None:
+        """Google's Live API docs state plainly that speaker diarization is not
+        supported in live streaming sessions, so the guard must refuse "Inline
+        (from STT)" on the -live model rather than silently producing an
+        unlabelled transcript."""
+        assert not supports_inline_diarization(ProviderKind.GEMINI, "gemini-3.5-transcribe-live")
+
     def test_openrouter_grok_stt_diarizes(self) -> None:
         """The one model in OpenRouter's transcription catalogue that
         advertises diarization. Needs no request flag - the labels ride along

@@ -56,8 +56,9 @@ def create_backend(config: ProviderConfig, secrets: SecretStore) -> STTBackend:
     if (config.kind, not realtime) in _REGISTRY:
         # The kind exists but this model needs the transport we lack: say so,
         # rather than letting the wrong connector produce a provider-side
-        # error that never mentions the transport. Today this is Gemini's
-        # -live model, which only the Live API's WebSocket can reach.
+        # error that never mentions the transport. No shipped kind hits this
+        # today (Gemini's -live model gained its Live API connector), but the
+        # next vendor to split its catalogue across transports will.
         transport = "streaming" if realtime else "batch"
         msg = (
             f"model {config.model!r} needs a {transport} connector, which this app "
