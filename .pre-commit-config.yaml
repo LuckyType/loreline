@@ -1,3 +1,6 @@
+# Run with `prek` (https://prek.j178.dev), a drop-in Rust reimplementation of
+# pre-commit that reads this same file. Install the git hooks with
+# `prek install`; run everything with `prek run --all-files`.
 repos:
   - repo: local
     hooks:
@@ -26,8 +29,11 @@ repos:
         pass_filenames: false
         files: ^(pyproject\.toml|uv\.lock)$
 
-  - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v5.0.0
+  # prek ships Rust rewrites of these five, so `repo: builtin` runs them from
+  # the prek binary itself: no clone, no pinned rev to bump, no Python env.
+  # Same hook ids, same defaults as pre-commit-hooks. Note this stanza is
+  # prek-only; plain pre-commit cannot read `repo: builtin`.
+  - repo: builtin
     hooks:
       - id: end-of-file-fixer
       - id: trailing-whitespace
@@ -43,6 +49,11 @@ repos:
   # subsumes the other - on this repo gitleaks flagged a Google-shaped test
   # fixture that trufflehog ignored, and trufflehog is the one that would tell
   # you a real key still works.
+  #
+  # Neither has a prek Rust builtin (prek's builtins cover pre-commit-hooks
+  # only), so these two keep running exactly as before: gitleaks from its
+  # pinned upstream repo via prek's golang toolchain, trufflehog as a system
+  # hook against the binary on PATH. Same flags, same behaviour.
   #
   # Both look only at what is being committed (--staged / --since-commit HEAD),
   # so they stay fast enough for a commit hook. A full-history sweep is a

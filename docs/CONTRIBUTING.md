@@ -43,7 +43,10 @@ uv run pytest
 cd frontend && npm run lint && npm run check && npm run build
 ```
 
-`uv run pre-commit install` wires the git hooks up.
+`uv run prek install` wires the git hooks up. prek is a drop-in Rust
+reimplementation of pre-commit and reads the same
+`.pre-commit-config.yaml`; `uv run prek run --all-files` runs every hook over
+the whole tree.
 
 > **Tip:** run uv with `--frozen` (or `export UV_FROZEN=1`) so it never rewrites
 > `uv.lock`. A user-global `exclude-newer` in `~/.config/uv/uv.toml` otherwise makes
