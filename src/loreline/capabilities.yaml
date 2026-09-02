@@ -510,6 +510,13 @@ providers:
       # in git history rather than here, because shipping a picker against an
       # endpoint that stops answering this month would only produce failed
       # jobs. The `video` interaction is off this provider for the same reason.
+      #
+      # OpenRouter proxied one of those models, openai/sora-2-pro, and that
+      # entry was removed too, ahead of the same 2026-09-24 date, rather than
+      # left to break mid-campaign. Nothing replaces it: OpenRouter's live
+      # /videos/models catalogue names no other OpenAI video model, so there is
+      # no OpenAI video reachable on the one path this app speaks. Check that
+      # catalogue before re-adding one here or under openrouter.
       # https://developers.openai.com/api/docs/deprecations
   openrouter:
     label: OpenRouter
@@ -921,20 +928,6 @@ providers:
           aspect_ratios: ["16:9", "9:16"]
           audio: true
           image_input: true
-          prompt_max_chars: null
-
-      - id: openai/sora-2-pro
-        label: "Sora 2 Pro"
-        # Upstream removal 2026-09-24: OpenAI retires the Videos API and
-        # every sora-2 snapshot, so this proxied entry dies with it.
-        deprecated: "2026-09-24"
-        interactions: [video]
-        video:
-          durations: [4, 8, 12, 16, 20]
-          resolutions: ["720p", "1080p"]
-          aspect_ratios: ["16:9", "9:16"]
-          audio: true
-          image_input: false        # supported_frame_images is null
           prompt_max_chars: null
 
       - id: bytedance/seedance-2.0
