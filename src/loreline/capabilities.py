@@ -153,26 +153,85 @@ def kinds_for(interaction: Interaction) -> frozenset[ProviderKind]:
     return frozenset(k for k, v in INTERACTIONS_BY_KIND.items() if interaction in v)
 
 
-# Kinds whose transcription connector is a streaming transport, i.e. it emits
+# Kinds with a streaming transcription connector, i.e. one that emits
 # transcript updates *within* an utterance rather than one result per utterance.
 #
 # This is not the same question as "can it drive a live session": loreline feeds
 # every connector VAD-chunked utterances, so a batch connector works live too
 # (that is how the self-hosted OPENAI_COMPAT kind has always run). Realtime is
 # about latency within an utterance, and it is what the UI badges report.
+#
+# Membership here says "at least one model streams", not "every model does":
+# OpenAI also serves batch-only transcription models (whisper-1,
+# gpt-transcribe), which is why connector selection is per model, not per kind
+# (see is_realtime_model and loreline.stt.registry).
 REALTIME_KINDS: frozenset[ProviderKind] = frozenset(
     {ProviderKind.DEEPGRAM, ProviderKind.ASSEMBLYAI, ProviderKind.OPENAI}
 )
 
+# Kinds whose every offered transcription model streams. Deepgram's hosted
+# Whisper models are batch-only but deliberately not offered (see the curated
+# list in loreline.stt.catalog), so within this app the whole kind streams.
+_REALTIME_ONLY_KINDS: frozenset[ProviderKind] = frozenset(
+    {ProviderKind.DEEPGRAM, ProviderKind.ASSEMBLYAI}
+)
+
+# For kinds that split their catalogue across two transports: the models that
+# ride the streaming one. A kind absent here is single-transport, so its models
+# need no per-model classification. Gemini is listed even though this app has
+# no Live API connector yet: classifying gemini-3.5-transcribe-live as
+# streaming makes the registry refuse it with a message that says what is
+# missing, instead of posting it to the batch endpoint and surfacing whatever
+# error Google returns for a transport mismatch.
+#
+# Checked against provider documentation on 2026-09-02:
+# - https://developers.openai.com/api/docs/guides/realtime-transcription
+# - https://ai.google.dev/gemini-api/docs/transcribe
+_REALTIME_MODELS: dict[ProviderKind, frozenset[str]] = {
+    ProviderKind.OPENAI: frozenset({"gpt-live-transcribe", "gpt-realtime-whisper"}),
+    ProviderKind.GEMINI: frozenset({"gemini-3.5-transcribe-live"}),
+}
+
+# Name fallback for a mixed-transport kind's model that nobody has curated
+# above yet: both vendors put the transport in the name ("live", "realtime"),
+# and misrouting a brand-new streaming model to the batch endpoint would fail
+# anyway, so the guess costs nothing over the curated set alone.
+_REALTIME_NAME_MARKERS = ("live", "realtime")
+
+
+def is_realtime_model(kind: ProviderKind, model: str | None) -> bool:
+    """Whether this provider+model pair transcribes over a streaming transport.
+
+    This is what picks the connector for kinds that offer both transports, so
+    it must answer for any model string, curated or not. An unset model keeps
+    the kind's historical default connector: OpenAI configs predating per-model
+    resolution have always run the Realtime session.
+    """
+    if kind in _REALTIME_ONLY_KINDS:
+        return True
+    known = _REALTIME_MODELS.get(kind)
+    if known is None:
+        return False
+    if model is None:
+        return kind in REALTIME_KINDS
+    if model in known:
+        return True
+    lowered = model.lower()
+    return any(marker in lowered for marker in _REALTIME_NAME_MARKERS)
+
 
 def supports_realtime(kind: ProviderKind) -> bool:
-    """Whether this kind transcribes over a streaming transport."""
+    """Whether this kind can transcribe over a streaming transport at all."""
     return kind in REALTIME_KINDS
 
 
 def supports_batch(kind: ProviderKind) -> bool:
-    """Whether this kind transcribes by posting a complete utterance."""
-    return supports(kind, Interaction.TRANSCRIBE) and not supports_realtime(kind)
+    """Whether this kind can transcribe by posting a complete utterance.
+
+    Not the complement of supports_realtime: OpenAI does both, keyed on the
+    model (whisper-1 and gpt-transcribe post, gpt-live-transcribe streams).
+    """
+    return supports(kind, Interaction.TRANSCRIBE) and kind not in _REALTIME_ONLY_KINDS
 
 
 def supports_live_capture(kind: ProviderKind) -> bool:

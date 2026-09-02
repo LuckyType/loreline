@@ -14,7 +14,7 @@ from typing import cast
 
 import httpx
 
-from loreline.capabilities import filter_models, supports_inline_diarization
+from loreline.capabilities import filter_models, is_realtime_model, supports_inline_diarization
 from loreline.logging import get_logger
 from loreline.models import Interaction, ModelInfo, ModelPrice, ProviderKind
 
@@ -39,13 +39,14 @@ _CUSTOM_BASE_KINDS = {ProviderKind.OPENAI_COMPAT}
 
 # Curated model lists for providers with no ``/v1/models`` endpoint to ask.
 #
-# Each entry is scoped to what *this app's connector for that kind* can actually
-# use, which is narrower than the provider's full catalogue. Realtime and batch
-# are not interchangeable: Deepgram serves Whisper batch-only while its own
-# models stream, OpenAI's gpt-live-transcribe is realtime-only while whisper-1
-# is batch-only, and Gemini's live transcription needs the Live API (a
-# different transport this app does not implement). Listing a model the
-# connector cannot drive just moves the failure to run time.
+# Each entry is scoped to what *this app's connectors for that kind* can
+# actually use, which is narrower than the provider's full catalogue. Realtime
+# and batch are not interchangeable: Deepgram serves Whisper batch-only while
+# its own models stream, and Gemini's live transcription needs the Live API (a
+# different transport this app does not implement). Listing a model no
+# connector can drive just moves the failure to run time. OpenAI is the kind
+# with a connector per transport, so its fallback list may mix the two; the
+# registry resolves each model to the right one.
 #
 # Checked against each provider's own documentation on 2026-08-31 - see the
 # per-kind notes. Re-check when a provider ships a generation; nothing here is
@@ -80,30 +81,18 @@ _CURATED: dict[ProviderKind, list[str]] = {
     # is reachable only through the Live API's WebSocket transport.
     # https://ai.google.dev/gemini-api/docs/transcribe
     ProviderKind.GEMINI: ["gemini-3.5-transcribe"],
-    # Realtime transcription sessions only - the batch-only models
-    # (gpt-transcribe, whisper-1, gpt-4o*-transcribe) belong to the
-    # OPENAI_COMPAT kind instead. Note whisper-1 and the gpt-4o-*-transcribe
-    # family were deprecated on 2026-08-26 (removal 2027-02-26).
+    # Fallback only, for when the live /models fetch fails: this kind normally
+    # lists its transcription models live, now that the registry can route the
+    # realtime ones to the Realtime WebSocket and the batch ones to
+    # /audio/transcriptions from a single stored provider. whisper-1 and the
+    # gpt-4o-*-transcribe family are omitted: deprecated 2026-08-26 (removal
+    # 2027-02-26), so a fallback should not seed them into new configs.
     # https://developers.openai.com/api/docs/guides/realtime-transcription
-    # Realtime-only on purpose: this kind's transcription connector is the
-    # Realtime WebSocket session, which cannot run the batch-only models
-    # (gpt-transcribe, whisper-1). Those are reachable through OPENAI_COMPAT
-    # pointed at api.openai.com, which speaks /audio/transcriptions.
-    ProviderKind.OPENAI: ["gpt-live-transcribe", "gpt-realtime-whisper"],
+    ProviderKind.OPENAI: ["gpt-live-transcribe", "gpt-realtime-whisper", "gpt-transcribe"],
     # Self-hosted: whatever the operator loaded, discoverable only from their
     # own server's /models.
     ProviderKind.VOSK: [],
 }
-
-# Kinds whose connector is a streaming transport, so their curated models are
-# realtime-capable by construction (that is the filter applied above). Used to
-# stamp ModelInfo.realtime for display; kinds absent here leave it None.
-_STREAMING_KINDS = {
-    ProviderKind.DEEPGRAM,
-    ProviderKind.ASSEMBLYAI,
-    ProviderKind.OPENAI,
-}
-_BATCH_KINDS = {ProviderKind.GEMINI}
 
 ClientFactory = Callable[[], httpx.AsyncClient]
 
@@ -135,23 +124,38 @@ async def list_models(
     # models for video generation.
     if interaction is Interaction.VIDEO:
         return await _fetch_video_models(kind, base_url, api_key, client_factory)
-    # OpenAI's live /models lists batch transcription models its Realtime
-    # connector cannot drive, so that one pairing keeps the curated list.
-    use_live = kind in _LIVE_KINDS and not (
-        kind is ProviderKind.OPENAI and interaction is Interaction.TRANSCRIBE
-    )
-    if use_live:
+    if kind in _LIVE_KINDS:
         live = await _fetch_openai_models(kind, base_url, api_key, interaction, client_factory)
         if live:
-            return filter_models(live, kind=kind, interaction=interaction, strict=strict_filtering)
-    realtime = True if kind in _STREAMING_KINDS else (False if kind in _BATCH_KINDS else None)
+            narrowed = filter_models(
+                live, kind=kind, interaction=interaction, strict=strict_filtering
+            )
+            return _annotate(narrowed, kind=kind, interaction=interaction)
+    curated = [ModelInfo(id=model_id) for model_id in _CURATED.get(kind, [])]
+    return _annotate(curated, kind=kind, interaction=interaction)
+
+
+def _annotate(
+    models: list[ModelInfo], *, kind: ProviderKind, interaction: Interaction
+) -> list[ModelInfo]:
+    """Stamp the capability flags the pickers read onto transcription entries.
+
+    A live ``/models`` row says nothing about transport or diarization, so both
+    come from the capability tables, per model rather than per kind: OpenAI's
+    list mixes realtime and batch models, and OpenRouter's carries one model
+    (grok-stt-1.0) whose inline diarization would otherwise go unadvertised.
+    Other interactions have no such flags to stamp.
+    """
+    if interaction is not Interaction.TRANSCRIBE:
+        return models
     return [
-        ModelInfo(
-            id=model_id,
-            realtime=realtime,
-            inline_diarization=supports_inline_diarization(kind, model_id),
+        model.model_copy(
+            update={
+                "realtime": is_realtime_model(kind, model.id),
+                "inline_diarization": supports_inline_diarization(kind, model.id),
+            }
         )
-        for model_id in _CURATED.get(kind, [])
+        for model in models
     ]
 
 

@@ -13,6 +13,7 @@ from loreline.capabilities import (
     INTERACTIONS_BY_KIND,
     filter_models,
     interactions_for,
+    is_realtime_model,
     kinds_for,
     supports,
     supports_batch,
@@ -91,6 +92,55 @@ class TestLiveCapture:
         assert supports_batch(ProviderKind.OPENAI_COMPAT)
         assert supports_batch(ProviderKind.OPENROUTER)
         assert not supports_realtime(ProviderKind.OPENROUTER)
+
+    def test_a_kind_may_offer_both_transports(self) -> None:
+        """These are not complements: OpenAI streams gpt-live-transcribe and
+        posts whisper-1 from the same kind, and which connector runs is decided
+        per model (see is_realtime_model)."""
+        assert supports_realtime(ProviderKind.OPENAI)
+        assert supports_batch(ProviderKind.OPENAI)
+
+
+class TestRealtimeModelResolution:
+    """is_realtime_model picks the connector for kinds with both transports, so
+    it has to answer for any model string a config can carry."""
+
+    def test_openai_models_split_by_transport(self) -> None:
+        assert is_realtime_model(ProviderKind.OPENAI, "gpt-live-transcribe")
+        assert is_realtime_model(ProviderKind.OPENAI, "gpt-realtime-whisper")
+        assert not is_realtime_model(ProviderKind.OPENAI, "whisper-1")
+        assert not is_realtime_model(ProviderKind.OPENAI, "gpt-transcribe")
+        assert not is_realtime_model(ProviderKind.OPENAI, "gpt-4o-transcribe")
+
+    def test_gemini_live_variant_is_streaming(self) -> None:
+        assert is_realtime_model(ProviderKind.GEMINI, "gemini-3.5-transcribe-live")
+        assert not is_realtime_model(ProviderKind.GEMINI, "gemini-3.5-transcribe")
+
+    def test_streaming_only_kinds_stream_whatever_the_model(self) -> None:
+        """Deepgram and AssemblyAI offer nothing but streaming models here (the
+        curated lists exclude Deepgram's batch-only hosted Whisper), so an
+        uncurated model still rides the streaming connector."""
+        assert is_realtime_model(ProviderKind.DEEPGRAM, "nova-3")
+        assert is_realtime_model(ProviderKind.DEEPGRAM, "some-future-model")
+        assert is_realtime_model(ProviderKind.ASSEMBLYAI, None)
+
+    def test_an_unset_model_keeps_the_kinds_historical_connector(self) -> None:
+        """Configs stored before per-model resolution carry no model; they must
+        keep running exactly the connector they always got."""
+        assert is_realtime_model(ProviderKind.OPENAI, None)
+        assert not is_realtime_model(ProviderKind.GEMINI, None)
+
+    def test_a_new_model_naming_its_transport_is_recognised(self) -> None:
+        """The curated sets rot; both vendors put the transport in the name, so
+        an uncurated "live"/"realtime" model on a mixed kind routes to the
+        streaming connector rather than failing on the batch endpoint."""
+        assert is_realtime_model(ProviderKind.OPENAI, "gpt-live-transcribe-2")
+
+    def test_batch_only_kinds_never_stream(self) -> None:
+        """The name markers apply only to kinds with a streaming connector to
+        route to: a self-hosted model with "live" in its name still posts."""
+        assert not is_realtime_model(ProviderKind.OPENAI_COMPAT, "whisper-live-v3")
+        assert not is_realtime_model(ProviderKind.OPENROUTER, "x-ai/grok-stt-1.0")
 
 
 def _models(*ids: str) -> list[ModelInfo]:

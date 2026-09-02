@@ -174,7 +174,7 @@ def _parse_results(message: dict[str, object], *, offset: float) -> tuple[str, l
     return transcript, words
 
 
-@register(ProviderKind.DEEPGRAM)
+@register(ProviderKind.DEEPGRAM, realtime=True)
 def _factory(  # pyright: ignore[reportUnusedFunction]
     config: ProviderConfig, secrets: SecretStore
 ) -> DeepgramBackend:

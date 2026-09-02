@@ -299,3 +299,77 @@ async def test_video_models_are_empty_for_a_kind_that_cannot_generate_video() ->
         client_factory=lambda: _factory(httpx.MockTransport(lambda _r: httpx.Response(200))),
     )
     assert models == []
+
+
+async def test_openai_transcription_lists_live_and_stamps_transport_per_model() -> None:
+    """The old workaround kept OpenAI's transcribe picker on a curated
+    realtime-only list, because the kind-keyed registry could only ever build
+    the Realtime connector. Now that the registry resolves per model, the live
+    /models list is served whole - narrowed to transcription models - and each
+    entry says which transport it rides."""
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        assert request.url.host == "api.openai.com"
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {"id": "gpt-4o"},
+                    {"id": "dall-e-3"},
+                    {"id": "whisper-1"},
+                    {"id": "gpt-transcribe"},
+                    {"id": "gpt-live-transcribe"},
+                ]
+            },
+        )
+
+    transport = httpx.MockTransport(handle)
+    models = await list_models(
+        kind=ProviderKind.OPENAI,
+        base_url=None,
+        api_key="k",
+        interaction=Interaction.TRANSCRIBE,
+        client_factory=lambda: _factory(transport),
+    )
+    assert _ids(models) == ["gpt-live-transcribe", "gpt-transcribe", "whisper-1"]
+    by_id = {m.id: m for m in models}
+    assert by_id["gpt-live-transcribe"].realtime is True
+    assert by_id["gpt-transcribe"].realtime is False
+    assert by_id["whisper-1"].realtime is False
+
+
+async def test_openai_transcription_falls_back_to_curated_when_the_fetch_fails() -> None:
+    transport = httpx.MockTransport(lambda _r: httpx.Response(500))
+    models = await list_models(
+        kind=ProviderKind.OPENAI,
+        base_url=None,
+        api_key="k",
+        interaction=Interaction.TRANSCRIBE,
+        client_factory=lambda: _factory(transport),
+    )
+    # The fallback now spans both transports, since either connector can run.
+    assert "gpt-realtime-whisper" in _ids(models)
+    assert "gpt-transcribe" in _ids(models)
+
+
+async def test_live_transcription_lists_carry_inline_diarization_flags() -> None:
+    """grok-stt-1.0 is the one OpenRouter transcription model that returns
+    speaker labels; the flag has to survive the live-fetch path or the picker
+    refuses inline diarization for a model that supports it."""
+
+    def handle(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"data": [{"id": "x-ai/grok-stt-1.0"}, {"id": "openai/whisper-large-v3-turbo"}]},
+        )
+
+    models = await list_models(
+        kind=ProviderKind.OPENROUTER,
+        base_url=None,
+        api_key="k",
+        interaction=Interaction.TRANSCRIBE,
+        client_factory=lambda: _factory(httpx.MockTransport(handle)),
+    )
+    by_id = {m.id: m for m in models}
+    assert by_id["x-ai/grok-stt-1.0"].inline_diarization is True
+    assert by_id["openai/whisper-large-v3-turbo"].inline_diarization is False

@@ -111,11 +111,11 @@ class ModelInfo(BaseModel):
 
     id: str
     context_length: int | None = None
-    # Whether this model works with a *streaming* connector. Curated per kind
-    # (see loreline.stt.catalog) because it is a property of the model AND the
-    # transport: Deepgram's whisper-* are batch-only, OpenAI's gpt-live-transcribe
-    # is realtime-only, and Gemini's -live variant needs the Live API entirely.
-    # None where the provider publishes no such distinction.
+    # Whether this model works with a *streaming* connector. Curated per model
+    # (see loreline.capabilities.is_realtime_model) because it is a property of
+    # the model AND the transport: Deepgram's whisper-* are batch-only, OpenAI's
+    # gpt-live-transcribe is realtime-only, and Gemini's -live variant needs the
+    # Live API entirely. None where the provider publishes no such distinction.
     realtime: bool | None = None
     # Whether "Inline (from STT)" diarization yields real speakers for this
     # model - see loreline.capabilities.supports_inline_diarization. The

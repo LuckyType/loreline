@@ -203,7 +203,7 @@ def _parse_words(message: dict[str, object], *, offset: float) -> list[Word]:
     return words
 
 
-@register(ProviderKind.ASSEMBLYAI)
+@register(ProviderKind.ASSEMBLYAI, realtime=True)
 def _factory(  # pyright: ignore[reportUnusedFunction]
     config: ProviderConfig, secrets: SecretStore
 ) -> AssemblyAIBackend:

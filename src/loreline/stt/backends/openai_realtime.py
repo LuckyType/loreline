@@ -260,7 +260,7 @@ class OpenAIRealtimeBackend:
         await self._reset_ws()
 
 
-@register(ProviderKind.OPENAI)
+@register(ProviderKind.OPENAI, realtime=True)
 def _factory(  # pyright: ignore[reportUnusedFunction]
     config: ProviderConfig, secrets: SecretStore
 ) -> OpenAIRealtimeBackend:

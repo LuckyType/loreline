@@ -173,6 +173,27 @@ def _factory(  # pyright: ignore[reportUnusedFunction]
     return OpenAICompatBackend(config, api_key=api_key)
 
 
+@register(ProviderKind.OPENAI)
+def _openai_batch_factory(  # pyright: ignore[reportUnusedFunction]
+    config: ProviderConfig, secrets: SecretStore
+) -> OpenAICompatBackend:
+    """OpenAI cloud's batch transcription models (whisper-1, gpt-transcribe).
+
+    The registry routes an OPENAI config here when its model is not one of the
+    Realtime ones, so one stored provider covers both transports. The config's
+    base_url is dropped rather than passed through: for this kind it has always
+    meant the Realtime WebSocket endpoint, which the batch API cannot live at,
+    and an operator who wants a custom batch endpoint has the OPENAI_COMPAT
+    kind for exactly that.
+    """
+    api_key = secrets.get(config.auth_ref) if config.auth_ref else None
+    return OpenAICompatBackend(
+        config.model_copy(update={"base_url": None}),
+        api_key=api_key,
+        default_model="gpt-transcribe",
+    )
+
+
 def _speaker_label(raw: object) -> str | None:
     """Speaker indices come back as integers (0, 1, …); render them the way the
     other connectors do so labels are comparable across providers."""
