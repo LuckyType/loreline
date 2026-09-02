@@ -14,6 +14,7 @@ import pytest
 from pydantic import ValidationError
 
 from loreline.capability_config import CapabilityConfig, ModelSpec, ProviderSpec, load
+from loreline.llm import default_base_url
 from loreline.models import Interaction, ProviderKind
 from loreline.stt import registry
 from loreline.stt.backends import load as load_backends
@@ -346,17 +347,38 @@ def test_summarize_and_video_providers_have_a_client_that_can_serve_them() -> No
 
     Unlike transcription there is no registry to consult, so the invariant is
     stated against what the client modules actually know how to reach. The
-    summarizer speaks OpenAI-compatible chat and routes every kind except
-    OpenRouter to OpenAI's own base URL (loreline/llm.py), and the video client
-    speaks OpenRouter's /videos API (loreline/video/client.py). A kind outside
-    these sets would be offered in the picker and fail at request time, which
-    is what happened when Gemini's researched chat and Veo models were first
-    added. Whoever writes those connectors updates this test with them.
+    summarizer speaks OpenAI-compatible chat (loreline/llm.py) and the video
+    client speaks OpenRouter's /videos API (loreline/video/client.py), which no
+    other vendor serves. A kind outside these sets would be offered in the
+    picker and fail at request time, which is what happened when Gemini's
+    researched chat and Veo models were first added. Whoever writes those
+    connectors updates this test with them.
+
+    Membership alone is too weak for the summarize half, because an unknown
+    kind falls back to OpenAI's base URL and would pass by inheriting it. So
+    every cloud kind that is not OpenAI must also name its own endpoint: Gemini
+    passes because loreline.llm sends it to Google's OpenAI-compatible shim,
+    not because nothing stopped it.
     """
     cfg = load()
 
     def kinds(interaction: Interaction) -> set[str]:
         return {k.value for k, p in cfg.providers.items() if interaction in p.interactions}
 
-    assert kinds(Interaction.SUMMARIZE) <= {"openai", "openai_compat", "openrouter"}
+    assert kinds(Interaction.SUMMARIZE) <= {"openai", "openai_compat", "openrouter", "gemini"}
     assert kinds(Interaction.VIDEO) <= {"openrouter"}
+
+    openai_default = default_base_url(ProviderKind.OPENAI)
+    for kind, provider in cfg.providers.items():
+        # openai_compat is the operator-supplied case: its base URL comes from
+        # the config, and the default is only ever a placeholder.
+        if Interaction.SUMMARIZE not in provider.interactions or kind in (
+            ProviderKind.OPENAI,
+            ProviderKind.OPENAI_COMPAT,
+        ):
+            continue
+        assert default_base_url(kind) != openai_default, f"{kind.value} posts chat to OpenAI"
+    # Google serves chat under ".../v1beta/openai"; the native ".../v1beta"
+    # base the transcription connector uses answers neither /chat/completions
+    # nor the /models probe behind the Test button.
+    assert default_base_url(ProviderKind.GEMINI).endswith("/openai")

@@ -11,6 +11,7 @@ import pytest
 
 from loreline.capabilities import (
     INTERACTIONS_BY_KIND,
+    config,
     filter_models,
     interactions_for,
     is_realtime_model,
@@ -22,6 +23,7 @@ from loreline.capabilities import (
     supports_live_capture,
     supports_realtime,
 )
+from loreline.capability_config import ModelSpec
 from loreline.models import Interaction, ModelInfo, ProviderKind
 
 
@@ -42,6 +44,7 @@ class TestCapabilityTable:
             ProviderKind.OPENAI,
             ProviderKind.OPENAI_COMPAT,
             ProviderKind.OPENROUTER,
+            ProviderKind.GEMINI,
         }
 
     def test_only_openrouter_generates_video(self) -> None:
@@ -291,3 +294,42 @@ class TestInlineDiarization:
         """An uncurated model is exactly the case we cannot vouch for."""
         assert not supports_inline_diarization(ProviderKind.DEEPGRAM, None)
         assert not supports_inline_diarization(ProviderKind.DEEPGRAM, "some-future-model")
+
+
+class TestGeminiSummarizeEfforts:
+    """The reasoning levels Google's compatible endpoint actually accepted.
+
+    Checked one request per model per level against the live API on 2026-09-02,
+    not copied from the thinking-page table, which claims a uniform
+    low/medium/high for the whole family and is wrong in both directions. These
+    lists differ per model on purpose; a "tidy-up" that makes them uniform is
+    the regression this test exists to catch.
+    """
+
+    def _efforts(self, model_id: str) -> list[str]:
+        spec = config().provider(ProviderKind.GEMINI)
+        assert spec is not None
+        entry = spec.find(model_id)
+        assert isinstance(entry, ModelSpec)
+        assert entry.llm is not None
+        return entry.llm.reasoning.selectable_efforts()
+
+    def test_flash_takes_every_level_the_shim_offers(self) -> None:
+        assert self._efforts("gemini-3.5-flash") == ["none", "minimal", "low", "medium", "high"]
+
+    def test_3_8_flash_rejects_minimal(self) -> None:
+        """400: "Thinking level MINIMAL is not supported for this model"."""
+        assert "minimal" not in self._efforts("gemini-3.8-flash")
+
+    @pytest.mark.parametrize("model_id", ["gemini-3.5-flash-lite", "gemini-3.1-pro-preview"])
+    def test_thinking_only_models_never_offer_none(self, model_id: str) -> None:
+        """3.1 Pro answers "Budget 0 is invalid. This model only works in
+        thinking mode"; Flash-Lite refuses it with a bare invalid-argument."""
+        assert "none" not in self._efforts(model_id)
+
+    def test_openai_only_levels_are_offered_for_no_gemini_model(self) -> None:
+        """ "Invalid reasoning_effort: xhigh. Valid values are: high, low,
+        medium, minimal, none" - the shim validates against its own set before
+        the model ever sees the request."""
+        for model_id in ("gemini-3.8-flash", "gemini-3.5-flash", "gemini-3.1-pro-preview"):
+            assert not {"xhigh", "max"} & set(self._efforts(model_id))

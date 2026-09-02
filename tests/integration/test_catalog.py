@@ -32,6 +32,22 @@ async def test_gemini_live_model_is_hidden_until_verified() -> None:
     assert "gemini-3.5-transcribe-live" not in _ids(models)
 
 
+async def test_gemini_summarize_picker_offers_chat_models_not_the_transcriber() -> None:
+    """Gemini publishes no list this app fetches, so both its pickers fall back
+    to a curated one - and they must not fall back to the same one. The
+    transcription table in stt.catalog knows nothing about chat, so a summarize
+    picker reading it would offer gemini-3.5-transcribe to write a summary
+    with."""
+    models = await list_models(
+        kind=ProviderKind.GEMINI,
+        base_url=None,
+        api_key=None,
+        interaction=Interaction.SUMMARIZE,
+    )
+    assert "gemini-3.5-flash" in _ids(models)
+    assert "gemini-3.5-transcribe" not in _ids(models)
+
+
 async def test_live_openai_compatible_models() -> None:
     def handle(request: httpx.Request) -> httpx.Response:
         assert request.url.path.endswith("/models")

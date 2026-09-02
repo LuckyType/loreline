@@ -14,7 +14,12 @@ from typing import cast
 
 import httpx
 
-from loreline.capabilities import filter_models, is_realtime_model, supports_inline_diarization
+from loreline.capabilities import (
+    curated_models,
+    filter_models,
+    is_realtime_model,
+    supports_inline_diarization,
+)
 from loreline.logging import get_logger
 from loreline.models import Interaction, ModelInfo, ModelPrice, ProviderKind
 
@@ -136,8 +141,23 @@ async def list_models(
                 live, kind=kind, interaction=interaction, strict=strict_filtering
             )
             return _annotate(narrowed, kind=kind, interaction=interaction)
-    curated = [ModelInfo(id=model_id) for model_id in _CURATED.get(kind, [])]
+    curated = [ModelInfo(id=model_id) for model_id in _curated_ids(kind, interaction)]
     return _annotate(curated, kind=kind, interaction=interaction)
+
+
+def _curated_ids(kind: ProviderKind, interaction: Interaction) -> list[str]:
+    """The fallback catalogue for a kind with no live list for this interaction.
+
+    Transcription keeps the hand-written table above, which is deliberately
+    narrower than capabilities.yaml - see the gemini-3.5-transcribe-live gate
+    in it. Everything else reads the curated ids straight out of the yaml,
+    because the transcription table is the wrong answer to a different
+    question: Gemini's catalogue is never fetched live, so a summarize picker
+    falling through to it would offer a transcription model to summarize with.
+    """
+    if interaction is Interaction.TRANSCRIBE:
+        return _CURATED.get(kind, [])
+    return curated_models(kind, interaction)
 
 
 def _annotate(
