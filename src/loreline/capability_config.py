@@ -251,10 +251,10 @@ class ModelSpec(_Strict):
     # one flag here is the whole release step.
     hidden: bool = False
     # Vendor-announced sunset, ISO date. A property of the model as a whole,
-    # not of one capability: OpenAI is retiring whole transcription models, and
-    # the Sora video models, on stated dates. Shown as a warning beside the
-    # model rather than hiding it, because a GM mid-campaign should not lose
-    # their model the day we notice the announcement.
+    # not of one capability: OpenAI is retiring whole transcription models on
+    # stated dates. Shown as a warning beside the model rather than hiding it,
+    # because a GM mid-campaign should not lose their model the day we notice
+    # the announcement.
     deprecated: str | None = None
     transcribe: TranscribeCapabilities | None = None
     llm: LlmCapabilities | None = None
