@@ -38,6 +38,17 @@ jobs:
       - name: Pytest
         run: uv run pytest
 
+      # Sunset dates recorded in capabilities.yaml, checked against the
+      # calendar and nothing else: no network, no secrets, same answer for
+      # everyone on a given day. It fails once a curated model is inside a week
+      # of its announced retirement, which is the last responsible moment to
+      # pick a successor rather than have a player find out mid-session. The
+      # vendor-facing half of the same check runs on a schedule instead (see
+      # capability-drift.yml), so a vendor being down can never turn this red
+      # and an outage can never hide a real deprecation.
+      - name: Capability sunset dates
+        run: uv run loreline check-capabilities --offline
+
   audio-tests:
     # Heavy native deps (numpy/torch/silero) kept off the fast lint job; this job
     # installs the audio + providers extras and runs the tests that importorskip

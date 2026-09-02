@@ -1,0 +1,55 @@
+# Has capabilities.yaml drifted from what the vendors actually offer?
+#
+# Deliberately NOT part of the pull-request pipeline. Every answer here depends
+# on a third party being up and telling the truth, so a red run has to be
+# something a human reads rather than something that blocks a merge on an
+# unrelated change. The half that can gate a merge (sunset dates, which are
+# pure date arithmetic against the file) runs in ci.yml instead.
+#
+# Needs no secrets: OpenRouter's model and video catalogues both answer
+# unauthenticated. The vendors that do want a key are read from the optional
+# secrets below and reported as "not checked, no credentials" when there is
+# none, which is the normal case and never a failure.
+name: Capability drift
+
+on:
+  schedule:
+    # Monday morning, so the week starts with a current picture.
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Sync (base + dev)
+        run: uv sync --frozen --no-extra audio --no-extra providers
+
+      # Fails only on things a vendor confirmed (a curated model it no longer
+      # lists) or on a date that needs no vendor at all. An unreachable, rate
+      # limiting or credential-less vendor produces a "not checked" line and no
+      # finding, so an outage cannot fail this job.
+      - name: Check curated models against the vendors
+        shell: bash
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          DEEPGRAM_API_KEY: ${{ secrets.DEEPGRAM_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          {
+            echo '## Capability drift'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          uv run loreline check-capabilities | tee -a "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"

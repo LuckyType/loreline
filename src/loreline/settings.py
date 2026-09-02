@@ -58,6 +58,17 @@ class Settings(BaseSettings):
         default=500,
         description="Free-space floor; below this /healthz reports 'degraded'.",
     )
+    # The only outbound call this app makes without a user asking for one, so
+    # it gets a switch: an air-gapped deployment, or one that would rather not
+    # talk to a vendor at boot, turns it off and keeps the offline half (a
+    # recorded sunset date that has passed) which needs no network anyway.
+    check_favorite_models: bool = Field(
+        default=True,
+        description=(
+            "On startup, warn when a provider's favorite model is retired or gone "
+            "from the vendor's catalogue. Best-effort; never blocks startup."
+        ),
+    )
 
     # --- Auth ---
     auth_password: str = Field(

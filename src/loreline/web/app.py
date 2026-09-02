@@ -39,6 +39,7 @@ from loreline.session import SessionManager
 from loreline.session.manager import BackendFactory, CaptureFactory, DiarizerFactory
 from loreline.session.recovery import recover_orphaned_indexes
 from loreline.settings import Settings, get_settings
+from loreline.staleness import warn_about_stale_favorites
 from loreline.updater import Autostart, Updater
 from loreline.updater.process import CommandRunner
 from loreline.video import VideoManager, VideoStore
@@ -185,6 +186,31 @@ def _build_state(
     )
 
 
+async def _drain(task: asyncio.Task[None]) -> None:
+    """Cancel a background task at shutdown and wait for it to notice.
+
+    Whatever it raises on the way out is the shutdown path's business to
+    ignore: the app is going down either way, and a cancelled courtesy check
+    has nothing to report.
+    """
+    task.cancel()
+    with contextlib.suppress(Exception, asyncio.CancelledError):
+        await task
+
+
+async def _warn_stale_favorites(state: AppState, settings: Settings) -> None:
+    """Startup favourites check, wrapped so nothing it does can escape.
+
+    ``warn_about_stale_favorites`` already swallows its own failures; this adds
+    the database read to the same guarantee, because a background task that
+    raises would log a traceback at every boot for a warning nobody asked for.
+    """
+    if not settings.check_favorite_models:
+        return
+    with contextlib.suppress(Exception):
+        await warn_about_stale_favorites(await state.providers.list(), secrets=state.secrets)
+
+
 def create_app(
     settings: Settings | None = None,
     *,
@@ -250,12 +276,20 @@ def create_app(
                 active_session_id=state.manager.current_session_id,
             )
         )
+        # Tell the GM when a model they favourited has been retired or has
+        # vanished from its vendor's catalogue. In the background and never on
+        # the critical path: it talks to vendor APIs over the network, so a
+        # slow or unreachable vendor must not be able to delay a boot, and it
+        # is scoped to favourites because warning about the whole curated
+        # catalogue at every startup is noise nobody reads.
+        staleness_task = asyncio.create_task(_warn_stale_favorites(state, settings))
         app.state.ctx = state
         log.info("loreline.startup", version=__version__, environment=settings.environment)
         try:
             yield
         finally:
             recovery_abort.set()
+            await _drain(staleness_task)
             with contextlib.suppress(Exception):
                 await recovery_task
             await state.manager.stop()
