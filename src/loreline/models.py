@@ -121,6 +121,10 @@ class ModelInfo(BaseModel):
     # is realtime-only, and Gemini's -live variant needs the Live API entirely.
     # None where the provider publishes no such distinction.
     realtime: bool | None = None
+    # Whether "Inline (from STT)" diarization yields real speakers for this
+    # model - see loreline.capabilities.supports_inline_diarization. The
+    # pickers refuse that mode when this is False.
+    inline_diarization: bool = False
     # Whether the model accepts a reasoning-effort setting. Read from the
     # provider's own parameter metadata where it publishes one (OpenRouter
     # does); False elsewhere, since guessing would show a control that silently

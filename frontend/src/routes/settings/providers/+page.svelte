@@ -229,6 +229,18 @@ const videoSrcProvider = $derived(providers.find((p) => p.id === defaults.video_
 const effectiveName = $derived(form.name.trim() || selected?.label || '')
 // Set by the summary model picker when the chosen model advertises reasoning.
 let llmModelInfo = $state<ModelInfo | undefined>(undefined)
+// Set by the STT model picker: inline diarization only yields speakers for
+// some provider+model pairs, so the default must not be settable otherwise.
+let sttModelInfo = $state<ModelInfo | undefined>(undefined)
+const inlineDiarizationAvailable = $derived(sttModelInfo?.inline_diarization === true)
+
+// Never leave a stored "inline" default pointing at a model that cannot serve
+// it - the session-start guard would reject every session using it.
+$effect(() => {
+	if (defaults.diar_mode === 'inline' && sttModelInfo && !inlineDiarizationAvailable) {
+		defaults.diar_mode = 'none'
+	}
+})
 
 const filteredModels = $derived(
 	modelFilter
@@ -531,6 +543,7 @@ onMount(async () => {
 					refreshToken={defaults.strict_model_filtering}
 					interaction="transcribe"
 					provider={sttSrcProvider}
+					onselect={(m) => (sttModelInfo = m)}
 					bind:value={defaults.stt_model}
 					defaultModel={savedDefaults.stt_model}
 					autoseed={false}
@@ -548,10 +561,12 @@ onMount(async () => {
 					bind:value={defaults.diar_mode}
 					defaultValue={savedDefaults.diar_mode}
 					options={[
-            { value: 'none', label: 'None' },
-            { value: 'inline', label: 'Inline (from STT)' },
-            { value: 'remote', label: 'Remote service' }
-          ]}
+						{ value: 'none', label: 'None' },
+						...(inlineDiarizationAvailable
+							? [{ value: 'inline', label: 'Inline (from STT)' }]
+							: []),
+						{ value: 'remote', label: 'Remote service' },
+					]}
 				/>
 				{#if defaults.diar_mode === 'remote'}
 					<Label class="text-xs text-muted-foreground" for="def-diar-endpoint">Endpoint</Label>

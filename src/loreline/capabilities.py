@@ -63,6 +63,74 @@ LIVE_CAPTURE_EXCLUDED: frozenset[ProviderKind] = frozenset({ProviderKind.OPENROU
 _TRANSCRIBE_NAME_MARKERS = ("whisper", "transcribe", "parakeet", "asr", "stt", "voxtral", "nova")
 
 
+# Models whose transcript this app can read *speaker labels* out of - i.e. for
+# which "Inline (from STT)" diarization actually produces speakers.
+#
+# This is the intersection of two things, and both matter: the provider must
+# offer diarization for that model, AND this repo's connector must extract it.
+# Only Deepgram and Gemini satisfy both today (see the `speaker=` assignments in
+# stt/backends/deepgram.py and stt/backends/gemini.py); every other connector
+# drops speaker information even where the provider has it.
+#
+# Checked against provider documentation on 2026-09-02:
+# - https://developers.deepgram.com/docs/diarization - Nova-1/2/3, enhanced and
+#   base support `diarize`; Whisper explicitly does not, and Flux does not list
+#   it among its supported parameters.
+# - https://www.assemblyai.com/docs/streaming/label-speakers-and-separate-channels
+#   - `speaker_labels: true` works on all three streaming models.
+#
+# Not listed, and why (openai_compat): Speaches exposes speaker *embeddings*
+# (POST /v1/audio/speech/embedding, 512-d vectors) but no diarization and no
+# speaker labels on the transcription response - a caller must cluster them
+# itself. That makes it a candidate source for the *remote* diarizer path, not
+# inline STT diarization.
+#
+# Not listed, and why: openrouter_stt reaches models that *can* diarize (e.g.
+# x-ai/grok-stt-1.0, and OpenRouter's response schema does carry `speaker` on
+# both segments and words), but our OpenAI-compatible batch connector reads
+# only the `text` field and discards the rest. That is a wiring gap, not a
+# provider limitation - see stt/backends/openai_compat.py.
+_INLINE_DIARIZATION_MODELS: dict[ProviderKind, frozenset[str]] = {
+    ProviderKind.DEEPGRAM: frozenset(
+        {
+            "nova-3",
+            "nova-3-general",
+            "nova-3-medical",
+            "nova-2",
+            "nova-2-meeting",
+            "nova-2-phonecall",
+            "nova-2-conversationalai",
+            "nova-2-video",
+        }
+    ),
+    ProviderKind.ASSEMBLYAI: frozenset(
+        {
+            "universal-3-5-pro",
+            "universal-streaming-english",
+            "universal-streaming-multilingual",
+        }
+    ),
+    ProviderKind.GEMINI: frozenset({"gemini-3.5-transcribe"}),
+}
+
+
+def supports_inline_diarization(kind: ProviderKind, model: str | None) -> bool:
+    """Whether "Inline (from STT)" yields real speakers for this provider+model.
+
+    False for an unknown or unset model: offering a diarization mode that
+    silently produces no speakers is worse than not offering it, and a model
+    nobody has curated here is exactly the case we cannot vouch for.
+    """
+    if not model:
+        return False
+    return model in _INLINE_DIARIZATION_MODELS.get(kind, frozenset())
+
+
+def kinds_with_inline_diarization() -> frozenset[ProviderKind]:
+    """Provider kinds that have at least one inline-diarization-capable model."""
+    return frozenset(_INLINE_DIARIZATION_MODELS)
+
+
 def interactions_for(kind: ProviderKind) -> frozenset[Interaction]:
     """Interactions a provider kind can serve (empty for an unknown kind)."""
     return INTERACTIONS_BY_KIND.get(kind, frozenset())

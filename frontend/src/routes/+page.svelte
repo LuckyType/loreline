@@ -15,6 +15,7 @@ import {
 	liveSttProviders,
 	type ActionDefaults,
 	type DiarizationModeKind,
+	type ModelInfo,
 	type ProviderConfig,
 	type TranscriptEvent,
 } from '$lib/types'
@@ -40,6 +41,11 @@ const sttProviders = $derived(liveSttProviders(providers))
 const primaryProvider = $derived(providers.find((p) => p.id === primary))
 const fallbackProvider = $derived(providers.find((p) => p.id === fallback))
 let diarMode = $state<DiarizationModeKind>('none')
+// Set by the primary model picker: inline diarization only yields speakers for
+// some provider+model pairs (see src/loreline/capabilities.py), so the option
+// is offered only when the chosen model actually returns them.
+let primaryModelInfo = $state<ModelInfo | undefined>(undefined)
+const inlineAvailable = $derived(primaryModelInfo?.inline_diarization === true)
 let diarEndpoint = $state('')
 let error = $state('')
 let busy = $state(false)
@@ -52,6 +58,12 @@ const DEFAULT_DIAR_ENDPOINT = 'http://diarization:8001'
 // Validated in the UI rather than only server-side, so the message can sit
 // under the field it's about instead of at the bottom of the card.
 const endpointMissing = $derived(diarMode === 'remote' && !diarEndpoint.trim())
+
+// A stored default (or an earlier pick) of "inline" must not survive a switch
+// to a model that returns no speakers - the backend would reject the start.
+$effect(() => {
+	if (diarMode === 'inline' && primaryModelInfo && !inlineAvailable) diarMode = 'none'
+})
 
 function setDiarMode(mode: string) {
 	diarMode = mode as DiarizationModeKind
@@ -401,11 +413,18 @@ onDestroy(() => {
 								value={diarMode}
 								onpick={setDiarMode}
 								options={[
-                  { value: 'none', label: 'None' },
-                  { value: 'inline', label: 'Inline (from STT)' },
-                  { value: 'remote', label: 'Remote service' }
-                ]}
+									{ value: 'none', label: 'None' },
+									...(inlineAvailable
+										? [{ value: 'inline', label: 'Inline (from STT)' }]
+										: []),
+									{ value: 'remote', label: 'Remote service' },
+								]}
 							/>
+							{#if !inlineAvailable}
+								<span class="text-xs text-muted-foreground">
+									This model returns no speaker labels, so inline diarization isn't offered.
+								</span>
+							{/if}
 						</div>
 						{#if diarMode === 'remote'}
 							<div class="flex flex-col gap-2">

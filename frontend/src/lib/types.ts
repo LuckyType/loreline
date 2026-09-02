@@ -103,6 +103,9 @@ export interface ModelInfo {
 	/** Whether the model works with a streaming connector - a property of the
 	 *  model AND the transport. Null where the provider draws no distinction. */
 	realtime?: boolean | null
+	/** Whether "Inline (from STT)" yields real speakers for this model. The
+	 *  diarization pickers hide that mode when false. */
+	inline_diarization?: boolean
 	/** Whether the model accepts a reasoning-effort setting. */
 	supports_reasoning?: boolean
 	pricing: ModelPrice | null

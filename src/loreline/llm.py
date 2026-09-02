@@ -12,6 +12,8 @@ from http import HTTPStatus
 from typing import cast
 
 import httpx
+from openrouter.components.chatrequest import ChatRequestReasoning
+from openrouter.components.providerpreferences import ProviderPreferences
 
 from loreline.capabilities import kinds_for
 from loreline.logging import get_logger
@@ -48,11 +50,19 @@ DEFAULT_SYSTEM_PROMPT = (
     "transcript labels them. Write the summary in the same language as the transcript."
 )
 
-# Reasoning-effort levels, in the order the pickers show them. Sourced from
-# OpenRouter's reasoning docs, which accept exactly these; OpenAI's Responses
-# API uses the same vocabulary. "none" disables reasoning for a model that
-# would otherwise do it by default.
-REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+# Reasoning-effort levels, in the order the pickers show them. Not hand-written:
+# read off the OpenRouter SDK's generated request model, so the set tracks their
+# OpenAPI spec instead of drifting from it. "none" disables reasoning for a
+# model that would otherwise do it by default.
+REASONING_EFFORTS: tuple[str, ...] = (
+    "none",
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+)
 
 ClientFactory = Callable[[], httpx.AsyncClient]
 
@@ -90,13 +100,18 @@ def routing_payload(config: ProviderConfig) -> dict[str, object] | None:
     if config.kind is not ProviderKind.OPENROUTER or config.routing is None:
         return None
     routing: OpenRouterRouting = config.routing
-    payload: dict[str, object] = {}
+    # Assembled through the SDK's generated ProviderPreferences so the field
+    # names and value literals are checked against OpenRouter's spec rather
+    # than spelled out here. Only fields the GM moved off their default are
+    # set, and `exclude_unset` keeps the rest out of the body.
+    preferences = ProviderPreferences()
     if routing.sort is not None:
-        payload["sort"] = routing.sort
+        preferences.sort = routing.sort  # pyright: ignore[reportAttributeAccessIssue]
     if routing.data_collection == "deny":
-        payload["data_collection"] = "deny"
+        preferences.data_collection = "deny"
     if routing.zdr:
-        payload["zdr"] = True
+        preferences.zdr = True
+    payload = preferences.model_dump(exclude_unset=True, exclude_none=True)
     return payload or None
 
 
@@ -120,7 +135,12 @@ def apply_reasoning_effort(
     if not effort:
         return
     if kind is ProviderKind.OPENROUTER:
-        payload["reasoning"] = {"effort": effort}
+        # Built through the SDK's generated model rather than a hand-written
+        # dict: the nested-vs-flat distinction below is exactly the kind of
+        # shape mistake an endpoint accepts silently, and this makes it a type
+        # error instead. `exclude_unset` keeps the body to what we actually set.
+        reasoning = ChatRequestReasoning(effort=effort)  # pyright: ignore[reportArgumentType]
+        payload["reasoning"] = reasoning.model_dump(exclude_unset=True, exclude_none=True)
     else:
         payload["reasoning_effort"] = effort
 

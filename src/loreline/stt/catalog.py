@@ -14,7 +14,7 @@ from typing import cast
 
 import httpx
 
-from loreline.capabilities import filter_models
+from loreline.capabilities import filter_models, supports_inline_diarization
 from loreline.logging import get_logger
 from loreline.models import Interaction, ModelInfo, ModelPrice, ProviderKind
 
@@ -133,7 +133,14 @@ async def list_models(
         if live:
             return filter_models(live, kind=kind, interaction=interaction, strict=strict_filtering)
     realtime = True if kind in _STREAMING_KINDS else (False if kind in _BATCH_KINDS else None)
-    return [ModelInfo(id=model_id, realtime=realtime) for model_id in _CURATED.get(kind, [])]
+    return [
+        ModelInfo(
+            id=model_id,
+            realtime=realtime,
+            inline_diarization=supports_inline_diarization(kind, model_id),
+        )
+        for model_id in _CURATED.get(kind, [])
+    ]
 
 
 async def _fetch_openai_models(

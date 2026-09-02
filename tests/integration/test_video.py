@@ -702,3 +702,59 @@ class TestLiveCaptureGuard:
                 assert resp.status_code == 400
                 assert "re-processing" in resp.json()["detail"]
         return None
+
+
+class TestInlineDiarizationGuard:
+    """The UI hides "Inline (from STT)" for a model that returns no speakers;
+    the server refuses it too, so a stale stored default or a direct API call
+    cannot start a session that would quietly produce an unlabelled transcript."""
+
+    @pytest_asyncio.fixture
+    async def client(self, tmp_path: Path) -> AsyncIterator[AsyncClient]:
+        settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="x")
+        app = create_app(settings)
+        async with LifespanManager(app):
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                yield ac
+
+    @staticmethod
+    async def _deepgram(client: AsyncClient, model: str) -> str:
+        return (
+            await client.post(
+                "/api/providers",
+                json={
+                    "name": "Deepgram",
+                    "kind": "deepgram",
+                    "protocol": "ws",
+                    "model": model,
+                },
+            )
+        ).json()["id"]
+
+    async def test_rejects_inline_for_a_model_without_speaker_labels(
+        self, client: AsyncClient
+    ) -> None:
+        provider = await self._deepgram(client, "flux-general-en")
+        resp = await client.post(
+            "/api/session/start",
+            json={"primary_provider": provider, "diarization": {"mode": "inline"}},
+        )
+        assert resp.status_code == 400
+        assert "speaker labels" in resp.json()["detail"]
+
+    async def test_other_diarization_modes_are_unaffected(self, client: AsyncClient) -> None:
+        """Only inline is gated - remote diarization works off the audio, not
+        the STT response, so the model's speaker labels are irrelevant to it.
+
+        Needs the audio extra, since it gets far enough to build the capture
+        pipeline - skipped without it, the same way the other tests that reach
+        real audio are.
+        """
+        pytest.importorskip("numpy", reason="audio extra not installed")
+        provider = await self._deepgram(client, "flux-general-en")
+        resp = await client.post(
+            "/api/session/start",
+            json={"primary_provider": provider, "diarization": {"mode": "none"}},
+        )
+        assert resp.status_code != 400

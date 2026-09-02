@@ -15,6 +15,7 @@ from loreline.capabilities import (
     interactions_for,
     kinds_for,
     supports,
+    supports_inline_diarization,
     supports_live_capture,
 )
 from loreline.models import Interaction, ModelInfo, ProviderKind
@@ -161,3 +162,42 @@ class TestStrictToggle:
                 strict=strict,
             )
             assert [m.id for m in kept] == ["openai/whisper-large-v3-turbo"]
+
+
+class TestInlineDiarization:
+    """ "Inline (from STT)" must only be offered where speakers actually come
+    back - a mode that silently yields an unlabelled transcript is discovered
+    after the session, when the live audio is gone."""
+
+    def test_deepgram_nova_models_diarize(self) -> None:
+        assert supports_inline_diarization(ProviderKind.DEEPGRAM, "nova-3")
+        assert supports_inline_diarization(ProviderKind.DEEPGRAM, "nova-2-meeting")
+
+    def test_deepgram_flux_does_not(self) -> None:
+        """Deepgram's diarization docs list Nova/enhanced/base; Flux does not
+        carry `diarize` among its supported parameters."""
+        assert not supports_inline_diarization(ProviderKind.DEEPGRAM, "flux-general-en")
+        assert not supports_inline_diarization(ProviderKind.DEEPGRAM, "flux-general-multi")
+
+    def test_assemblyai_streaming_models_diarize(self) -> None:
+        for model in (
+            "universal-3-5-pro",
+            "universal-streaming-english",
+            "universal-streaming-multilingual",
+        ):
+            assert supports_inline_diarization(ProviderKind.ASSEMBLYAI, model)
+
+    def test_gemini_transcribe_diarizes(self) -> None:
+        assert supports_inline_diarization(ProviderKind.GEMINI, "gemini-3.5-transcribe")
+
+    def test_connectors_that_discard_speakers_report_false(self) -> None:
+        """Not a provider limitation in every case - OpenRouter's response
+        schema carries `speaker`, but our batch connector reads only `text`."""
+        assert not supports_inline_diarization(ProviderKind.OPENROUTER_STT, "x-ai/grok-stt-1.0")
+        assert not supports_inline_diarization(ProviderKind.OPENAI_COMPAT, "whisper-1")
+        assert not supports_inline_diarization(ProviderKind.OPENAI, "gpt-live-transcribe")
+
+    def test_unknown_or_unset_model_is_false(self) -> None:
+        """An uncurated model is exactly the case we cannot vouch for."""
+        assert not supports_inline_diarization(ProviderKind.DEEPGRAM, None)
+        assert not supports_inline_diarization(ProviderKind.DEEPGRAM, "some-future-model")

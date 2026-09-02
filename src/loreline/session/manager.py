@@ -19,10 +19,16 @@ from typing import TYPE_CHECKING, Protocol, cast
 
 from loreline.audio.chunker import SpeechDetector, Utterance, VadChunker
 from loreline.bus import EventBus
-from loreline.capabilities import supports_live_capture
+from loreline.capabilities import supports_inline_diarization, supports_live_capture
 from loreline.diarization.provider import create_diarizer
 from loreline.logging import get_logger
-from loreline.models import Session, SessionStatus, TranscriptEvent, rebase_transcript
+from loreline.models import (
+    DiarizationMode,
+    Session,
+    SessionStatus,
+    TranscriptEvent,
+    rebase_transcript,
+)
 from loreline.monitoring.alerts import AlertLevel
 from loreline.stt.registry import create_backend
 from loreline.stt.router import RouterConfig, SttRouter
@@ -172,6 +178,25 @@ class SessionManager:
             )
             raise SessionConfigError(msg)
 
+    def _check_inline_diarization(self, config: ProviderConfig, req: StartSessionRequest) -> None:
+        """Reject "Inline (from STT)" for a model that returns no speakers.
+
+        Silently producing an unlabelled transcript is the bad outcome here: the
+        GM only finds out after the session, when there is nothing to re-run the
+        live audio against. The UI hides the option, so reaching this means an
+        API caller or a stored default that predates a model change.
+        """
+        if req.diarization.mode is not DiarizationMode.INLINE:
+            return
+        # The request's model override wins, exactly as it does for the backend.
+        model = req.model or config.model
+        if not supports_inline_diarization(config.kind, model):
+            msg = (
+                f"model {model or '(none)'!r} on {config.name!r} returns no speaker labels - "
+                "inline diarization would produce an unlabelled transcript"
+            )
+            raise SessionConfigError(msg)
+
     async def _resolve_providers(
         self, req: StartSessionRequest
     ) -> tuple[ProviderConfig, ProviderConfig | None]:
@@ -184,6 +209,7 @@ class SessionManager:
             msg = f"primary provider {req.primary_provider!r} is disabled"
             raise ProviderDisabledError(msg)
         self._check_live_capable(primary_cfg, "primary")
+        self._check_inline_diarization(primary_cfg, req)
         if req.model:
             # Model is chosen on demand at start time, overriding the stored default.
             primary_cfg = primary_cfg.model_copy(update={"model": req.model})

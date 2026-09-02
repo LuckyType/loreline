@@ -1,5 +1,10 @@
 """AssemblyAI streaming STT connector (WebSocket, Universal-Streaming v3).
 
+Speaker labels are requested via ``speaker_labels=true``; each final word in a
+Turn then carries a ``speaker`` field ("A", "B", or "PENDING" when the model
+has too little audio to attribute it). Supported on all three streaming models.
+Docs: https://www.assemblyai.com/docs/streaming/label-speakers-and-separate-channels
+
 AssemblyAI's v3 streaming endpoint accepts raw PCM (s16le) over a WebSocket and
 returns ``Turn`` messages containing the running transcript and per-word data;
 a turn with ``end_of_turn=true`` marks a completed segment. Each utterance is
@@ -72,6 +77,12 @@ class AssemblyAIBackend:
         # picker had no effect at all on what AssemblyAI ran.
         if self.config.model:
             params.append(("speech_model", self.config.model))
+        # Requested unconditionally, matching the Deepgram connector: the
+        # backend always asks for speakers and the router decides whether to
+        # use them (see stt/router.py's DiarizationMode.INLINE branch), so the
+        # words already carry labels whichever mode the session ends up in.
+        # Note AssemblyAI bills streaming diarization as a paid add-on.
+        params.append(("speaker_labels", "true"))
         terms = glossary_terms(glossary)
         if terms:
             params.append(("keyterms_prompt", json.dumps(terms)))
