@@ -175,8 +175,11 @@ async def test_models_without_pricing_still_list_cleanly() -> None:
             json={
                 "data": [
                     {"id": "whisper-1"},
-                    {"id": "weird", "pricing": {"prompt": "", "completion": None}},
-                    {"id": "unparseable", "pricing": {"prompt": "free", "completion": "free"}},
+                    {"id": "whisper-weird", "pricing": {"prompt": "", "completion": None}},
+                    {
+                        "id": "whisper-unparseable",
+                        "pricing": {"prompt": "free", "completion": "free"},
+                    },
                     {"no_id": True},
                 ]
             },
@@ -189,7 +192,9 @@ async def test_models_without_pricing_still_list_cleanly() -> None:
         client_factory=lambda: _factory(httpx.MockTransport(handle)),
     )
 
-    assert _ids(models) == ["unparseable", "weird", "whisper-1"]  # the id-less row is skipped
+    # The id-less row is skipped; the rest survive (all name-shaped as
+    # transcription models, so the capability filter is a no-op here).
+    assert _ids(models) == ["whisper-1", "whisper-unparseable", "whisper-weird"]
     assert all(m.pricing is None for m in models)  # never 0.0, which would read as free
 
     curated = await list_models(kind=ProviderKind.DEEPGRAM, base_url=None, api_key=None)

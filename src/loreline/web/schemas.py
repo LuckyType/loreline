@@ -98,6 +98,19 @@ class ActionDefaults(BaseModel):
     summarize_model: str = ""
     summarize_prompt: str = ""
     """Summary system prompt; blank means the built-in default (served filled in)."""
+    video_provider: str = ""
+    video_model: str = ""
+    summarize_reasoning_effort: str = ""
+    """Default reasoning effort for summaries; blank leaves it to the model."""
+    strict_model_filtering: bool = True
+    """Hide models that don't look capable of the interaction being picked for.
+
+    On by default, because the common failure it prevents is real: OpenAI's
+    ``/models`` lists image and TTS models that cannot transcribe. Turn it off
+    to see everything an endpoint offers - needed for a model too new to be
+    recognised, or a self-hosted server with its own naming. Only affects the
+    guessed name-matching; lists the provider itself scopes (OpenRouter's) stay
+    correct either way."""
 
 
 class SummarizeRequest(BaseModel):
@@ -105,6 +118,10 @@ class SummarizeRequest(BaseModel):
 
     provider_id: str
     model: str | None = None
+    reasoning_effort: str | None = None
+    """How hard a reasoning model should think. Only meaningful for a model
+    that advertises support (ModelInfo.supports_reasoning); ignored otherwise,
+    and dropped automatically if the endpoint rejects it."""
 
 
 class SummarizeResult(BaseModel):
@@ -124,6 +141,30 @@ class ReprocessRequest(BaseModel):
     """Override the provider's model for this job (chosen on demand), "transcribe" only."""
     target: str = ORIGINAL_VERSION
     """Transcript version a "diarize" job relabels ("original" or a transcribe job id)."""
+
+
+class VideoGenerateRequest(BaseModel):
+    """Start a video generation for a session.
+
+    ``prompt`` arrives already edited by the GM - the dialog seeds it from the
+    stored summary, but what is sent is whatever they left in the box, so the
+    server never re-reads the summary behind their back.
+
+    The optional parameters are exactly those OpenRouter's video API accepts,
+    and which of them a given model actually supports comes from
+    ``GET /api/video/models`` (see VideoModelInfo). Anything left None is
+    omitted from the upstream request rather than guessed at.
+    """
+
+    session_id: str
+    provider_id: str
+    model: str
+    prompt: str
+    duration: int | None = None  # seconds
+    resolution: str | None = None
+    aspect_ratio: str | None = None
+    generate_audio: bool = False
+    seed: int | None = None
 
 
 class OkResponse(BaseModel):

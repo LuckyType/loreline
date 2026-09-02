@@ -48,7 +48,7 @@ async def test_migrations_idempotent(tmp_path: Path) -> None:
         async with database.connection.execute("SELECT MAX(version) FROM schema_version;") as cur:
             row = await cur.fetchone()
         assert row is not None
-        assert row[0] == 9
+        assert row[0] == 11
 
 
 async def test_glossary_get_effective_merges_default_and_campaign(db: Database) -> None:
@@ -176,3 +176,34 @@ async def test_session_and_transcript(db: Database) -> None:
     finished = await sessions.get("s1")
     assert finished is not None
     assert finished.ended_at is not None
+
+
+async def test_migration_removes_rows_of_the_dropped_google_kind(tmp_path: Path) -> None:
+    """A provider row whose kind no longer exists in ``ProviderKind`` cannot be
+    deserialized, so dropping the Google STT v2 (gRPC) kind had to take its rows
+    with it - otherwise every provider read on an existing install would raise.
+    """
+    path = tmp_path / "legacy.db"
+    async with Database(path) as database:
+        conn = database.connection
+        await conn.execute(
+            """
+            INSERT INTO providers
+                (id, name, kind, base_url, auth_ref, protocol, model, sample_rate,
+                 language, capabilities, enabled)
+            VALUES ('g1', 'Google STT v2', 'google', 'my-project', NULL, 'grpc',
+                    'chirp_2', 16000, 'de', '{}', 1);
+            """
+        )
+        # Rewind past the removal migration so re-connecting replays it, the
+        # way an upgrade of an install that already had this provider does.
+        await conn.execute("DELETE FROM schema_version WHERE version = 11;")
+        await conn.commit()
+
+    async with Database(path) as database:
+        async with database.connection.execute("SELECT COUNT(*) FROM providers;") as cur:
+            row = await cur.fetchone()
+        assert row is not None
+        assert row[0] == 0, "the unloadable google row survived the migration"
+        # And the repository can read the table again without raising.
+        assert await ProviderRepository(database).list() == []

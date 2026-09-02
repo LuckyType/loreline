@@ -3,11 +3,56 @@ export type ProviderKind =
 	| 'openai'
 	| 'openai_compat'
 	| 'assemblyai'
-	| 'google'
 	| 'gemini'
 	| 'vosk'
 	| 'openai_chat'
 	| 'openrouter'
+	| 'openrouter_stt'
+
+/** What a provider is being asked to do. Providers are not interchangeable
+ *  across these - mirrors `Interaction` in src/loreline/models.py. */
+export type Interaction = 'transcribe' | 'summarize' | 'video'
+
+/**
+ * Which interactions each provider kind can serve - the TS mirror of
+ * `INTERACTIONS_BY_KIND` in src/loreline/capabilities.py. Keep the two in step:
+ * the backend rejects a combination this table would offer, and the UI hides
+ * one this table omits.
+ */
+export const INTERACTIONS_BY_KIND: Record<ProviderKind, Interaction[]> = {
+	deepgram: ['transcribe'],
+	openai: ['transcribe'],
+	openai_compat: ['transcribe'],
+	assemblyai: ['transcribe'],
+	gemini: ['transcribe'],
+	vosk: ['transcribe'],
+	openai_chat: ['summarize'],
+	openrouter: ['summarize', 'video'],
+	openrouter_stt: ['transcribe'],
+}
+
+/** Kinds that transcribe stored audio but must never drive a live capture -
+ *  OpenRouter's STT has no streaming mode. Mirrors `LIVE_CAPTURE_EXCLUDED`. */
+export const LIVE_CAPTURE_EXCLUDED: ProviderKind[] = ['openrouter_stt']
+
+export function supportsInteraction(p: { kind: ProviderKind }, interaction: Interaction): boolean {
+	return (INTERACTIONS_BY_KIND[p.kind] ?? []).includes(interaction)
+}
+
+/** Providers offerable for one interaction. */
+export function providersFor<T extends { kind: ProviderKind }>(
+	providers: T[],
+	interaction: Interaction,
+): T[] {
+	return providers.filter((p) => supportsInteraction(p, interaction))
+}
+
+/** Providers that can drive a *live* capture (excludes re-process-only STT). */
+export function liveSttProviders<T extends { kind: ProviderKind }>(providers: T[]): T[] {
+	return providersFor(providers, 'transcribe').filter(
+		(p) => !LIVE_CAPTURE_EXCLUDED.includes(p.kind),
+	)
+}
 
 /** Kinds that summarize (chat-completions); everything else transcribes. */
 export const LLM_KINDS: ProviderKind[] = ['openai_chat', 'openrouter']
@@ -40,9 +85,26 @@ export interface ModelPrice {
 
 /** One entry in a provider's model list. Only `id` is ever guaranteed -
  *  curated catalogs and plain OpenAI `/models` rows carry nothing else. */
+/** Reasoning-effort levels, in picker order. Mirrors REASONING_EFFORTS in
+ *  src/loreline/llm.py. */
+export const REASONING_EFFORTS = [
+	'none',
+	'minimal',
+	'low',
+	'medium',
+	'high',
+	'xhigh',
+	'max',
+] as const
+
 export interface ModelInfo {
 	id: string
 	context_length: number | null
+	/** Whether the model works with a streaming connector - a property of the
+	 *  model AND the transport. Null where the provider draws no distinction. */
+	realtime?: boolean | null
+	/** Whether the model accepts a reasoning-effort setting. */
+	supports_reasoning?: boolean
 	pricing: ModelPrice | null
 	/** Prices that take over above a prompt-length threshold; usually empty. */
 	price_tiers: ModelPrice[]
@@ -97,6 +159,8 @@ export interface ProviderCreate {
 
 export interface ProviderModelsRequest {
 	kind: ProviderKind
+	/** Scopes the returned models to what can actually serve this interaction. */
+	interaction?: Interaction
 	base_url?: string | null
 	api_key?: string | null
 	provider_id?: string | null
@@ -155,6 +219,8 @@ export interface Session {
 export interface SummarizeRequest {
 	provider_id: string
 	model?: string | null
+	/** Only meaningful for a model whose ModelInfo.supports_reasoning is true. */
+	reasoning_effort?: string | null
 }
 
 export interface SummarizeResult {
@@ -170,6 +236,12 @@ export interface ActionDefaults {
 	summarize_model: string
 	/** Summary system prompt; the server serves the built-in default when unset. */
 	summarize_prompt?: string
+	summarize_reasoning_effort?: string
+	video_provider?: string
+	video_model?: string
+	/** Hide models that don't look capable of the interaction being picked for.
+	 *  On by default; turn it off to see everything an endpoint offers. */
+	strict_model_filtering?: boolean
 }
 
 export interface SessionDetail {
@@ -244,6 +316,61 @@ export interface ReprocessRequest {
 	diarization?: DiarizationConfig
 	model?: string | null
 	target?: string
+}
+
+/**
+ * A video-generation model and the parameters it actually accepts.
+ *
+ * Every video model takes a different subset, so the generate dialog builds
+ * its controls from this rather than offering one fixed set. A `null` list
+ * means the model does not take that parameter at all - which is not the same
+ * as an empty list, hence nullable rather than defaulting to [].
+ */
+export interface VideoModelInfo {
+	id: string
+	name: string
+	description?: string | null
+	/** Seconds. */
+	supported_durations?: number[] | null
+	supported_resolutions?: string[] | null
+	supported_aspect_ratios?: string[] | null
+	supported_sizes?: string[] | null
+	generate_audio: boolean
+	seed: boolean
+}
+
+/** One video generation, from enqueue to a playable file. Generation takes
+ *  minutes, so this is polled while `status` is queued/running. */
+export interface VideoJob {
+	id: string
+	session_id: string
+	provider_id: string
+	model: string
+	prompt: string
+	duration?: number | null
+	resolution?: string | null
+	aspect_ratio?: string | null
+	generate_audio: boolean
+	seed?: number | null
+	status: JobStatusKind
+	remote_id?: string | null
+	video_path?: string | null
+	created_at: number
+	started_at?: number | null
+	finished_at?: number | null
+	error?: string | null
+}
+
+export interface VideoGenerateRequest {
+	session_id: string
+	provider_id: string
+	model: string
+	prompt: string
+	duration?: number | null
+	resolution?: string | null
+	aspect_ratio?: string | null
+	generate_audio?: boolean
+	seed?: number | null
 }
 
 export type ExportFormat = 'txt' | 'md' | 'srt' | 'vtt' | 'json'

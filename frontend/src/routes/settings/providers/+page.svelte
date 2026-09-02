@@ -1,5 +1,16 @@
 <script lang="ts">
-import { AlignLeft, Cloud, Mic, Pencil, Plus, Server, Trash2, Users } from '@lucide/svelte'
+import {
+	AlignLeft,
+	Clapperboard,
+	Filter,
+	Cloud,
+	Mic,
+	Pencil,
+	Plus,
+	Server,
+	Trash2,
+	Users,
+} from '@lucide/svelte'
 import { onMount } from 'svelte'
 import { ApiError, api } from '$lib/api'
 import { Badge } from '$lib/components/ui/badge'
@@ -13,6 +24,7 @@ import {
 	CardTitle,
 } from '$lib/components/ui/card'
 import { Checkbox } from '$lib/components/ui/checkbox'
+import { Switch } from '$lib/components/ui/switch'
 import {
 	Dialog,
 	DialogContent,
@@ -37,9 +49,11 @@ import Dropdown from '$lib/Dropdown.svelte'
 import { hintFor, priceTitle } from '$lib/modelInfo'
 import ModelPicker from '$lib/ModelPicker.svelte'
 import {
-	isLlmProvider,
+	liveSttProviders,
+	providersFor,
 	type ActionDefaults,
 	type ProtocolKind,
+	REASONING_EFFORTS,
 	type ModelInfo,
 	type OpenRouterRouting,
 	type ProviderConfig,
@@ -97,20 +111,6 @@ const CATALOG: ProviderMeta[] = [
 		note: 'API key · diarization · word timestamps.',
 	},
 	{
-		kind: 'google',
-		label: 'Google STT v2',
-		hosting: 'cloud',
-		protocol: 'grpc',
-		baseUrl: { label: 'GCP project id', placeholder: 'my-gcp-project' },
-		apiKey: {
-			// Cloud STT v2 rejects API keys outright; only a service account
-			// works here. An AI Studio key belongs on the Gemini entry above.
-			label: 'Service-account JSON (blank = ADC)',
-			url: 'https://console.cloud.google.com/iam-admin/serviceaccounts',
-		},
-		note: 'gRPC streaming · diarization · needs a service account.',
-	},
-	{
 		kind: 'openai_compat',
 		label: 'Speaches / OpenAI-compatible',
 		hosting: 'selfhosted',
@@ -143,6 +143,15 @@ const CATALOG: ProviderMeta[] = [
 		apiKey: { label: 'API key', url: 'https://openrouter.ai/settings/keys' },
 		defaultModel: 'anthropic/claude-sonnet-4.5',
 		note: 'One key for many vendors · "vendor/model" ids.',
+	},
+	{
+		kind: 'openrouter_stt',
+		label: 'OpenRouter (transcription)',
+		hosting: 'cloud',
+		protocol: 'http_batch',
+		apiKey: { label: 'API key', url: 'https://openrouter.ai/settings/keys' },
+		defaultModel: 'openai/whisper-large-v3-turbo',
+		note: 'Whisper, Nova, Chirp & more · re-processing only (no live capture).',
 	},
 	{
 		kind: 'openai_chat',
@@ -198,16 +207,28 @@ const blankDefaults = (): ActionDefaults => ({
 	summarize_provider: '',
 	summarize_model: '',
 	summarize_prompt: '',
+	summarize_reasoning_effort: '',
+	video_provider: '',
+	video_model: '',
+	strict_model_filtering: true,
 })
 let defaults = $state<ActionDefaults>(blankDefaults())
 // Last persisted state - drives the "default" tags in the pickers, so they
 // reflect what is saved, not the (possibly unsaved) current selection.
 let savedDefaults = $state<ActionDefaults>(blankDefaults())
 let defaultsMsg = $state('')
-const sttProviders = $derived(providers.filter((p) => !isLlmProvider(p)))
-const llmProviders = $derived(providers.filter((p) => isLlmProvider(p)))
+const sttProviders = $derived(liveSttProviders(providers))
+const llmProviders = $derived(providersFor(providers, 'summarize'))
+const videoProviders = $derived(providersFor(providers, 'video'))
 const sttSrcProvider = $derived(providers.find((p) => p.id === defaults.stt_provider))
 const llmSrcProvider = $derived(providers.find((p) => p.id === defaults.summarize_provider))
+const videoSrcProvider = $derived(providers.find((p) => p.id === defaults.video_provider))
+// The name field's placeholder is a real default, not a hint: leaving it blank
+// names the provider after its type ("OpenRouter"), which is what most people
+// want for their first one. Save stays enabled accordingly.
+const effectiveName = $derived(form.name.trim() || selected?.label || '')
+// Set by the summary model picker when the chosen model advertises reasoning.
+let llmModelInfo = $state<ModelInfo | undefined>(undefined)
 
 const filteredModels = $derived(
 	modelFilter
@@ -221,6 +242,9 @@ $effect(() => {
 	if (!defaults.stt_provider && sttProviders.length) defaults.stt_provider = sttProviders[0].id
 	if (!defaults.summarize_provider && llmProviders.length) {
 		defaults.summarize_provider = llmProviders[0].id
+	}
+	if (!defaults.video_provider && videoProviders.length) {
+		defaults.video_provider = videoProviders[0].id
 	}
 })
 
@@ -282,6 +306,7 @@ async function save() {
 	try {
 		const body: ProviderCreate = {
 			...form,
+			name: effectiveName,
 			base_url: form.base_url || null,
 			model: form.model || null,
 			// Routing is an OpenRouter body extension - never store it on the
@@ -503,6 +528,8 @@ onMount(async () => {
 				<Label class="text-xs text-muted-foreground" for="def-stt-model">Model</Label>
 				<ModelPicker
 					id="def-stt-model"
+					refreshToken={defaults.strict_model_filtering}
+					interaction="transcribe"
 					provider={sttSrcProvider}
 					bind:value={defaults.stt_model}
 					defaultModel={savedDefaults.stt_model}
@@ -552,14 +579,61 @@ onMount(async () => {
 					<Label class="text-xs text-muted-foreground" for="def-llm-model">Model</Label>
 					<ModelPicker
 						id="def-llm-model"
+						refreshToken={defaults.strict_model_filtering}
+						interaction="summarize"
 						provider={llmSrcProvider}
 						bind:value={defaults.summarize_model}
 						defaultModel={savedDefaults.summarize_model}
 						autoseed={false}
+						onselect={(m) => (llmModelInfo = m)}
 					/>
+					{#if llmModelInfo?.supports_reasoning}
+						<Label class="text-xs text-muted-foreground" for="def-llm-effort">
+							Reasoning effort
+						</Label>
+						<Dropdown
+							id="def-llm-effort"
+							bind:value={defaults.summarize_reasoning_effort}
+							defaultValue={savedDefaults.summarize_reasoning_effort ?? ''}
+							options={[
+								{ value: '', label: "Model's default" },
+								...REASONING_EFFORTS.map((e) => ({ value: e, label: e })),
+							]}
+						/>
+					{/if}
 				{:else}
 					<p class="m-0 text-sm text-muted-foreground">
 						Add an LLM provider (OpenAI-compatible chat) to set a summary default.
+					</p>
+				{/if}
+			</div>
+
+			<div class="flex flex-col gap-2.5 rounded-lg border p-3.5">
+				<div class="flex items-center gap-2 font-medium">
+					<Clapperboard class="size-4" />
+					Video
+				</div>
+				{#if videoProviders.length}
+					<Label class="text-xs text-muted-foreground" for="def-video-src">Provider</Label>
+					<Dropdown
+						id="def-video-src"
+						bind:value={defaults.video_provider}
+						defaultValue={savedDefaults.video_provider ?? ''}
+						options={videoProviders.map((p) => ({ value: p.id, label: p.name }))}
+					/>
+					<Label class="text-xs text-muted-foreground" for="def-video-model">Model</Label>
+					<ModelPicker
+						id="def-video-model"
+						refreshToken={defaults.strict_model_filtering}
+						interaction="video"
+						provider={videoSrcProvider}
+						bind:value={defaults.video_model}
+						defaultModel={savedDefaults.video_model}
+						autoseed={false}
+					/>
+				{:else}
+					<p class="m-0 text-sm text-muted-foreground">
+						Add an OpenRouter provider to set a video default.
 					</p>
 				{/if}
 			</div>
@@ -580,6 +654,28 @@ onMount(async () => {
 				Sent as the system message with every summary. Clear it and save to restore the built-in
 				default.
 			</p>
+		</div>
+
+		<div class="flex flex-col gap-2.5 rounded-lg border p-3.5">
+			<div class="flex items-center justify-between gap-4">
+				<div class="flex flex-col gap-0.5">
+					<span class="flex items-center gap-2 font-medium">
+						<Filter class="size-4" />
+						Only show compatible models
+					</span>
+					<span class="text-xs text-muted-foreground">
+						Hides models that can't do the job you're picking for - an OpenAI endpoint lists image
+						and speech models alongside the transcription ones. Turn it off to see everything a
+						provider offers, for a model too new to be recognised or a self-hosted server with its
+						own naming.
+					</span>
+				</div>
+				<Switch
+					checked={defaults.strict_model_filtering !== false}
+					onCheckedChange={(v) => (defaults.strict_model_filtering = v)}
+					aria-label="Only show compatible models"
+				/>
+			</div>
 		</div>
 
 		<div class="flex items-center justify-end gap-3">
@@ -779,7 +875,7 @@ onMount(async () => {
 			</div>
 			<DialogFooter>
 				<Button variant="outline" onclick={resetWizard}>Cancel</Button>
-				<Button onclick={save} disabled={!form.name}>
+				<Button onclick={save} disabled={!effectiveName}>
 					{editing ? 'Save changes' : 'Add provider'}
 				</Button>
 			</DialogFooter>

@@ -1,0 +1,163 @@
+"""Which provider+model combinations are offered for which interaction.
+
+The regression these guard is concrete: the pickers used to offer everything a
+provider's ``/models`` returned, so a GM could pick ``dall-e-3`` to transcribe
+with and only discover the mistake when the job failed.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from loreline.capabilities import (
+    INTERACTIONS_BY_KIND,
+    filter_models,
+    interactions_for,
+    kinds_for,
+    supports,
+    supports_live_capture,
+)
+from loreline.models import Interaction, ModelInfo, ProviderKind
+
+
+class TestCapabilityTable:
+    def test_every_provider_kind_declares_its_interactions(self) -> None:
+        """A kind missing from the table is offered for nothing at all, which
+        would silently remove it from the UI - so the table must be total."""
+        assert set(INTERACTIONS_BY_KIND) == set(ProviderKind)
+        assert all(INTERACTIONS_BY_KIND[k] for k in ProviderKind), "a kind declares no interaction"
+
+    def test_stt_and_llm_kinds_do_not_overlap(self) -> None:
+        """The split that makes the pickers meaningful: nothing both
+        transcribes and summarizes."""
+        assert not kinds_for(Interaction.TRANSCRIBE) & kinds_for(Interaction.SUMMARIZE)
+
+    def test_only_openrouter_generates_video(self) -> None:
+        assert kinds_for(Interaction.VIDEO) == {ProviderKind.OPENROUTER}
+
+    def test_openrouter_is_split_by_role(self) -> None:
+        """One ProviderConfig has one model list, and OpenRouter's chat and
+        transcription catalogues are disjoint - hence two kinds, mirroring the
+        existing OPENAI / OPENAI_CHAT split."""
+        assert interactions_for(ProviderKind.OPENROUTER) == {
+            Interaction.SUMMARIZE,
+            Interaction.VIDEO,
+        }
+        assert interactions_for(ProviderKind.OPENROUTER_STT) == {Interaction.TRANSCRIBE}
+
+    def test_unknown_kind_supports_nothing(self) -> None:
+        assert not supports(ProviderKind.DEEPGRAM, Interaction.VIDEO)
+        assert not supports(ProviderKind.OPENAI_CHAT, Interaction.TRANSCRIBE)
+
+
+class TestLiveCapture:
+    def test_openrouter_stt_is_reprocess_only(self) -> None:
+        """OpenRouter transcription is a single request/response upload with no
+        streaming mode, so it must never be picked for a live session."""
+        assert supports(ProviderKind.OPENROUTER_STT, Interaction.TRANSCRIBE)
+        assert not supports_live_capture(ProviderKind.OPENROUTER_STT)
+
+    @pytest.mark.parametrize(
+        "kind",
+        [
+            ProviderKind.DEEPGRAM,
+            ProviderKind.ASSEMBLYAI,
+            ProviderKind.OPENAI,
+            ProviderKind.OPENAI_COMPAT,
+            ProviderKind.GEMINI,
+            ProviderKind.VOSK,
+        ],
+    )
+    def test_every_other_stt_kind_still_drives_live_capture(self, kind: ProviderKind) -> None:
+        assert supports_live_capture(kind)
+
+    def test_a_non_stt_kind_is_not_live_capable_either(self) -> None:
+        assert not supports_live_capture(ProviderKind.OPENAI_CHAT)
+
+
+def _models(*ids: str) -> list[ModelInfo]:
+    return [ModelInfo(id=i) for i in ids]
+
+
+class TestModelFiltering:
+    def test_openai_transcription_picker_drops_non_audio_models(self) -> None:
+        """The actual reported bug: OpenAI's /models mixes chat, image and TTS
+        models in with whisper, and all of them were offered for transcription."""
+        listed = _models("gpt-4o", "dall-e-3", "tts-1", "whisper-1", "gpt-4o-transcribe")
+        kept = filter_models(listed, kind=ProviderKind.OPENAI, interaction=Interaction.TRANSCRIBE)
+        assert [m.id for m in kept] == ["whisper-1", "gpt-4o-transcribe"]
+
+    def test_self_hosted_naming_is_recognised(self) -> None:
+        listed = _models("Systran/faster-whisper-large-v3", "nvidia/parakeet-tdt-0.6b-v3", "llama3")
+        kept = filter_models(
+            listed, kind=ProviderKind.OPENAI_COMPAT, interaction=Interaction.TRANSCRIBE
+        )
+        assert [m.id for m in kept] == [
+            "Systran/faster-whisper-large-v3",
+            "nvidia/parakeet-tdt-0.6b-v3",
+        ]
+
+    def test_a_filter_that_would_empty_the_list_is_discarded(self) -> None:
+        """A self-hosted server may name its models in a way these markers have
+        never seen. Showing one extra model beats stranding an operator with an
+        empty picker and no way to pick the model they installed."""
+        listed = _models("my-custom-build-v2", "another-one")
+        kept = filter_models(
+            listed, kind=ProviderKind.OPENAI_COMPAT, interaction=Interaction.TRANSCRIBE
+        )
+        assert [m.id for m in kept] == ["my-custom-build-v2", "another-one"]
+
+    def test_openrouter_lists_pass_through_untouched(self) -> None:
+        """OpenRouter is fetched from a modality-scoped endpoint, so the list is
+        already correct - name matching would only corrupt it."""
+        listed = _models("openai/whisper-large-v3-turbo", "nvidia/nemotron-3.5-asr-streaming")
+        kept = filter_models(
+            listed, kind=ProviderKind.OPENROUTER_STT, interaction=Interaction.TRANSCRIBE
+        )
+        assert [m.id for m in kept] == [m.id for m in listed]
+
+    def test_summarize_and_video_are_never_name_filtered(self) -> None:
+        listed = _models("anthropic/claude-sonnet-4.5", "openai/gpt-4o")
+        for interaction in (Interaction.SUMMARIZE, Interaction.VIDEO):
+            kept = filter_models(listed, kind=ProviderKind.OPENROUTER, interaction=interaction)
+            assert [m.id for m in kept] == [m.id for m in listed]
+
+
+class TestStrictToggle:
+    """`strict=False` is the escape hatch behind the settings toggle: the name
+    markers are a hand-maintained guess, and a model released tomorrow will not
+    match them."""
+
+    def test_disabling_strict_shows_everything_the_endpoint_offers(self) -> None:
+        listed = _models("gpt-4o", "dall-e-3", "whisper-1", "some-brand-new-asr-model-2027")
+        kept = filter_models(
+            listed,
+            kind=ProviderKind.OPENAI,
+            interaction=Interaction.TRANSCRIBE,
+            strict=False,
+        )
+        assert [m.id for m in kept] == [m.id for m in listed]
+
+    def test_strict_is_the_default(self) -> None:
+        """Callers that don't opt out get the safe behaviour."""
+        listed = _models("gpt-4o", "whisper-1")
+        assert [
+            m.id
+            for m in filter_models(
+                listed, kind=ProviderKind.OPENAI, interaction=Interaction.TRANSCRIBE
+            )
+        ] == ["whisper-1"]
+
+    def test_the_toggle_never_unscopes_provider_sourced_lists(self) -> None:
+        """Turning it off must not resurrect the original bug for OpenRouter:
+        its transcription list comes from a modality-scoped endpoint, so it is
+        already correct and a new model there appears automatically."""
+        listed = _models("openai/whisper-large-v3-turbo")
+        for strict in (True, False):
+            kept = filter_models(
+                listed,
+                kind=ProviderKind.OPENROUTER_STT,
+                interaction=Interaction.TRANSCRIBE,
+                strict=strict,
+            )
+            assert [m.id for m in kept] == ["openai/whisper-large-v3-turbo"]

@@ -161,6 +161,10 @@ async def test_action_defaults_roundtrip(client: AsyncClient) -> None:
         # Never-saved prompt is served as the concrete built-in text, so the
         # settings UI always shows editable instructions.
         "summarize_prompt": DEFAULT_SYSTEM_PROMPT,
+        "video_provider": "",
+        "video_model": "",
+        "summarize_reasoning_effort": "",
+        "strict_model_filtering": True,
     }
 
     put = await client.put(

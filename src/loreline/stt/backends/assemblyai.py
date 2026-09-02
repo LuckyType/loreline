@@ -66,6 +66,12 @@ class AssemblyAIBackend:
             ("format_turns", "true"),
             ("language", self._language),
         ]
+        # Sent only when the GM picked one: omitted, the endpoint applies its
+        # own current default (universal-3-5-pro), which is a better thing to
+        # inherit than a value pinned here. Until this was wired the model
+        # picker had no effect at all on what AssemblyAI ran.
+        if self.config.model:
+            params.append(("speech_model", self.config.model))
         terms = glossary_terms(glossary)
         if terms:
             params.append(("keyterms_prompt", json.dumps(terms)))

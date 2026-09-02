@@ -322,3 +322,97 @@ async def test_routing_is_never_sent_to_a_plain_openai_compatible_endpoint() -> 
     )
 
     assert captured["seen"] == "absent"
+
+
+class TestReasoningEffort:
+    """The two gateways spell reasoning effort differently, and sending the
+    wrong spelling is silently ignored rather than erroring - which would look
+    exactly like the setting doing nothing."""
+
+    async def test_openrouter_gets_the_nested_reasoning_object(self) -> None:
+        captured: dict[str, object] = {}
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            captured["body"] = json.loads(request.content)
+            return httpx.Response(200, json={"choices": [{"message": {"content": "A summary."}}]})
+
+        await summarize_transcript(
+            config=_openrouter_config(),
+            api_key="k",
+            model=None,
+            transcript="t",
+            reasoning_effort="high",
+            client_factory=lambda: _client(httpx.MockTransport(handle)),
+        )
+        body = captured["body"]
+        assert isinstance(body, dict)
+        assert body["reasoning"] == {"effort": "high"}
+        assert "reasoning_effort" not in body
+
+    async def test_openai_compatible_gets_the_flat_field(self) -> None:
+        captured: dict[str, object] = {}
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            captured["body"] = json.loads(request.content)
+            return httpx.Response(200, json={"choices": [{"message": {"content": "A summary."}}]})
+
+        await summarize_transcript(
+            config=_config(),
+            api_key="k",
+            model="gpt-5.6",
+            transcript="t",
+            reasoning_effort="low",
+            client_factory=lambda: _client(httpx.MockTransport(handle)),
+        )
+        body = captured["body"]
+        assert isinstance(body, dict)
+        assert body["reasoning_effort"] == "low"
+        assert "reasoning" not in body
+
+    async def test_no_effort_sends_no_reasoning_field_at_all(self) -> None:
+        """A model that reasons by default must keep doing so when the GM never
+        touched the setting."""
+        captured: dict[str, object] = {}
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            captured["body"] = json.loads(request.content)
+            return httpx.Response(200, json={"choices": [{"message": {"content": "A summary."}}]})
+
+        await summarize_transcript(
+            config=_openrouter_config(),
+            api_key="k",
+            model=None,
+            transcript="t",
+            client_factory=lambda: _client(httpx.MockTransport(handle)),
+        )
+        body = captured["body"]
+        assert isinstance(body, dict)
+        assert "reasoning" not in body
+        assert "reasoning_effort" not in body
+
+    async def test_an_endpoint_that_rejects_the_field_still_summarizes(self) -> None:
+        """A preference is not worth failing the summary over - same treatment
+        an explicit temperature already gets."""
+        calls: list[dict[str, object]] = []
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content)
+            calls.append(body)
+            if "reasoning_effort" in body:
+                return httpx.Response(
+                    400,
+                    json={"error": {"message": "unsupported", "param": "reasoning_effort"}},
+                )
+            return httpx.Response(200, json={"choices": [{"message": {"content": "A summary."}}]})
+
+        out = await summarize_transcript(
+            config=_config(),
+            api_key="k",
+            model="some-model",
+            transcript="t",
+            reasoning_effort="high",
+            client_factory=lambda: _client(httpx.MockTransport(handle)),
+        )
+        assert out == "A summary."
+        assert len(calls) == 2  # rejected, then retried without it
+        assert "reasoning_effort" not in calls[1]

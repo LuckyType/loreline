@@ -40,13 +40,16 @@ export function contextLabel(tokens: number | null): string {
 	return String(tokens)
 }
 
-/** The compact right-hand hint for one option: "$3 / $15 · 1M". Empty when
- *  the provider published neither price nor context length. */
+/** The compact right-hand hint for one option: "$3 / $15 · 1M", or "realtime"
+ *  / "batch" for a transcription model where that distinction is what matters.
+ *  Empty when the provider published none of it. */
 export function hintFor(model: ModelInfo | undefined): string {
 	if (!model) return ''
-	const price = priceLabel(model.pricing)
-	const context = contextLabel(model.context_length)
-	return [price, context].filter(Boolean).join(' · ')
+	const parts = [priceLabel(model.pricing), contextLabel(model.context_length)]
+	if (model.realtime === true) parts.push('realtime')
+	else if (model.realtime === false) parts.push('batch')
+	if (model.supports_reasoning) parts.push('reasoning')
+	return parts.filter(Boolean).join(' · ')
 }
 
 /** Long-form note for a model whose price changes above a prompt length -

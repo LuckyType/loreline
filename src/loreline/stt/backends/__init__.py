@@ -10,10 +10,10 @@ import importlib
 
 _BACKEND_MODULES = (
     "loreline.stt.backends.openai_compat",
+    "loreline.stt.backends.openrouter",
     "loreline.stt.backends.openai_realtime",
     "loreline.stt.backends.deepgram",
     "loreline.stt.backends.assemblyai",
-    "loreline.stt.backends.google",
     "loreline.stt.backends.gemini",
 )
 

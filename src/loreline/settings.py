@@ -83,6 +83,10 @@ class Settings(BaseSettings):
         return self.data_dir / "audio"
 
     @property
+    def video_dir(self) -> Path:
+        return self.data_dir / "video"
+
+    @property
     def secrets_path(self) -> Path:
         return self.data_dir / "secrets.json"
 

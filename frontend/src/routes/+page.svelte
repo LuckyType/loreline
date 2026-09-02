@@ -12,7 +12,7 @@ import LogLine from '$lib/LogLine.svelte'
 import ModelPicker from '$lib/ModelPicker.svelte'
 import { formatTime, health, logsWs, speakerColor, transcriptWs } from '$lib/stores'
 import {
-	isLlmProvider,
+	liveSttProviders,
 	type ActionDefaults,
 	type DiarizationModeKind,
 	type ProviderConfig,
@@ -34,8 +34,9 @@ let defaults = $state<ActionDefaults>({
 	summarize_model: '',
 })
 
-// STT providers only - an LLM provider can't transcribe.
-const sttProviders = $derived(providers.filter((p) => !isLlmProvider(p)))
+// Live capture only: LLM providers can't transcribe, and OpenRouter's STT has
+// no streaming mode so it is re-processing-only (see $lib/types).
+const sttProviders = $derived(liveSttProviders(providers))
 const primaryProvider = $derived(providers.find((p) => p.id === primary))
 const fallbackProvider = $derived(providers.find((p) => p.id === fallback))
 let diarMode = $state<DiarizationModeKind>('none')

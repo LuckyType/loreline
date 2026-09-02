@@ -11,6 +11,7 @@ from loreline.persistence.repositories import (
     SessionRepository,
     SettingsRepository,
     TranscriptRepository,
+    VideoRepository,
 )
 
 __all__ = [
@@ -23,4 +24,5 @@ __all__ = [
     "SessionRepository",
     "SettingsRepository",
     "TranscriptRepository",
+    "VideoRepository",
 ]

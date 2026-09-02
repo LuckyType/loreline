@@ -29,6 +29,7 @@ from loreline.persistence import (
     SessionRepository,
     SettingsRepository,
     TranscriptRepository,
+    VideoRepository,
 )
 from loreline.reprocess import ReprocessManager
 from loreline.secrets import SecretStore
@@ -39,6 +40,8 @@ from loreline.session.recovery import recover_orphaned_indexes
 from loreline.settings import Settings, get_settings
 from loreline.updater import Autostart, Updater
 from loreline.updater.process import CommandRunner
+from loreline.video import VideoManager, VideoStore
+from loreline.video.client import ClientFactory as VideoClientFactory
 from loreline.web.auth import LoginRateLimiter, ensure_jwt_secret
 from loreline.web.routes import (
     audio,
@@ -50,6 +53,7 @@ from loreline.web.routes import (
     sessions,
     system,
     transcript_ws,
+    video,
 )
 from loreline.web.spa import SpaStaticFiles, spa_directory
 
@@ -66,9 +70,12 @@ class AppState:
     sessions: SessionRepository
     transcripts: TranscriptRepository
     reprocess_jobs: ReprocessRepository
+    video_jobs: VideoRepository
     audio_store: AudioStore
+    video_store: VideoStore
     manager: SessionManager
     reprocess: ReprocessManager
+    video: VideoManager
     settings_repo: SettingsRepository
     alerts: AlertManager
     updater: Updater
@@ -88,6 +95,7 @@ def _build_state(
     diarizer_factory: DiarizerFactory | None,
     command_runner: CommandRunner | None,
     alert_client_factory: ClientFactory | None,
+    video_client_factory: VideoClientFactory | None,
 ) -> AppState:
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     db = Database(settings.db_path)
@@ -98,7 +106,9 @@ def _build_state(
     session_repo = SessionRepository(db)
     transcript_repo = TranscriptRepository(db)
     reprocess_repo = ReprocessRepository(db)
+    video_repo = VideoRepository(db)
     audio_store = AudioStore(settings.audio_dir)
+    video_store = VideoStore(settings.video_dir)
     settings_repo = SettingsRepository(db)
     alert_manager = AlertManager(
         settings=settings_repo, secrets=secrets, client_factory=alert_client_factory
@@ -130,6 +140,14 @@ def _build_state(
         backend_factory=backend_factory,
         diarizer_factory=diarizer_factory,
     )
+    video_manager = VideoManager(
+        providers=provider_repo,
+        sessions=session_repo,
+        videos=video_repo,
+        video_store=video_store,
+        secrets=secrets,
+        client_factory=video_client_factory,
+    )
     return AppState(
         settings=settings,
         secrets=secrets,
@@ -139,9 +157,12 @@ def _build_state(
         sessions=session_repo,
         transcripts=transcript_repo,
         reprocess_jobs=reprocess_repo,
+        video_jobs=video_repo,
         audio_store=audio_store,
+        video_store=video_store,
         manager=manager,
         reprocess=reprocess_manager,
+        video=video_manager,
         settings_repo=settings_repo,
         alerts=alert_manager,
         updater=updater,
@@ -166,6 +187,7 @@ def create_app(
     diarizer_factory: DiarizerFactory | None = None,
     command_runner: CommandRunner | None = None,
     alert_client_factory: ClientFactory | None = None,
+    video_client_factory: VideoClientFactory | None = None,
 ) -> FastAPI:
     """Create and configure the Loreline FastAPI app.
 
@@ -189,10 +211,12 @@ def create_app(
             diarizer_factory=diarizer_factory,
             command_runner=command_runner,
             alert_client_factory=alert_client_factory,
+            video_client_factory=video_client_factory,
         )
         await state.db.connect()
         await state.sessions.mark_interrupted()
         await state.reprocess.reconcile()
+        await state.video.reconcile()
         # Rebuild index sidecars for recordings a dead process left behind, in
         # the background - a multi-hour WAV takes minutes of VAD, and startup
         # must not wait on it. The abort event lets shutdown cut it short
@@ -217,6 +241,7 @@ def create_app(
                 await recovery_task
             await state.manager.stop()
             await state.reprocess.aclose()
+            await state.video.aclose()
             await state.db.close()
             log.info("loreline.shutdown")
 
@@ -234,6 +259,7 @@ def create_app(
     app.include_router(glossary.router)
     app.include_router(sessions.router)
     app.include_router(reprocess.router)
+    app.include_router(video.router)
     app.include_router(transcript_ws.router)
     app.include_router(logs_ws.router)
 

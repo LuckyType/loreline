@@ -38,12 +38,19 @@ class OpenAICompatBackend:
         client: httpx.AsyncClient | None = None,
         api_key: str | None = None,
         language: str | None = None,
+        default_base_url: str = _DEFAULT_BASE_URL,
+        default_model: str = _DEFAULT_MODEL,
+        extra_headers: dict[str, str] | None = None,
     ) -> None:
+        """``default_base_url``/``default_model``/``extra_headers`` let a kind
+        that speaks this same wire format reuse the backend rather than copy it
+        - see loreline/stt/backends/openrouter.py."""
         self.config = config
         self._language = language or config.language
-        self._model = config.model or _DEFAULT_MODEL
-        base_url = config.base_url or _DEFAULT_BASE_URL
+        self._model = config.model or default_model
+        base_url = config.base_url or default_base_url
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+        headers.update(extra_headers or {})
         self._owns_client = client is None
         self._client = client or httpx.AsyncClient(base_url=base_url, headers=headers, timeout=60.0)
 

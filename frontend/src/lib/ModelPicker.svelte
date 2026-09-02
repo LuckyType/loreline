@@ -2,7 +2,7 @@
 import { api } from '$lib/api'
 import Dropdown from '$lib/Dropdown.svelte'
 import { hintFor, priceTitle } from '$lib/modelInfo'
-import type { ModelInfo, ProviderConfig } from '$lib/types'
+import type { Interaction, ModelInfo, ProviderConfig } from '$lib/types'
 
 let {
 	provider,
@@ -11,6 +11,9 @@ let {
 	disabled = false,
 	id = undefined,
 	autoseed = true,
+	interaction = 'transcribe',
+	refreshToken = '',
+	onselect = undefined,
 	onpick = undefined,
 }: {
 	provider: ProviderConfig | undefined
@@ -19,6 +22,17 @@ let {
 	disabled?: boolean
 	id?: string
 	autoseed?: boolean
+	/** Scopes the model list - a transcription picker must never offer a chat
+	 *  or image model. See src/loreline/capabilities.py. */
+	interaction?: Interaction
+	/** Any value that should invalidate the cached list when it changes - the
+	 *  server applies the "only show compatible models" setting, so a picker
+	 *  loaded before that toggle flipped would otherwise stay stale. */
+	refreshToken?: unknown
+	/** Fires with the selected model's full metadata whenever it resolves -
+	 *  lets a caller offer model-dependent controls (e.g. reasoning effort)
+	 *  without fetching the list a second time. */
+	onselect?: (model: ModelInfo | undefined) => void
 	onpick?: (model: string) => void
 } = $props()
 
@@ -33,13 +47,19 @@ let seededValue = $state('')
 // stored default (defaultModel) is global - it can name a model belonging to
 // a different provider entirely - so only offer it when this provider
 // actually has it.
-const loaded = $derived(provider && loadedFor === provider.id ? all : [])
+const cacheKey = $derived(`${provider?.id ?? ''}:${interaction}:${String(refreshToken)}`)
+const loaded = $derived(provider && loadedFor === cacheKey ? all : [])
 const fetched = $derived(loaded.map((m) => m.id))
 // Price/context hints are only known for models the live list actually
 // returned - a favourite or stored default that predates the fetch (or that
 // the provider no longer serves) simply renders without one.
 const detail = $derived(new Map(loaded.map((m) => [m.id, m])))
 const favorites = $derived(provider?.favorite_models ?? [])
+
+// Report the selected model's metadata upward once the list has resolved.
+$effect(() => {
+	onselect?.(detail.get(value))
+})
 const defaultForThisProvider = $derived(
 	defaultModel && (favorites.includes(defaultModel) || fetched.includes(defaultModel))
 		? [defaultModel]
@@ -76,15 +96,28 @@ $effect(() => {
 })
 
 async function loadAll() {
-	if (!provider || loading || loadedFor === provider.id) return
+	const key = cacheKey
+	if (!provider || loading || loadedFor === key) return
 	loading = true
 	try {
-		all = await api.providerModels({
-			kind: provider.kind,
-			base_url: provider.base_url,
-			provider_id: provider.id,
-		})
-		loadedFor = provider.id
+		// Video models live on their own endpoint with their own capability
+		// metadata (durations, resolutions); the generate dialog consumes that
+		// shape directly, while this picker only needs the ids.
+		all =
+			interaction === 'video'
+				? (await api.videoModels(provider.id)).map((m) => ({
+						id: m.id,
+						context_length: null,
+						pricing: null,
+						price_tiers: [],
+					}))
+				: await api.providerModels({
+						kind: provider.kind,
+						interaction,
+						base_url: provider.base_url,
+						provider_id: provider.id,
+					})
+		loadedFor = key
 	} catch {
 		all = []
 	} finally {

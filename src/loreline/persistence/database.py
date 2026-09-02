@@ -135,6 +135,39 @@ MIGRATIONS: list[str] = [
           AND 'reprocess:' || j.provider_id = transcript_segments.source
       );
     """,
+    # v10 - on-demand video generation jobs (OpenRouter /videos), one row per
+    # generation. `remote_id` is the upstream job handle we poll; `video_path`
+    # is set once the finished bytes are stored locally.
+    """
+    CREATE TABLE video_jobs (
+        id              TEXT PRIMARY KEY,
+        session_id      TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        provider_id     TEXT NOT NULL,
+        model           TEXT NOT NULL,
+        prompt          TEXT NOT NULL,
+        duration        INTEGER,
+        resolution      TEXT,
+        aspect_ratio    TEXT,
+        generate_audio  INTEGER NOT NULL DEFAULT 0,
+        seed            INTEGER,
+        status          TEXT NOT NULL,
+        remote_id       TEXT,
+        video_path      TEXT,
+        created_at      REAL NOT NULL,
+        started_at      REAL,
+        finished_at     REAL,
+        error           TEXT
+    );
+    """,
+    # v11 - drop the Google Cloud STT v2 (gRPC) provider kind. Its rows must go
+    # with it: ProviderKind no longer has a "google" member, so a surviving row
+    # would raise on every provider read. The Gemini kind covers Google
+    # transcription with a plain API key and no service-account setup.
+    # (An orphaned `provider:<id>` entry may remain in secrets.json; harmless,
+    # and the DB migration has no reach into that file.)
+    """
+    DELETE FROM providers WHERE kind = 'google';
+    """,
 ]
 
 

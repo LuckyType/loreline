@@ -27,6 +27,9 @@ import type {
 	SummarizeResult,
 	TranscriptEvent,
 	UpdateResult,
+	VideoGenerateRequest,
+	VideoJob,
+	VideoModelInfo,
 } from './types'
 
 export class ApiError extends Error {
@@ -188,6 +191,21 @@ export const api = {
 		}),
 	mergeSessions: (ids: string[]) =>
 		request<Session>('/api/session/merge', { method: 'POST', body: JSON.stringify({ ids }) }),
+
+	// --- video generation ---
+	// Generation is asynchronous upstream (minutes), so enqueue returns a
+	// queued job and the caller polls listVideoJobs/getVideoJob.
+	videoModels: (providerId: string) =>
+		request<VideoModelInfo[]>(`/api/video/models?provider_id=${encodeURIComponent(providerId)}`),
+	enqueueVideo: (body: VideoGenerateRequest) =>
+		request<VideoJob>('/api/video', { method: 'POST', body: JSON.stringify(body) }),
+	getVideoJob: (jobId: string) => request<VideoJob>(`/api/video/${jobId}`),
+	listVideoJobs: (sessionId: string) =>
+		request<VideoJob[]>(`/api/video?session_id=${encodeURIComponent(sessionId)}`),
+	deleteVideoJob: (jobId: string) =>
+		request<{ ok: boolean }>(`/api/video/${jobId}`, { method: 'DELETE' }),
+	/** Playback/download URL for a finished job (served from local storage). */
+	videoContentUrl: (jobId: string) => `/api/video/${jobId}/content`,
 
 	// --- reprocess ---
 	enqueueReprocess: (body: ReprocessRequest) =>

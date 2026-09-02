@@ -21,6 +21,7 @@ from loreline.models import (
     Session,
     SessionStatus,
     TranscriptEvent,
+    VideoJob,
     Word,
 )
 
@@ -434,5 +435,128 @@ def _row_to_job(row: aiosqlite.Row) -> ReprocessJob:
         started_at=row["started_at"],
         finished_at=row["finished_at"],
         segments_added=row["segments_added"],
+        error=row["error"],
+    )
+
+
+class VideoRepository:
+    """CRUD for video-generation jobs.
+
+    Mirrors :class:`ReprocessRepository` - same enqueue/poll/update shape, for
+    the same reason: a generation outlives the request that started it, so its
+    state has to live in a row rather than in memory.
+    """
+
+    def __init__(self, db: Database) -> None:
+        self._db = db
+
+    async def create(self, job: VideoJob) -> None:
+        await self._db.connection.execute(
+            """
+            INSERT INTO video_jobs
+                (id, session_id, provider_id, model, prompt, duration, resolution,
+                 aspect_ratio, generate_audio, seed, status, remote_id, video_path,
+                 created_at, started_at, finished_at, error)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            """,
+            (
+                job.id,
+                job.session_id,
+                job.provider_id,
+                job.model,
+                job.prompt,
+                job.duration,
+                job.resolution,
+                job.aspect_ratio,
+                int(job.generate_audio),
+                job.seed,
+                job.status.value,
+                job.remote_id,
+                job.video_path,
+                job.created_at,
+                job.started_at,
+                job.finished_at,
+                job.error,
+            ),
+        )
+        await self._db.connection.commit()
+
+    async def get(self, job_id: str) -> VideoJob | None:
+        async with self._db.connection.execute(
+            "SELECT * FROM video_jobs WHERE id = ?;", (job_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        return _row_to_video_job(row) if row is not None else None
+
+    async def for_session(self, session_id: str) -> list[VideoJob]:
+        async with self._db.connection.execute(
+            "SELECT * FROM video_jobs WHERE session_id = ? ORDER BY created_at DESC;",
+            (session_id,),
+        ) as cur:
+            rows = await cur.fetchall()
+        return [_row_to_video_job(r) for r in rows]
+
+    async def update(self, job: VideoJob) -> None:
+        await self._db.connection.execute(
+            """
+            UPDATE video_jobs SET
+                status = ?, remote_id = ?, video_path = ?,
+                started_at = ?, finished_at = ?, error = ?
+            WHERE id = ?;
+            """,
+            (
+                job.status.value,
+                job.remote_id,
+                job.video_path,
+                job.started_at,
+                job.finished_at,
+                job.error,
+                job.id,
+            ),
+        )
+        await self._db.connection.commit()
+
+    async def delete(self, job_id: str) -> None:
+        await self._db.connection.execute("DELETE FROM video_jobs WHERE id = ?;", (job_id,))
+        await self._db.connection.commit()
+
+    async def mark_interrupted(self) -> None:
+        """Fail jobs left queued/running by a previous process (startup sweep).
+
+        The polling loop that would advance them lives only as long as the
+        process; without this a job killed mid-generation shows as "running"
+        forever. Mirrors ``ReprocessRepository.mark_interrupted``.
+        """
+        await self._db.connection.execute(
+            "UPDATE video_jobs SET status = ?, finished_at = ?, error = ? WHERE status IN (?, ?);",
+            (
+                JobStatus.ERROR.value,
+                time.time(),
+                "interrupted by a restart",
+                JobStatus.QUEUED.value,
+                JobStatus.RUNNING.value,
+            ),
+        )
+        await self._db.connection.commit()
+
+
+def _row_to_video_job(row: aiosqlite.Row) -> VideoJob:
+    return VideoJob(
+        id=row["id"],
+        session_id=row["session_id"],
+        provider_id=row["provider_id"],
+        model=row["model"],
+        prompt=row["prompt"],
+        duration=row["duration"],
+        resolution=row["resolution"],
+        aspect_ratio=row["aspect_ratio"],
+        generate_audio=bool(row["generate_audio"]),
+        seed=row["seed"],
+        status=JobStatus(row["status"]),
+        remote_id=row["remote_id"],
+        video_path=row["video_path"],
+        created_at=row["created_at"],
+        started_at=row["started_at"],
+        finished_at=row["finished_at"],
         error=row["error"],
     )

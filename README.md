@@ -32,9 +32,14 @@ all STT and diarization run on remote endpoints (cloud APIs or self-hosted LAN s
 ## Features
 
 - **Capture** - continuous recording with Silero VAD utterance chunking.
-- **Pluggable STT** - Deepgram, AssemblyAI, Google Gemini, Google STT v2 (gRPC), OpenAI
-  Realtime, and any OpenAI-compatible endpoint (Speaches, whisper.cpp). A primary/fallback
+- **Pluggable STT** - Deepgram, AssemblyAI, Google Gemini, OpenAI Realtime, and any OpenAI-compatible endpoint (Speaches, whisper.cpp). A primary/fallback
   router handles failover, and can fan out to several backends at once to compare them.
+  OpenRouter transcription (Whisper, Nova, Chirp, Voxtral…) is available for post-session
+  re-processing only - its API has no streaming mode, so it can't drive a live capture.
+- **Capability-scoped pickers** - every provider and model list is scoped to what it can
+  actually do, so a chat or image model is never offered for transcription. Toggleable in
+  Settings (on by default) for a model too new to be recognised, or a self-hosted server
+  with its own naming.
 - **Speaker diarization** - inline (from the STT provider), or a self-hosted sherpa-onnx
   service (included), or off.
 - **Sessions** - SQLite persistence with per-session audio, post-session re-processing
@@ -43,6 +48,10 @@ all STT and diarization run on remote endpoints (cloud APIs or self-hosted LAN s
   Ollama, LM Studio, vLLM). OpenRouter providers can additionally pick their routing:
   prefer the cheapest upstream provider, and/or restrict to providers that don't store
   or train on the transcript (Zero Data Retention).
+- **Video generation** - turn a session summary into a video prompt and generate a clip via
+  OpenRouter's video models (length, resolution and aspect ratio offered per model). Runs in
+  the background; the finished file is stored alongside the session and plays in the UI
+  Default provider/model are configurable in Settings.
 - **Exports** - txt, md, srt, vtt, json.
 - **Web UI** - SvelteKit SPA served by FastAPI: live transcript, session history,
   provider/glossary config, live logs, health and alerting.

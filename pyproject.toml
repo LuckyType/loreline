@@ -39,7 +39,6 @@ audio = [
 providers = [
     "deepgram-sdk>=3.7",
     "assemblyai>=0.35",
-    "google-cloud-speech>=2.27",
     "openai>=1.50",
 ]
 persistence = [

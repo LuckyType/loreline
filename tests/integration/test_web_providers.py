@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import pytest
 from httpx import AsyncClient
+
+from loreline.capabilities import filter_models
+from loreline.models import Interaction, ModelInfo, ProviderKind
 
 
 def _provider_body() -> dict[str, object]:
@@ -89,3 +93,39 @@ async def test_default_glossary_roundtrip(client: AsyncClient) -> None:
     assert put.status_code == 200
     assert put.json()["campaign_id"] == "_default"
     assert (await client.get("/api/glossary")).json()["terms"] == ["Aurora", "Mistwood"]
+
+
+async def test_model_filtering_setting_controls_what_the_picker_offers(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The "only show compatible models" setting has to reach the models route,
+    not just exist in the settings payload - off means an operator sees every
+    model their endpoint offers, including ones too new to be recognised."""
+    listed = [
+        ModelInfo(id="gpt-4o"),
+        ModelInfo(id="dall-e-3"),
+        ModelInfo(id="whisper-1"),
+    ]
+
+    async def fake_list_models(**kwargs: object) -> list[ModelInfo]:
+        return filter_models(
+            listed,
+            kind=ProviderKind.OPENAI,
+            interaction=Interaction.TRANSCRIBE,
+            strict=bool(kwargs["strict_filtering"]),
+        )
+
+    monkeypatch.setattr("loreline.web.routes.providers.list_models", fake_list_models)
+    body = {"kind": "openai", "interaction": "transcribe"}
+
+    # Default (strict): the image and chat models are hidden.
+    resp = await client.post("/api/providers/models", json=body)
+    assert [m["id"] for m in resp.json()] == ["whisper-1"]
+
+    # Turned off: everything the endpoint reports comes through.
+    defaults = (await client.get("/api/system/defaults")).json()
+    defaults["strict_model_filtering"] = False
+    assert (await client.put("/api/system/defaults", json=defaults)).status_code == 200
+
+    resp = await client.post("/api/providers/models", json=body)
+    assert [m["id"] for m in resp.json()] == ["gpt-4o", "dall-e-3", "whisper-1"]

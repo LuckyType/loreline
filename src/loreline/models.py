@@ -15,11 +15,30 @@ class ProviderKind(StrEnum):
     OPENAI = "openai"
     OPENAI_COMPAT = "openai_compat"  # Speaches / whisper.cpp / any OpenAI-compatible endpoint
     ASSEMBLYAI = "assemblyai"
-    GOOGLE = "google"  # Cloud Speech-to-Text v2 (gRPC, OAuth2 only)
     GEMINI = "gemini"  # Gemini API transcription (accepts a plain API key)
     VOSK = "vosk"  # self-hosted vosk-server
     OPENAI_CHAT = "openai_chat"  # LLM chat for summaries (OpenAI / Ollama / LM Studio / vLLM)
-    OPENROUTER = "openrouter"  # OpenRouter LLM gateway for summaries ("vendor/model" ids)
+    OPENROUTER = "openrouter"  # OpenRouter LLM gateway for summaries + video ("vendor/model" ids)
+    # OpenRouter's transcription API. A separate kind from OPENROUTER above
+    # rather than a second role on it, mirroring the existing OPENAI (STT) vs
+    # OPENAI_CHAT (LLM) split for that vendor: one ProviderConfig has one model
+    # list, and OpenRouter's chat and transcription catalogues are disjoint.
+    OPENROUTER_STT = "openrouter_stt"
+
+
+class Interaction(StrEnum):
+    """What a provider is being asked to do.
+
+    Providers are not interchangeable across these: a chat model cannot accept
+    audio, a transcription model cannot write a summary, and only a video model
+    generates video. Every model picker is scoped by one of these so a
+    combination that cannot work is never offered - see
+    :mod:`loreline.capabilities`.
+    """
+
+    TRANSCRIBE = "transcribe"
+    SUMMARIZE = "summarize"
+    VIDEO = "video"
 
 
 class Protocol(StrEnum):
@@ -96,6 +115,17 @@ class ModelInfo(BaseModel):
 
     id: str
     context_length: int | None = None
+    # Whether this model works with a *streaming* connector. Curated per kind
+    # (see loreline.stt.catalog) because it is a property of the model AND the
+    # transport: Deepgram's whisper-* are batch-only, OpenAI's gpt-live-transcribe
+    # is realtime-only, and Gemini's -live variant needs the Live API entirely.
+    # None where the provider publishes no such distinction.
+    realtime: bool | None = None
+    # Whether the model accepts a reasoning-effort setting. Read from the
+    # provider's own parameter metadata where it publishes one (OpenRouter
+    # does); False elsewhere, since guessing would show a control that silently
+    # does nothing.
+    supports_reasoning: bool = False
     pricing: ModelPrice | None = None
     # Prices that replace `pricing` above a prompt-length threshold, cheapest
     # threshold first. Long transcripts cross these - Claude Sonnet 4.5 doubles
@@ -261,6 +291,61 @@ class Session(BaseModel):
     summary: str | None = None  # LLM-generated session summary (on demand)
     summary_provider: str | None = None  # provider id the summary came from
     summary_model: str | None = None  # model the summary was generated with
+
+
+class VideoModelInfo(BaseModel):
+    """A video-generation model and the parameters it actually accepts.
+
+    Straight off OpenRouter's ``GET /videos/models``. The lists are the point:
+    every video model takes a *different* subset of durations, resolutions and
+    aspect ratios, so the request form has to be built from the chosen model
+    rather than offering one fixed set of controls and hoping. A None list
+    means "this model does not take that parameter at all" - which is not the
+    same as an empty list, and is why these are nullable rather than
+    defaulting to [].
+    """
+
+    id: str
+    name: str
+    description: str | None = None
+    supported_durations: list[int] | None = None  # seconds
+    supported_resolutions: list[str] | None = None  # "720p", "4K", …
+    supported_aspect_ratios: list[str] | None = None  # "16:9", …
+    supported_sizes: list[str] | None = None  # explicit "WxH", where offered instead
+    # Capability flags - whether the model takes these optional knobs at all.
+    generate_audio: bool = False
+    seed: bool = False
+
+
+class VideoJob(BaseModel):
+    """One video generation, from enqueue to a playable file on disk.
+
+    Video generation is slow (minutes) and asynchronous at the source:
+    OpenRouter returns a job id immediately and the result is polled. This row
+    is the local mirror of that remote job, so a GM can close the tab, and so a
+    finished video survives the signed URL OpenRouter hands back - which
+    expires (there is a literal ``expired`` state upstream). ``remote_id`` is
+    the upstream handle; ``video_path`` is set once the bytes are downloaded
+    into the local store.
+    """
+
+    id: str
+    session_id: str
+    provider_id: str
+    model: str
+    prompt: str
+    duration: int | None = None
+    resolution: str | None = None
+    aspect_ratio: str | None = None
+    generate_audio: bool = False
+    seed: int | None = None
+    status: JobStatus = JobStatus.QUEUED
+    remote_id: str | None = None
+    video_path: str | None = None
+    created_at: float
+    started_at: float | None = None
+    finished_at: float | None = None
+    error: str | None = None
 
 
 class ReprocessJob(BaseModel):

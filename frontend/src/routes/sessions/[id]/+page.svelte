@@ -27,18 +27,22 @@ import {
 import { confirm } from '$lib/confirm.svelte'
 import Dropdown from '$lib/Dropdown.svelte'
 import Foldable from '$lib/Foldable.svelte'
+import GenerateVideoDialog from '$lib/GenerateVideoDialog.svelte'
 import ModelPicker from '$lib/ModelPicker.svelte'
 import { providerName } from '$lib/stores'
 import TranscriptList from '$lib/TranscriptList.svelte'
 import {
-	isLlmProvider,
+	providersFor,
 	type ActionDefaults,
 	type DiarizationModeKind,
 	type ExportFormat,
 	type ProviderConfig,
 	type ReprocessJob,
+	REASONING_EFFORTS,
+	type ModelInfo,
 	type SessionDetail,
 	type TranscriptEvent,
+	type VideoJob,
 } from '$lib/types'
 
 let detail = $state<SessionDetail | null>(null)
@@ -194,10 +198,13 @@ let renameOpen = $state(false)
 let nameForm = $state<Record<string, string>>({})
 
 // --- summarize ---
-const llmProviders = $derived(providers.filter((p) => isLlmProvider(p)))
+const llmProviders = $derived(providersFor(providers, 'summarize'))
 let summarizeOpen = $state(false)
 let sumProvider = $state('')
 let sumModel = $state('')
+let sumEffort = $state('')
+// Set by the model picker when the chosen model advertises reasoning support.
+let sumModelInfo = $state<ModelInfo | undefined>(undefined)
 let sumBusy = $state(false)
 let sumError = $state('')
 let defaults = $state<ActionDefaults>({
@@ -207,6 +214,37 @@ let defaults = $state<ActionDefaults>({
 	summarize_model: '',
 })
 const selectedLlm = $derived(llmProviders.find((p) => p.id === sumProvider))
+
+/** Re-processing replays stored audio, so it accepts every transcribe-capable
+ *  provider - including the ones excluded from live capture. */
+const reprocessProviders = $derived(providersFor(providers, 'transcribe'))
+
+// --- video generation ---
+// Only OpenRouter can generate video (see supports_video in
+// src/loreline/video/client.py); every other provider kind is filtered out
+// rather than offered and rejected at submit time.
+const videoProviders = $derived(providersFor(providers, 'video'))
+let videoOpen = $state(false)
+let videoJobs = $state<VideoJob[]>([])
+let videoPoll: ReturnType<typeof setInterval> | undefined
+
+/** A generation takes minutes, so this polls only while something is actually
+ *  in flight and stops as soon as the queue drains. */
+async function refreshVideoJobs() {
+	videoJobs = await api.listVideoJobs(id)
+	const running = videoJobs.some((j) => j.status === 'queued' || j.status === 'running')
+	if (running && !videoPoll) videoPoll = setInterval(refreshVideoJobs, 5000)
+	if (!running && videoPoll) {
+		clearInterval(videoPoll)
+		videoPoll = undefined
+	}
+}
+
+async function deleteVideo(jobId: string) {
+	if (!(await confirm('Delete this video and its file?'))) return
+	await api.deleteVideoJob(jobId)
+	await refreshVideoJobs()
+}
 
 async function refreshJobs() {
 	jobs = await api.listReprocess(id)
@@ -303,7 +341,11 @@ async function runSummarize() {
 	sumBusy = true
 	sumError = ''
 	try {
-		await api.summarizeSession(id, { provider_id: sumProvider, model: sumModel || null })
+		await api.summarizeSession(id, {
+			provider_id: sumProvider,
+			model: sumModel || null,
+			reasoning_effort: sumModelInfo?.supports_reasoning ? sumEffort || null : null,
+		})
 		detail = await api.getSession(id) // refresh to show the stored summary
 		summarizeOpen = false
 	} catch (err) {
@@ -317,13 +359,14 @@ onMount(async () => {
 	try {
 		detail = await api.getSession(id)
 		providers = await api.listProviders()
-		rpProvider = detail.session.primary_provider ?? providers[0]?.id ?? ''
+		rpProvider = detail.session.primary_provider ?? reprocessProviders[0]?.id ?? ''
 		try {
 			defaults = await api.getDefaults()
 		} catch {
 			/* defaults are optional */
 		}
 		await refreshJobs()
+		await refreshVideoJobs()
 	} catch (err) {
 		error = err instanceof ApiError ? err.message : 'failed to load'
 	}
@@ -331,6 +374,7 @@ onMount(async () => {
 
 onDestroy(() => {
 	if (poll) clearInterval(poll)
+	if (videoPoll) clearInterval(videoPoll)
 })
 </script>
 
@@ -464,13 +508,14 @@ onDestroy(() => {
 							class="max-w-52"
 							bind:value={rpProvider}
 							defaultValue={defaults.stt_provider ?? ''}
-							options={providers.map((p) => ({ value: p.id, label: p.name }))}
+							options={reprocessProviders.map((p) => ({ value: p.id, label: p.name }))}
 							placeholder="Provider"
 						/>
 						<ModelPicker
 							provider={rpSelectedProvider}
 							bind:value={rpModel}
 							defaultModel={defaults.stt_model}
+							interaction="transcribe"
 						/>
 						<Button variant="outline" onclick={reprocess} disabled={rpBusy || !rpProvider}>
 							{rpBusy ? 'Queuing…' : 'Re-process audio'}
@@ -592,7 +637,20 @@ onDestroy(() => {
 				{:else}
 					<p class="m-0 text-muted-foreground">Not summarized yet.</p>
 				{/if}
-				<div class="flex justify-end">
+				<div class="flex justify-end gap-2">
+					<Button
+						variant="outline"
+						size="sm"
+						onclick={() => (videoOpen = true)}
+						disabled={videoProviders.length === 0 || !detail.session.summary}
+						title={videoProviders.length === 0
+							? 'Add an OpenRouter provider in Settings'
+							: !detail.session.summary
+								? 'Summarize the session first'
+								: ''}
+					>
+						Generate video
+					</Button>
 					<Button
 						variant="outline"
 						size="sm"
@@ -602,10 +660,55 @@ onDestroy(() => {
 						{detail.session.summary ? 'Re-summarize' : 'Summarize'}
 					</Button>
 				</div>
+
+				{#if videoJobs.length}
+					<div class="mt-3 flex flex-col gap-3 border-t pt-3">
+						{#each videoJobs as job (job.id)}
+							<div class="flex flex-col gap-2">
+								<div class="flex items-center justify-between gap-2">
+									<span class="min-w-0 truncate text-xs text-muted-foreground">
+										{job.model}{job.duration ? ` · ${job.duration}s` : ''}
+										{job.resolution
+											? ` · ${job.resolution}`
+											: ''}
+									</span>
+									<span class="flex shrink-0 items-center gap-2">
+										{#if job.status === 'queued' || job.status === 'running'}
+											<span class="text-xs text-muted-foreground">Generating…</span>
+										{:else if job.status === 'error'}
+											<span class="text-xs text-destructive">{job.error ?? 'failed'}</span>
+										{/if}
+										<Button variant="ghost" size="sm" onclick={() => deleteVideo(job.id)}>
+											Delete
+										</Button>
+									</span>
+								</div>
+								{#if job.status === 'done'}
+									<!-- svelte-ignore a11y_media_has_caption -->
+									<video
+										class="w-full rounded-md border"
+										controls
+										preload="metadata"
+										src={api.videoContentUrl(job.id)}
+									></video>
+								{/if}
+							</div>
+						{/each}
+					</div>
+				{/if}
 			</Foldable>
 		</CardContent>
 	</Card>
 {/if}
+
+<GenerateVideoDialog
+	bind:open={videoOpen}
+	sessionId={id}
+	providers={videoProviders}
+	summary={detail?.session.summary ?? ''}
+	{defaults}
+	onqueued={refreshVideoJobs}
+/>
 
 <Dialog bind:open={renameOpen}>
 	<DialogContent class="sm:max-w-md">
@@ -656,8 +759,26 @@ onDestroy(() => {
 				provider={selectedLlm}
 				bind:value={sumModel}
 				defaultModel={defaults.summarize_model}
+				interaction="summarize"
+				onselect={(m) => (sumModelInfo = m)}
 			/>
 		</div>
+		{#if sumModelInfo?.supports_reasoning}
+			<div class="mt-3 flex flex-col gap-2">
+				<Label>Reasoning effort</Label>
+				<Dropdown
+					bind:value={sumEffort}
+					defaultValue={defaults.summarize_reasoning_effort ?? ''}
+					options={[
+						{ value: '', label: "Model's default" },
+						...REASONING_EFFORTS.map((e) => ({ value: e, label: e })),
+					]}
+				/>
+				<span class="text-xs text-muted-foreground">
+					Higher effort means a slower, more expensive, usually better summary.
+				</span>
+			</div>
+		{/if}
 		{#if sumError}
 			<p class="mt-2 text-sm text-destructive">{sumError}</p>
 		{/if}

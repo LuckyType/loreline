@@ -161,6 +161,9 @@ async def summarize_session(
             api_key=api_key,
             model=body.model,
             transcript=to_txt(session, events),
+            # Request override first, else the stored default; blank means the
+            # model decides for itself.
+            reasoning_effort=body.reasoning_effort or defaults.summarize_reasoning_effort or None,
             system_prompt=defaults.summarize_prompt or None,
         )
     except LLMError as exc:

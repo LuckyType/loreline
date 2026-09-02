@@ -10,12 +10,12 @@ from pydantic import BaseModel
 from starlette.status import HTTP_400_BAD_REQUEST, HTTP_404_NOT_FOUND
 
 from loreline.llm import LLM_KINDS, chat_health
-from loreline.models import ModelInfo, ProviderConfig, ProviderKind
+from loreline.models import Interaction, ModelInfo, ProviderConfig, ProviderKind
 from loreline.secrets import SecretStore
 from loreline.stt.catalog import list_models
 from loreline.stt.registry import create_backend
 from loreline.web.auth import require_auth
-from loreline.web.deps import get_state
+from loreline.web.deps import get_state, load_action_defaults
 from loreline.web.schemas import OkResponse, ProviderCreate, SecretWrite
 
 router = APIRouter(
@@ -53,6 +53,8 @@ class ProviderModelsRequest(BaseModel):
     base_url: str | None = None
     api_key: str | None = None
     provider_id: str | None = None
+    interaction: Interaction = Interaction.TRANSCRIBE
+    """Scopes the returned models to what can actually serve this interaction."""
 
 
 @router.get("")
@@ -160,4 +162,11 @@ async def provider_models(request: Request, body: ProviderModelsRequest) -> list
         existing = await state.providers.get(body.provider_id)
         if existing is not None and existing.auth_ref:
             api_key = state.secrets.get(existing.auth_ref)
-    return await list_models(kind=body.kind, base_url=body.base_url, api_key=api_key)
+    defaults = await load_action_defaults(state)
+    return await list_models(
+        kind=body.kind,
+        base_url=body.base_url,
+        api_key=api_key,
+        interaction=body.interaction,
+        strict_filtering=defaults.strict_model_filtering,
+    )

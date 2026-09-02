@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Protocol, cast
 
 from loreline.audio.chunker import SpeechDetector, Utterance, VadChunker
 from loreline.bus import EventBus
+from loreline.capabilities import supports_live_capture
 from loreline.diarization.provider import create_diarizer
 from loreline.logging import get_logger
 from loreline.models import Session, SessionStatus, TranscriptEvent, rebase_transcript
@@ -156,6 +157,21 @@ class SessionManager:
         runtime = self._runtime
         return runtime.router.degraded_since if runtime is not None else None
 
+    def _check_live_capable(self, config: ProviderConfig, role: str) -> None:
+        """Reject a provider that can only transcribe stored audio.
+
+        OpenRouter's transcription API has no streaming mode at all (see
+        loreline.capabilities.LIVE_CAPTURE_EXCLUDED). Caught here rather than
+        left to fail mid-session: the UI already hides these from the live
+        pickers, so reaching this is an API caller or a stale default.
+        """
+        if not supports_live_capture(config.kind):
+            msg = (
+                f"{role} provider {config.name!r} ({config.kind.value}) cannot drive a live "
+                "capture - it is available for post-session re-processing only"
+            )
+            raise SessionConfigError(msg)
+
     async def _resolve_providers(
         self, req: StartSessionRequest
     ) -> tuple[ProviderConfig, ProviderConfig | None]:
@@ -167,6 +183,7 @@ class SessionManager:
         if not primary_cfg.enabled:
             msg = f"primary provider {req.primary_provider!r} is disabled"
             raise ProviderDisabledError(msg)
+        self._check_live_capable(primary_cfg, "primary")
         if req.model:
             # Model is chosen on demand at start time, overriding the stored default.
             primary_cfg = primary_cfg.model_copy(update={"model": req.model})
@@ -180,6 +197,7 @@ class SessionManager:
             if not fallback_cfg.enabled:
                 msg = f"fallback provider {req.fallback_provider!r} is disabled"
                 raise ProviderDisabledError(msg)
+            self._check_live_capable(fallback_cfg, "fallback")
             if req.fallback_model:
                 fallback_cfg = fallback_cfg.model_copy(update={"model": req.fallback_model})
         return primary_cfg, fallback_cfg
