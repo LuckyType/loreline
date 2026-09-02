@@ -324,6 +324,9 @@ export interface ReprocessJob {
 	created_at: number
 	started_at?: number | null
 	finished_at?: number | null
+	/** Segments written so far, updated while the job runs (not only at the
+	 *  end), so a refresh or a second browser sees the same number. It is not a
+	 *  completion ratio: models segment the same audio differently. */
 	segments_added: number
 	error?: string | null
 }

@@ -172,6 +172,13 @@ export const api = {
 		request<TranscriptEvent[]>(
 			`/api/session/${id}/transcript?version=${encodeURIComponent(version)}`,
 		),
+	/** Delete one re-transcription version (segments + job rows). The server
+	 *  refuses 'original', which is the live capture and cannot be remade. */
+	deleteTranscriptVersion: (id: string, version: string) =>
+		request<{ ok: boolean }>(
+			`/api/session/${id}/transcript?version=${encodeURIComponent(version)}`,
+			{ method: 'DELETE' },
+		),
 	setSpeakerNames: (id: string, names: Record<string, string>) =>
 		request<{ ok: boolean }>(`/api/session/${id}/speakers`, {
 			method: 'PUT',

@@ -338,6 +338,20 @@ class ReprocessRepository:
         )
         await self._db.connection.commit()
 
+    async def delete_version(self, session_id: str, version: str) -> None:
+        """Drop the job row for a transcript version, plus any diarize job aimed at it.
+
+        The version's diarized copy is deleted with its base rows (see
+        ``ReprocessManager.delete_version``), so the jobs that produced it would
+        otherwise describe work on a transcript nobody can reach.
+        """
+        await self._db.connection.execute(
+            "DELETE FROM reprocess_jobs WHERE session_id = ? "
+            "AND (id = ? OR (operation = 'diarize' AND target = ?));",
+            (session_id, version, version),
+        )
+        await self._db.connection.commit()
+
     async def mark_interrupted(self) -> None:
         """Fail jobs left QUEUED/RUNNING by a previous process (startup sweep)."""
         await self._db.connection.execute(

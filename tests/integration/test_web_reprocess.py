@@ -12,11 +12,13 @@ from httpx import ASGITransport, AsyncClient
 from test_web_session import (  # type: ignore[import-not-found]
     FakeBackend,
     FakeDiarizer,
+    FakeSource,
     GlossaryRecordingBackend,
     capture_factory,
 )
 
-from loreline.models import ProviderConfig, SpeakerSegment
+from loreline.audio.chunker import SpeechDetector, Utterance
+from loreline.models import ProviderConfig, SpeakerSegment, TranscriptEvent
 from loreline.secrets import SecretStore
 from loreline.settings import Settings
 from loreline.web.app import create_app
@@ -372,3 +374,205 @@ async def test_diarize_session_relabels_globally(tmp_path: Path) -> None:
                 },
             )
             assert missing.status_code == 404
+
+
+async def _wait_done(client: AsyncClient, job_id: str) -> dict[str, object]:
+    """Poll a job until it leaves queued/running, and return the finished row."""
+    job: dict[str, object] = {}
+    for _ in range(50):
+        job = (await client.get(f"/api/reprocess/{job_id}")).json()
+        if job["status"] in {"done", "error"}:
+            return job
+        await asyncio.sleep(0.02)
+    return job
+
+
+async def test_delete_transcript_version(tmp_path: Path) -> None:
+    """Deleting a version removes exactly its rows.
+
+    Its segments go, so does the diarized copy that superseded them and the job
+    rows that produced both - a `diarize:<version>` copy of rows that no longer
+    exist is reachable by no reader. Every other version, and the original,
+    is left alone.
+    """
+    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t")
+    app = create_app(
+        settings,
+        capture_factory=capture_factory,  # type: ignore[arg-type]
+        backend_factory=FakeBackend,  # type: ignore[arg-type]
+        diarizer_factory=lambda _cfg: _WholeSessionDiarizer(),
+    )
+    async with LifespanManager(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            pid = await _provider(client)
+            sid = await _run_session(client, pid)
+            ctx = app.state.ctx  # pyright: ignore[reportAny]
+
+            first = (
+                await client.post("/api/reprocess", json={"session_id": sid, "provider_id": pid})
+            ).json()["id"]
+            await _wait_done(client, first)
+            second = (
+                await client.post("/api/reprocess", json={"session_id": sid, "provider_id": pid})
+            ).json()["id"]
+            await _wait_done(client, second)
+            diar = (
+                await client.post(
+                    "/api/reprocess",
+                    json={
+                        "session_id": sid,
+                        "operation": "diarize",
+                        "target": first,
+                        "diarization": {"mode": "remote", "endpoint": "http://diar"},
+                    },
+                )
+            ).json()["id"]
+            await _wait_done(client, diar)
+
+            sources = {e.source for e in await ctx.transcripts.for_session(sid)}
+            assert {f"reprocess:{first}", f"reprocess:{second}", f"diarize:{first}"} <= sources
+            original_before = (await client.get(f"/api/session/{sid}")).json()["transcript"]
+            assert original_before
+
+            # A diarize job's id is not a version: it relabels one in place
+            # rather than creating its own, so it is not addressable here.
+            not_a_version = await client.delete(
+                f"/api/session/{sid}/transcript", params={"version": diar}
+            )
+            assert not_a_version.status_code == 404
+
+            resp = await client.delete(f"/api/session/{sid}/transcript", params={"version": first})
+            assert resp.status_code == 200
+
+            sources = {e.source for e in await ctx.transcripts.for_session(sid)}
+            assert f"reprocess:{first}" not in sources
+            assert f"diarize:{first}" not in sources  # the relabeling went with its base rows
+            assert f"reprocess:{second}" in sources
+            assert (await client.get(f"/api/session/{sid}")).json()["transcript"] == original_before
+
+            # The version's own job row and the diarize job aimed at it are gone;
+            # the surviving version keeps its own.
+            remaining = (await client.get("/api/reprocess", params={"session_id": sid})).json()
+            assert {j["id"] for j in remaining} == {second}
+
+            # Deleting it twice is a 404, not a silent success.
+            assert (
+                await client.delete(f"/api/session/{sid}/transcript", params={"version": first})
+            ).status_code == 404
+
+
+async def test_delete_original_version_is_refused(client: AsyncClient) -> None:
+    """The original is the live capture: nothing can produce it again, so the
+    server refuses it rather than trusting the page to hide the button."""
+    pid = await _provider(client)
+    sid = await _run_session(client, pid)
+    before = (await client.get(f"/api/session/{sid}")).json()["transcript"]
+    assert before
+
+    resp = await client.delete(f"/api/session/{sid}/transcript", params={"version": "original"})
+    assert resp.status_code == 409
+    assert "original" in resp.json()["detail"]
+    assert (await client.get(f"/api/session/{sid}")).json()["transcript"] == before
+
+
+async def test_delete_version_unknown_session(client: AsyncClient) -> None:
+    resp = await client.delete("/api/session/missing/transcript", params={"version": "nope"})
+    assert resp.status_code == 404
+
+
+class _GatedBackend(FakeBackend):
+    """FakeBackend that waits on a gate before every utterance after the first.
+
+    Holds a run open at a known, non-final segment count so a test can read the
+    job row mid-flight, which is the whole point of publishing that count while
+    the job is still going. The same factory also serves the live capture that
+    produces the audio, so the gate starts open and is closed once that capture
+    is done - a blocked live session would just sit in the stop drain instead.
+    """
+
+    def __init__(self, config: ProviderConfig, secrets: SecretStore, gate: asyncio.Event) -> None:
+        super().__init__(config, secrets)
+        self._gate = gate
+        self._seen = 0
+
+    async def transcribe(
+        self,
+        audio: AsyncIterator[Utterance],
+        *,
+        session_id: str,
+        glossary: object = None,
+    ) -> AsyncIterator[TranscriptEvent]:
+        self._seen += 1
+        if self._seen > 1:
+            await self._gate.wait()
+        async for event in super().transcribe(audio, session_id=session_id, glossary=glossary):
+            yield event
+
+
+def _two_utterance_capture(_req: object, _sample_rate: int) -> tuple[FakeSource, SpeechDetector]:
+    """Capture yielding two utterances: speech, a full silence gap, then speech.
+
+    The shared fake capture produces a single utterance, and a run over one
+    utterance publishes nothing before it ends (the router hands over a whole
+    utterance's events at once), so a live count needs more than one.
+    """
+    pattern = [True] * 5 + [False] * 45 + [True] * 5
+    frames = iter(pattern)
+
+    def detector(_frame: bytes) -> bool:
+        return next(frames, False)
+
+    return FakeSource(frames=len(pattern)), detector
+
+
+async def test_running_job_publishes_its_segment_count(tmp_path: Path) -> None:
+    """`segments_added` reaches the row while the job runs, not only at the end.
+
+    That is what lets the page (and a refresh, or a second browser) show a
+    re-transcription filling up instead of a motionless "running".
+    """
+    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t")
+    gate = asyncio.Event()
+    gate.set()  # open for the live capture below; closed before the job runs
+
+    def factory(config: ProviderConfig, secrets: SecretStore) -> _GatedBackend:
+        return _GatedBackend(config, secrets, gate)
+
+    app = create_app(
+        settings,
+        capture_factory=_two_utterance_capture,  # type: ignore[arg-type]
+        backend_factory=factory,  # type: ignore[arg-type]
+        diarizer_factory=lambda _cfg: FakeDiarizer(),
+    )
+    async with LifespanManager(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            pid = await _provider(client)
+            sid = await _run_session(client, pid)
+            ctx = app.state.ctx  # pyright: ignore[reportAny]
+            assert len(ctx.audio_store.read_utterances(sid)) == 2
+
+            gate.clear()
+            job_id = (
+                await client.post("/api/reprocess", json={"session_id": sid, "provider_id": pid})
+            ).json()["id"]
+            job: dict[str, object] = {}
+            for _ in range(100):
+                job = (await client.get(f"/api/reprocess/{job_id}")).json()
+                if int(job["segments_added"]) >= 1:  # type: ignore[arg-type]
+                    break
+                await asyncio.sleep(0.02)
+            assert job["status"] == "running"
+            assert job["segments_added"] == 1
+
+            # A version still being written cannot be deleted: the run would
+            # keep inserting rows that no job row explains any more.
+            busy = await client.delete(f"/api/session/{sid}/transcript", params={"version": job_id})
+            assert busy.status_code == 409
+
+            gate.set()
+            await ctx.reprocess.wait(job_id)
+            final = (await client.get(f"/api/reprocess/{job_id}")).json()
+            assert final["status"] == "done"
+            assert final["segments_added"] == 2

@@ -25,6 +25,11 @@ from loreline.models import (
     TranscriptEvent,
     rebase_transcript,
 )
+from loreline.reprocess import (
+    OriginalVersionError,
+    VersionBusyError,
+    VersionNotFoundError,
+)
 from loreline.session import (
     ProviderDisabledError,
     ProviderNotFoundError,
@@ -114,6 +119,26 @@ async def get_transcript_version(
     if await state.sessions.get(session_id) is None:
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="session not found")
     return variant_view(await state.transcripts.for_session(session_id), version)
+
+
+@router.delete("/{session_id}/transcript")
+async def delete_transcript_version(request: Request, session_id: str, version: str) -> OkResponse:
+    """Delete one re-transcription version: its segments and its job rows.
+
+    "original" is refused here, not merely hidden in the UI: it is the live
+    capture and nothing can produce it again. See
+    ``ReprocessManager.delete_version`` for what a version drags with it.
+    """
+    state = get_state(request)
+    if await state.sessions.get(session_id) is None:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="session not found")
+    try:
+        await state.reprocess.delete_version(session_id, version)
+    except VersionNotFoundError as exc:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except (OriginalVersionError, VersionBusyError) as exc:
+        raise HTTPException(status_code=HTTP_409_CONFLICT, detail=str(exc)) from exc
+    return OkResponse()
 
 
 @router.put("/{session_id}/speakers")

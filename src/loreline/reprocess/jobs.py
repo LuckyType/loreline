@@ -76,6 +76,53 @@ class TargetNotFoundError(ValueError):
     """Raised when a diarize job targets a transcript version with no rows."""
 
 
+class OriginalVersionError(ValueError):
+    """Raised when asked to delete the original (live capture) transcript version."""
+
+
+class VersionNotFoundError(ValueError):
+    """Raised when deleting a transcript version that does not exist."""
+
+
+class VersionBusyError(ValueError):
+    """Raised when deleting a transcript version a job is still writing."""
+
+
+# How often a running job's segment count is written back to its row. The
+# session page polls the job list every 1.5s, so a tighter cadence would only
+# add SQLite commits nobody can see.
+_COUNT_INTERVAL_S = 1.0
+
+
+class _LiveSegmentCount:
+    """Publish a running job's ``segments_added`` while the job still runs.
+
+    The count used to reach the row only when the job finished, so a
+    re-transcription of an hours-long recording showed "running" and a flat 0
+    for as long as it took. It is deliberately not turned into a percentage:
+    two models segment the same audio differently, so there is no honest
+    denominator to divide by - the number is only a rough feel for progress,
+    read next to the other versions' counts.
+
+    Ticks inside the interval are dropped; the caller's completion write (see
+    ``ReprocessManager._run``) persists the final count either way, so no run
+    can end on a stale number.
+    """
+
+    def __init__(self, job: ReprocessJob, repo: ReprocessRepository) -> None:
+        self._job = job
+        self._repo = repo
+        self._last_write = 0.0
+
+    async def set(self, count: int) -> None:
+        self._job.segments_added = count
+        now = time.monotonic()
+        if now - self._last_write < _COUNT_INTERVAL_S:
+            return
+        self._last_write = now
+        await self._repo.update(self._job)
+
+
 class ReprocessManager:
     """Enqueue and run post-session re-processing jobs."""
 
@@ -150,6 +197,53 @@ class ReprocessManager:
         task.add_done_callback(lambda _t: self._tasks.pop(job.id, None))
         log.info("reprocess.enqueue", job_id=job.id, session_id=job.session_id)
         return job
+
+    async def delete_version(self, session_id: str, version: str) -> None:
+        """Delete one transcript version: its segments, its diarization, its jobs.
+
+        ``ORIGINAL_VERSION`` is refused. Every other version can be produced
+        again from the stored audio; the original is the live capture, and the
+        microphone is not coming back. The page hides the button, but the rule
+        lives here - hiding a control is not a guarantee.
+
+        A *diarize* job's id is deliberately not a version this accepts. A
+        diarize job creates no transcript of its own: it rewrites ONE target
+        version's rows into a ``DIARIZE_SOURCE_PREFIX`` copy that supersedes
+        them on read (see ``loreline.export.variant_view``), so "deleting a
+        diarize version" would mean dropping a relabeling while keeping the
+        transcript, which is a different operation than the one this endpoint
+        offers. What deleting a version does do is take its relabeling with it:
+        ``diarize:<version>`` rows whose base version is gone are unreachable
+        by every reader, and the diarize jobs that wrote them describe work on
+        a transcript that no longer exists, so both go too.
+        """
+        if version == ORIGINAL_VERSION:
+            msg = "the original transcript cannot be deleted"
+            raise OriginalVersionError(msg)
+        jobs = await self._reprocess.for_session(session_id)
+        owner = next(
+            (j for j in jobs if j.id == version and j.operation == "transcribe"),
+            None,
+        )
+        if owner is None:
+            msg = f"unknown transcript version {version!r}"
+            raise VersionNotFoundError(msg)
+        # A job still writing this version would keep inserting rows after the
+        # delete, leaving segments no job row explains.
+        pending = {JobStatus.QUEUED, JobStatus.RUNNING}
+        busy = [
+            j
+            for j in jobs
+            if j.status in pending
+            and (j.id == version or (j.operation == "diarize" and j.target == version))
+        ]
+        if busy:
+            msg = f"transcript version {version!r} is still being written"
+            raise VersionBusyError(msg)
+        await self._transcripts.delete_source(session_id, f"{REPROCESS_SOURCE_PREFIX}{version}")
+        await self._transcripts.delete_source(session_id, f"{DIARIZE_SOURCE_PREFIX}{version}")
+        await self._reprocess.delete_version(session_id, version)
+        log.info("reprocess.version.deleted", session_id=session_id, version=version)
 
     async def wait(self, job_id: str) -> None:
         """Await completion of a running job's task (no-op if unknown)."""
@@ -226,7 +320,7 @@ class ReprocessManager:
         try:
             # Blocking file I/O (a whole session's utterances) off the event loop.
             utterances = await asyncio.to_thread(self._audio_store.read_utterances, job.session_id)
-            return await self._drive(router, bus, utterances, job.id, started_mono)
+            return await self._drive(router, bus, utterances, job, started_mono)
         finally:
             await _aclose(backend)
             await _aclose(diarizer)
@@ -275,8 +369,10 @@ class ReprocessManager:
             assign_speakers(event, segments).model_copy(update={"source": source}) for event in base
         ]
         await self._transcripts.delete_source(job.session_id, source)
-        for event in relabeled:
+        live = _LiveSegmentCount(job, self._reprocess)
+        for written, event in enumerate(relabeled, start=1):
             await self._transcripts.add(event)
+            await live.set(written)
         return len(relabeled)
 
     async def _drive(
@@ -284,15 +380,18 @@ class ReprocessManager:
         router: SttRouter,
         bus: EventBus[TranscriptEvent],
         utterances: list[Utterance],
-        job_id: str,
+        job: ReprocessJob,
         started_mono: float,
     ) -> int:
         """Subscribe first, then run the router, persisting every emitted event.
 
         Subscribing before the router runs guarantees no published event (or the
-        close sentinel) is missed.
+        close sentinel) is missed. The running count is published to the job row
+        as it grows, so the page shows the version filling up rather than a
+        motionless "running".
         """
-        source = f"{REPROCESS_SOURCE_PREFIX}{job_id}"
+        source = f"{REPROCESS_SOURCE_PREFIX}{job.id}"
+        live = _LiveSegmentCount(job, self._reprocess)
         count = 0
         async with bus.subscribe(reliable=True) as stream:
             run_task = asyncio.create_task(_run_then_close(router, utterances, bus))
@@ -302,6 +401,7 @@ class ReprocessManager:
                     tagged = rebased.model_copy(update={"source": source})
                     await self._transcripts.add(tagged)
                     count += 1
+                    await live.set(count)
             finally:
                 await run_task
         return count

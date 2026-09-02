@@ -152,6 +152,36 @@ function selectable(job: ReprocessJob): boolean {
 	return job.status === 'done' && job.segments_added > 0
 }
 
+function inFlight(job: ReprocessJob): boolean {
+	return job.status === 'queued' || job.status === 'running'
+}
+
+/** Delete one re-transcription version, its diarization, and its job rows.
+ *
+ * Only re-transcriptions are deletable: the original is the live capture and
+ * nothing can produce it again, so it has no button (and the server refuses it
+ * regardless). A version that is on screen is swapped back to the original,
+ * which is the one version guaranteed to still be there. */
+async function deleteVersion(job: ReprocessJob) {
+	const segments = job.segments_added === 1 ? '1 segment' : `${job.segments_added} segments`
+	if (
+		!(await confirm({
+			title: 'Delete transcription',
+			description: `Delete version ${job.id.slice(0, 8)} and its ${segments}? Its diarization goes with it; the audio and the other versions are untouched.`,
+			confirmLabel: 'Delete',
+			destructive: true,
+		}))
+	)
+		return
+	try {
+		await api.deleteTranscriptVersion(id, job.id)
+		if (selectedVersion === job.id) await selectVersion('original')
+		await refreshJobs()
+	} catch (err) {
+		error = err instanceof ApiError ? err.message : 'delete failed'
+	}
+}
+
 function diarizerLabel(job: ReprocessJob): string {
 	if (job.diarization.mode === 'openai') return 'OpenAI · gpt-4o-transcribe-diarize'
 	if (job.diarization.mode === 'remote')
@@ -164,7 +194,11 @@ function diarizeInfo(version: string): string {
 	const targeting = jobs.filter(
 		(j) => j.operation === 'diarize' && (j.target ?? 'original') === version,
 	)
-	if (targeting.some((j) => j.status === 'queued' || j.status === 'running')) return 'diarizing…'
+	// A running pass counts the segments it has relabeled so far, for the same
+	// reason a running transcription does: something has to move.
+	const running = targeting.find(inFlight)
+	if (running)
+		return running.segments_added > 0 ? `diarizing… ${running.segments_added}` : 'diarizing…'
 	const done = targeting
 		.filter((j) => j.status === 'done' && j.segments_added > 0)
 		.sort((a, b) => (b.finished_at ?? 0) - (a.finished_at ?? 0))[0]
@@ -487,7 +521,7 @@ onDestroy(() => {
 							<TableHead>Transcript</TableHead><TableHead>Provider</TableHead
 							><TableHead>Model</TableHead><TableHead>Diarization</TableHead
 							><TableHead>Segments</TableHead><TableHead>Created</TableHead
-							><TableHead>Status</TableHead>
+							><TableHead>Status</TableHead><TableHead class="w-0"></TableHead>
 						</TableRow>
 					</TableHeader>
 					<TableBody>
@@ -508,6 +542,9 @@ onDestroy(() => {
 							<TableCell>
 								<Badge variant={originalStatus.variant}>{originalStatus.label}</Badge>
 							</TableCell>
+							<!-- No delete for the original: it is the live capture, and unlike
+							     every re-transcription there is no way to produce it again. -->
+							<TableCell></TableCell>
 						</TableRow>
 						{#each transcribeJobs as j (j.id)}
 							<TableRow
@@ -521,7 +558,23 @@ onDestroy(() => {
 								<TableCell>{providerName(j.provider_id, providers)}</TableCell>
 								<TableCell>{j.model ?? '-'}</TableCell>
 								<TableCell>{diarizeInfo(j.id)}</TableCell>
-								<TableCell>{j.segments_added}</TableCell>
+								<TableCell>
+									{#if inFlight(j)}
+										<!-- Counts up as the run writes segments, next to the finished
+										     versions' counts. Not a percentage on purpose: models split the
+										     same audio differently, so there is no total to divide by, only
+										     a rough feel for how far along this run is. -->
+										<span
+											class="text-muted-foreground"
+											title="Segments written so far. Versions legitimately end on different counts, so this is a rough feel for progress, not a completion ratio."
+										>
+											{j.segments_added}
+											so far…
+										</span>
+									{:else}
+										{j.segments_added}
+									{/if}
+								</TableCell>
 								<TableCell class="text-muted-foreground">{fmtWhen(j.created_at)}</TableCell>
 								<TableCell>
 									<Badge
@@ -534,6 +587,22 @@ onDestroy(() => {
 									>
 										{j.status}
 									</Badge>
+								</TableCell>
+								<TableCell>
+									<Button
+										variant="ghost"
+										size="sm"
+										disabled={inFlight(j)}
+										title={inFlight(j)
+											? 'Wait for the job to finish'
+											: 'Delete this transcription and its diarization'}
+										onclick={(e: MouseEvent) => {
+											e.stopPropagation() // the row click selects the version
+											void deleteVersion(j)
+										}}
+									>
+										Delete
+									</Button>
 								</TableCell>
 							</TableRow>
 						{/each}

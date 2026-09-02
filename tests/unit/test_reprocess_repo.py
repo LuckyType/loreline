@@ -127,3 +127,37 @@ async def test_build_diarizer_openai_mode_reuses_stored_key(db: Database, tmp_pa
     )
     assert isinstance(diarizer, OpenAIDiarizer)
     assert diarizer._api_key == "sk-from-store"  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_delete_version_takes_the_diarize_jobs_aimed_at_it(db: Database) -> None:
+    """Deleting a transcript version drops its own job row and every diarize job
+    that targeted it: a diarize job relabels one version in place, and its
+    output is deleted with that version's base rows, so its row would describe
+    work on a transcript nobody can reach. Other versions' jobs stay."""
+    sessions = SessionRepository(db)
+    reprocess = ReprocessRepository(db)
+    await sessions.create(Session(id="s1", started_at=time.time()))
+
+    def job(
+        job_id: str, *, operation: str = "transcribe", target: str = "original"
+    ) -> ReprocessJob:
+        return ReprocessJob(
+            id=job_id,
+            session_id="s1",
+            provider_id="p",
+            operation=operation,
+            target=target,
+            status=JobStatus.DONE,
+            created_at=time.time(),
+        )
+
+    await reprocess.create(job("v1"))
+    await reprocess.create(job("v2"))
+    await reprocess.create(job("d1", operation="diarize", target="v1"))
+    await reprocess.create(job("d2", operation="diarize", target="v2"))
+    await reprocess.create(job("d0", operation="diarize"))
+
+    await reprocess.delete_version("s1", "v1")
+
+    left = {j.id for j in await reprocess.for_session("s1")}
+    assert left == {"v2", "d2", "d0"}
