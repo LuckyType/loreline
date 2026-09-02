@@ -266,3 +266,36 @@ async def test_chat_models_keep_their_per_token_price() -> None:
     )
     assert models[0].pricing is not None
     assert (models[0].pricing.prompt, models[0].pricing.completion) == (3.0, 15.0)
+
+
+async def test_video_models_come_from_the_video_catalogue() -> None:
+    """Video has its own endpoint. Falling through to the plain /models list
+    served the chat catalogue for video generation, i.e. 400-odd text models
+    offered to a picker that can only run a video model.
+    """
+    seen: dict[str, str] = {}
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        return httpx.Response(200, json={"data": [{"id": "alibaba/wan-3.0"}]})
+
+    models = await list_models(
+        kind=ProviderKind.OPENROUTER,
+        base_url=None,
+        api_key="k",
+        interaction=Interaction.VIDEO,
+        client_factory=lambda: _factory(httpx.MockTransport(handle)),
+    )
+    assert seen["path"].endswith("/videos/models")
+    assert [m.id for m in models] == ["alibaba/wan-3.0"]
+
+
+async def test_video_models_are_empty_for_a_kind_that_cannot_generate_video() -> None:
+    models = await list_models(
+        kind=ProviderKind.DEEPGRAM,
+        base_url=None,
+        api_key="k",
+        interaction=Interaction.VIDEO,
+        client_factory=lambda: _factory(httpx.MockTransport(lambda _r: httpx.Response(200))),
+    )
+    assert models == []

@@ -130,6 +130,11 @@ async def list_models(
     (OpenRouter does; plain OpenAI ``/models`` and the curated lists do not) -
     everything past ``id`` is optional, so a caller can always just read ids.
     """
+    # Video has its own catalogue on a separate endpoint; the plain /models
+    # list is the chat one, so falling through to it here would offer chat
+    # models for video generation.
+    if interaction is Interaction.VIDEO:
+        return await _fetch_video_models(kind, base_url, api_key, client_factory)
     # OpenAI's live /models lists batch transcription models its Realtime
     # connector cannot drive, so that one pairing keeps the curated list.
     use_live = kind in _LIVE_KINDS and not (
@@ -148,6 +153,34 @@ async def list_models(
         )
         for model_id in _CURATED.get(kind, [])
     ]
+
+
+async def _fetch_video_models(
+    kind: ProviderKind,
+    base_url: str | None,
+    api_key: str | None,
+    client_factory: ClientFactory | None,
+) -> list[ModelInfo]:
+    """Video models, as bare ids for a picker.
+
+    The rich per-model capability data (durations, resolutions, whether it can
+    generate audio) comes from loreline.video.client.list_video_models, which
+    the generate dialog consumes directly. This is the id-only view the generic
+    models route serves, so a picker does not have to know about two endpoints.
+    """
+    if kind not in _OPENROUTER_KINDS:
+        return []
+    base = (base_url or _OPENROUTER_BASE).rstrip("/")
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    factory = client_factory or (lambda: httpx.AsyncClient(timeout=15.0))
+    try:
+        async with factory() as client:
+            response = await client.get(f"{base}/videos/models", headers=headers)
+            response.raise_for_status()
+            return _parse_models(response.json())
+    except (httpx.HTTPError, ValueError) as exc:
+        log.warning("models.video_fetch.failed", kind=kind.value, error=str(exc))
+        return []
 
 
 async def _fetch_openai_models(

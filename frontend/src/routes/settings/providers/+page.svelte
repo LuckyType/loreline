@@ -52,6 +52,7 @@ import {
 	providersFor,
 	type ActionDefaults,
 	type ProtocolKind,
+	INTERACTIONS_BY_KIND,
 	REASONING_EFFORTS,
 	capabilityBadges,
 	type ModelInfo,
@@ -272,12 +273,29 @@ async function saveDefaults() {
 async function loadModels() {
 	modelsLoading = true
 	try {
-		availableModels = await api.providerModels({
-			kind: form.kind,
-			base_url: form.base_url || null,
-			api_key: form.api_key || null,
-			provider_id: editing,
-		})
+		// Favourites are one flat list shared by every picker, while a provider
+		// can now serve several interactions at once (an OpenRouter entry does
+		// transcription, summaries and video). Loading only one interaction's
+		// catalogue is what made this button look broken: adding OpenRouter for
+		// summaries offered the 19 transcription models and none of the chat
+		// ones. Load each interaction the kind actually supports and merge,
+		// de-duplicated, so a favourite can be picked for any of its roles.
+		const catalogues = await Promise.all(
+			(INTERACTIONS_BY_KIND[form.kind] ?? []).map((interaction) =>
+				api
+					.providerModels({
+						kind: form.kind,
+						interaction,
+						base_url: form.base_url || null,
+						api_key: form.api_key || null,
+						provider_id: editing,
+					})
+					// One unreachable catalogue must not lose the others.
+					.catch(() => []),
+			),
+		)
+		const seen = new Set<string>()
+		availableModels = catalogues.flat().filter((m) => !seen.has(m.id) && seen.add(m.id))
 		if (availableModels.length) {
 			const present = new Set(availableModels.map((m) => m.id))
 			form.favorite_models = (form.favorite_models ?? []).filter((m) => present.has(m))
