@@ -21,15 +21,14 @@ async def test_curated_fallback_for_non_openai() -> None:
     assert "nova-3" in _ids(models)  # curated catalog (no /v1/models endpoint)
 
 
-async def test_gemini_live_model_is_hidden_until_verified() -> None:
-    """gemini-3.5-transcribe-live has a connector, but one that has never run
-    against the real service - the curated list is the gate that keeps it out
-    of every picker until a verification run succeeds (see the comment on
-    _CURATED in loreline.stt.catalog). Gemini is not fetched live, so this
-    list is the only path into the transcribe catalogue."""
+async def test_gemini_offers_both_transports() -> None:
+    """Gemini is not fetched live, so the curated list is the only path into
+    the transcribe catalogue. Both models belong in it now that the Live
+    connector has been verified against the real service, and each carries the
+    transport flag the picker badges."""
     models = await list_models(kind=ProviderKind.GEMINI, base_url=None, api_key=None)
-    assert "gemini-3.5-transcribe" in _ids(models)
-    assert "gemini-3.5-transcribe-live" not in _ids(models)
+    assert _ids(models) == ["gemini-3.5-transcribe", "gemini-3.5-transcribe-live"]
+    assert [m.realtime for m in models] == [False, True]
 
 
 async def test_live_openai_compatible_models() -> None:

@@ -31,19 +31,20 @@ async def test_payload_matches_the_loaded_config(client: AsyncClient) -> None:
     assert response.json() == config().model_dump(mode="json")
 
 
-async def test_hidden_models_are_not_offered(client: AsyncClient) -> None:
-    """An unverified connector must not reach a picker.
+async def test_verified_models_are_offered(client: AsyncClient) -> None:
+    """`hidden` is the release gate an unverified connector sits behind.
 
-    gemini-3.5-transcribe-live is described in full so an explicit config still
-    routes to the Live connector, but it is flagged hidden until a real session
-    is confirmed to return transcription frames.
+    gemini-3.5-transcribe-live spent its unverified life hidden: described in
+    full, so an explicit config still routed to the Live connector, but absent
+    from every picker. It is verified against the real service now, so both
+    Gemini transcription models are offered.
     """
     payload = (await client.get("/api/capabilities")).json()
     gemini = payload["providers"]["gemini"]
     live = next(m for m in gemini["models"] if m["id"] == "gemini-3.5-transcribe-live")
-    assert live["hidden"] is True
+    assert live["hidden"] is False
     offered = [m["id"] for m in gemini["models"] if not m["hidden"]]
-    assert offered == ["gemini-3.5-transcribe"]
+    assert offered == ["gemini-3.5-transcribe", "gemini-3.5-transcribe-live"]
 
 
 async def test_glossary_support_is_stated_per_model(client: AsyncClient) -> None:

@@ -128,6 +128,8 @@ class TestRealtimeModelResolution:
         """Configs stored before per-model resolution carry no model; they must
         keep running exactly the connector they always got."""
         assert is_realtime_model(ProviderKind.OPENAI, None)
+        # Gemini has a streaming model now, and a stored config still must not
+        # be switched onto it behind the GM's back (see _BATCH_BY_DEFAULT).
         assert not is_realtime_model(ProviderKind.GEMINI, None)
 
     def test_a_new_model_naming_its_transport_is_recognised(self) -> None:

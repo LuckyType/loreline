@@ -116,11 +116,10 @@ class TestModelResolution:
         assert isinstance(backend, GeminiSTTBackend)
 
     def test_gemini_live_model_resolves_to_the_live_connector(self, tmp_path: Path) -> None:
-        """gemini-3.5-transcribe-live rides the Live API's WebSocket. The model
-        is hidden from the pickers until verified against the real service (see
-        the gate in loreline.stt.catalog), but a config that names it
-        explicitly must still reach the connector - that is how the
-        verification run is switched on without a code change."""
+        """gemini-3.5-transcribe-live rides the Live API's WebSocket. It spent
+        its unverified life hidden from the pickers while still resolving to
+        the connector for a config that named it explicitly, which is how the
+        verification run that unhid it was switched on."""
         backend = create_backend(
             _config(ProviderKind.GEMINI, model="gemini-3.5-transcribe-live", base_url=None),
             self._secrets(tmp_path),

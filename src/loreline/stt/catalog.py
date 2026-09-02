@@ -76,19 +76,15 @@ _CURATED: dict[ProviderKind, list[str]] = {
         "universal-streaming-english",
         "universal-streaming-multilingual",
     ],
-    # Batch transcription via the Interactions API. gemini-3.5-transcribe-live
-    # is deliberately absent, and THIS LINE IS THE GATE that hides it: its Live
-    # API connector (stt/backends/gemini_live.py) exists but has never been run
-    # against the real service, so the model must not appear in any picker
-    # until someone verifies it with a real API key. Gemini is not fetched
-    # live, so this curated list is the only path into the transcribe
-    # catalogue. A config that names the model explicitly still resolves to
-    # the connector (see loreline.stt.registry), which is how the verification
-    # run is switched on without a code change. Once verified, unhide it by
-    # adding "gemini-3.5-transcribe-live" here.
+    # Batch transcription via the Interactions API, plus the Live API model,
+    # which is here because it has now been verified against the real service
+    # (see the note on gemini-3.5-transcribe-live in capabilities.yaml).
+    # Gemini is not fetched live, so this curated list is the only path into
+    # the transcribe catalogue, and hidden: false in the yaml alone would not
+    # put the model in a picker.
     # https://ai.google.dev/gemini-api/docs/transcribe
     # https://ai.google.dev/gemini-api/docs/live-api/live-transcribe
-    ProviderKind.GEMINI: ["gemini-3.5-transcribe"],
+    ProviderKind.GEMINI: ["gemini-3.5-transcribe", "gemini-3.5-transcribe-live"],
     # Fallback only, for when the live /models fetch fails: this kind normally
     # lists its transcription models live, now that the registry can route the
     # realtime ones to the Realtime WebSocket and the batch ones to

@@ -137,6 +137,16 @@ def kinds_with_inline_diarization() -> frozenset[ProviderKind]:
     )
 
 
+# Kinds whose model-less configs keep the batch connector even though the kind
+# now has a streaming model. This answers "what did a config stored before
+# per-model resolution get", which no capability in the yaml can answer,
+# because that answer must not move when a new model is added. Gemini is here
+# because gemini-3.5-transcribe-live only became offerable once it was
+# verified, long after those configs were saved, and rerouting them to it would
+# silently drop their diarization and word timestamps.
+_BATCH_BY_DEFAULT: frozenset[ProviderKind] = frozenset({ProviderKind.GEMINI})
+
+
 def is_realtime_model(kind: ProviderKind, model: str | None) -> bool:
     """Whether this provider+model pair transcribes over a streaming transport.
 
@@ -151,7 +161,7 @@ def is_realtime_model(kind: ProviderKind, model: str | None) -> bool:
     if model is None:
         # Configs stored before per-model resolution carry no model and must
         # keep running the connector they always got.
-        return supports_realtime(kind)
+        return supports_realtime(kind) and kind not in _BATCH_BY_DEFAULT
     entry = spec.find(model)
     caps = entry.transcribe if entry else None
     if caps is None:
