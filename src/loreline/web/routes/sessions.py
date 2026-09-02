@@ -46,6 +46,7 @@ from loreline.web.schemas import (
     StartSessionRequest,
     SummarizeRequest,
     SummarizeResult,
+    VersionLogs,
 )
 
 router = APIRouter(prefix="/api/session", tags=["sessions"], dependencies=[Depends(require_auth)])
@@ -138,7 +139,36 @@ async def delete_transcript_version(request: Request, session_id: str, version: 
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except (OriginalVersionError, VersionBusyError) as exc:
         raise HTTPException(status_code=HTTP_409_CONFLICT, detail=str(exc)) from exc
+    # The version's log file goes with its segments, the same way stored audio
+    # goes with a deleted session: a log describing a transcript nobody can
+    # read is only a file nobody will ever delete by hand.
+    state.log_store.delete_version(session_id, version)
     return OkResponse()
+
+
+@router.get("/{session_id}/logs")
+async def get_version_logs(
+    request: Request, session_id: str, version: str = ORIGINAL_VERSION
+) -> VersionLogs:
+    """One transcript version's stored log ("original" or a transcribe job id).
+
+    These are the lines that produced that version, kept per version because
+    the dashboard's ring buffer forgets them within minutes - and the run that
+    matters most, the live capture, is the one that can never be repeated.
+    """
+    state = get_state(request)
+    if await state.sessions.get(session_id) is None:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="session not found")
+    try:
+        # Blocking file I/O off the event loop, like the other stored artifacts.
+        logs = await asyncio.to_thread(state.log_store.read, session_id, version)
+    except (OSError, ValueError) as exc:
+        # Missing (a version produced before logs were stored, or one whose run
+        # emitted nothing) and unreadable both mean the same thing to a caller.
+        raise HTTPException(
+            status_code=HTTP_404_NOT_FOUND, detail="no logs stored for this version"
+        ) from exc
+    return VersionLogs(session_id=session_id, version=version, logs=logs)
 
 
 @router.put("/{session_id}/speakers")
@@ -248,6 +278,7 @@ async def delete_sessions(request: Request, body: SessionIds) -> OkResponse:
             continue  # never delete the running session
         await state.transcripts.delete_session(session_id)
         state.audio_store.delete(session_id)
+        state.log_store.delete_session(session_id)  # every version's log file
         await state.sessions.delete(session_id)
     return OkResponse()
 

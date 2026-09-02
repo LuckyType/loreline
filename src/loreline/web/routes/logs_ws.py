@@ -13,7 +13,16 @@ router = APIRouter(tags=["ws"])
 
 @router.websocket("/ws/logs")
 async def logs_ws(ws: WebSocket) -> None:
-    """Replay buffered log lines, then stream new ones live."""
+    """Replay the running capture's buffered log lines, then stream new ones.
+
+    Scoped to the capture that is running *right now*, and silent when none is:
+    this feed sits next to the transcript on the dashboard, where every line is
+    read as "this is what the microphone is doing". A re-transcription of last
+    week's session scrolling through it says the opposite of the truth about
+    the recording in progress. The lines are not lost - every session keeps its
+    own log file per transcript version (see ``loreline.persistence.LogStore``),
+    which is where a finished run is read back from.
+    """
     settings = ws.app.state.ctx.settings
     if auth_enabled(settings):
         token = ws.cookies.get(COOKIE_NAME)
@@ -22,18 +31,25 @@ async def logs_ws(ws: WebSocket) -> None:
             return
 
     await ws.accept()
-    broadcaster = ws.app.state.ctx.log_broadcaster
+    ctx = ws.app.state.ctx
+    broadcaster = ctx.log_broadcaster
+    manager = ctx.manager
     try:
         # Subscribe before snapshotting history so no line slips through the gap;
         # the seq id then de-duplicates lines that are in both.
         async with broadcaster.bus.subscribe() as stream:
             history = broadcaster.history()
-            last_seq = history[-1][0] if history else 0
-            for _seq, line in history:
-                await ws.send_text(line)
-            async for seq, line in stream_until_disconnected(ws, stream):
-                if seq <= last_seq:
+            last_seq = history[-1].seq if history else 0
+            # Re-read per record rather than once: a session that starts (or
+            # stops) while this socket is open changes what belongs here.
+            for record in history:
+                if record.is_capture_line(manager.current_session_id()):
+                    await ws.send_text(record.line)
+            async for record in stream_until_disconnected(ws, stream):
+                if record.seq <= last_seq:
                     continue
-                await ws.send_text(line)
+                if not record.is_capture_line(manager.current_session_id()):
+                    continue
+                await ws.send_text(record.line)
     except WebSocketDisconnect:
         return

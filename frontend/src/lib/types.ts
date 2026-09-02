@@ -459,3 +459,10 @@ export interface ServiceLogs {
 	name: string
 	logs: string
 }
+
+/** One transcript version's stored log file (see /api/session/{id}/logs). */
+export interface VersionLogs {
+	session_id: string
+	version: string
+	logs: string
+}

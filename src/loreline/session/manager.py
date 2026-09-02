@@ -21,7 +21,7 @@ from loreline.audio.chunker import SpeechDetector, Utterance, VadChunker
 from loreline.bus import EventBus
 from loreline.capabilities import supports_inline_diarization, supports_live_capture
 from loreline.diarization.provider import create_diarizer
-from loreline.logging import get_logger
+from loreline.logging import bind_log_context, get_logger, log_context
 from loreline.models import (
     DiarizationMode,
     Session,
@@ -305,9 +305,11 @@ class SessionManager:
                 diarizer=diarizer,
                 on_failover=self._failover_alert,
             )
-            persist_task = asyncio.create_task(self._persist(session_bus, session.started_mono))
+            persist_task = asyncio.create_task(
+                self._persist(session_bus, session.started_mono, session.id)
+            )
             router_task = asyncio.create_task(
-                self._run_router(router, source, detector, chunker, audio_writer)
+                self._run_router(router, source, detector, chunker, audio_writer, session.id)
             )
             self._runtime = _Runtime(
                 session=session,
@@ -331,6 +333,17 @@ class SessionManager:
                 return None
             self._runtime = None
 
+        with log_context(session_id=runtime.session.id):
+            return await self._finish(runtime)
+
+    async def _finish(self, runtime: _Runtime) -> Session:
+        """Drain, close and finalize a stopped session's runtime.
+
+        Split out of :meth:`stop` only so the whole teardown runs inside one
+        ``log_context``: the lines it produces (a drain timeout, a router
+        crash, the capture source closing) belong to the session that is ending
+        even though none of the code emitting them is holding its id.
+        """
         runtime.source.stop()
         status = SessionStatus.COMPLETED
         try:
@@ -392,7 +405,14 @@ class SessionManager:
         detector: SpeechDetector,
         chunker: VadChunker,
         audio_writer: SessionAudioWriter | None,
+        session_id: str,
     ) -> None:
+        # Everything below (the router, the STT backends, the VAD, the capture
+        # task spawned here) logs without ever being told which session it is
+        # serving. Bind it once for this task so those lines can be attributed
+        # to the capture: the dashboard shows them, and they are what the
+        # session's stored "original" log is made of.
+        bind_log_context(session_id=session_id)
         # Decouple capture from STT: a dedicated task drains the mic + VAD into a
         # bounded queue that the router consumes independently, so a slow STT
         # round-trip (e.g. a long sentence) cannot stall frame capture and
@@ -407,7 +427,10 @@ class SessionManager:
         finally:
             await capture_task
 
-    async def _persist(self, session_bus: EventBus[TranscriptEvent], started_mono: float) -> None:
+    async def _persist(
+        self, session_bus: EventBus[TranscriptEvent], started_mono: float, session_id: str
+    ) -> None:
+        bind_log_context(session_id=session_id)  # see _run_router
         async with session_bus.subscribe(reliable=True) as stream:
             async for event in stream:
                 rebased = rebase_transcript(event, started_mono)

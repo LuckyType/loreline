@@ -87,6 +87,11 @@ class Settings(BaseSettings):
         return self.data_dir / "video"
 
     @property
+    def logs_dir(self) -> Path:
+        """Root of the per-version log files (one subdirectory per session)."""
+        return self.data_dir / "logs"
+
+    @property
     def secrets_path(self) -> Path:
         return self.data_dir / "secrets.json"
 

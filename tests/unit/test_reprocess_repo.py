@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest_asyncio
 
+from loreline.bus import EventBus
 from loreline.diarization.openai_diarizer import OpenAIDiarizer
 from loreline.models import (
     DiarizationConfig,
@@ -119,6 +120,7 @@ async def test_build_diarizer_openai_mode_reuses_stored_key(db: Database, tmp_pa
         reprocess=ReprocessRepository(db),
         secrets=secrets,
         audio_store=AudioStore(tmp_path / "audio"),
+        transcript_bus=EventBus(),
         diarizer_factory=_unreachable_factory,  # pyright: ignore[reportArgumentType]
     )
 

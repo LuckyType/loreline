@@ -24,6 +24,7 @@ from loreline.persistence import (
     AudioStore,
     Database,
     GlossaryRepository,
+    LogStore,
     ProviderRepository,
     ReprocessRepository,
     SessionRepository,
@@ -73,6 +74,7 @@ class AppState:
     video_jobs: VideoRepository
     audio_store: AudioStore
     video_store: VideoStore
+    log_store: LogStore
     manager: SessionManager
     reprocess: ReprocessManager
     video: VideoManager
@@ -89,6 +91,7 @@ class AppState:
 def _build_state(
     settings: Settings,
     broadcaster: LogBroadcaster,
+    log_store: LogStore,
     *,
     capture_factory: CaptureFactory | None,
     backend_factory: BackendFactory | None,
@@ -137,6 +140,7 @@ def _build_state(
         reprocess=reprocess_repo,
         secrets=secrets,
         audio_store=audio_store,
+        transcript_bus=transcript_bus,
         backend_factory=backend_factory,
         diarizer_factory=diarizer_factory,
     )
@@ -160,6 +164,7 @@ def _build_state(
         video_jobs=video_repo,
         audio_store=audio_store,
         video_store=video_store,
+        log_store=log_store,
         manager=manager,
         reprocess=reprocess_manager,
         video=video_manager,
@@ -196,8 +201,12 @@ def create_app(
     """
     settings = settings or get_settings()
     broadcaster = LogBroadcaster()
+    log_store = LogStore(settings.logs_dir)
     configure_logging(
-        level=settings.log_level, json_logs=settings.log_json, broadcaster=broadcaster
+        level=settings.log_level,
+        json_logs=settings.log_json,
+        broadcaster=broadcaster,
+        log_store=log_store,
     )
     log = get_logger(__name__)
 
@@ -206,6 +215,7 @@ def create_app(
         state = _build_state(
             settings,
             broadcaster,
+            log_store,
             capture_factory=capture_factory,
             backend_factory=backend_factory,
             diarizer_factory=diarizer_factory,
@@ -217,6 +227,14 @@ def create_app(
         await state.sessions.mark_interrupted()
         await state.reprocess.reconcile()
         await state.video.reconcile()
+        # Retention for the per-version log files. Deleting a session takes its
+        # logs with its audio, so this only finds what an interrupted delete or
+        # a pre-log-store build left behind - which is exactly what nothing
+        # else would ever clean up. Off the event loop: it walks a directory.
+        known = {session.id for session in await state.sessions.list()}
+        pruned = await asyncio.to_thread(state.log_store.prune, known)
+        if pruned:
+            log.info("logs.pruned", sessions=pruned)
         # Rebuild index sidecars for recordings a dead process left behind, in
         # the background - a multi-hour WAV takes minutes of VAD, and startup
         # must not wait on it. The abort event lets shutdown cut it short

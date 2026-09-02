@@ -590,7 +590,15 @@ onDestroy(() => {
 					<LogLine {line} wrap={logWrap} />
 				{/each}
 				{#if shownLogs.length === 0}
-					<span class="text-muted-foreground">No log lines.</span>
+					<!-- This panel carries the running capture's lines only, so it is
+					     empty by design between sessions. Say so rather than letting
+					     it read as a broken feed: every finished run keeps its own log
+					     under Show logs on the session page. -->
+					<span class="text-muted-foreground">
+						{capturing
+							? 'No log lines yet.'
+							: 'Logs appear here while a session is recording. A finished session keeps its own logs on its page.'}
+					</span>
 				{/if}
 			</div>
 		</Card>

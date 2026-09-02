@@ -27,6 +27,7 @@ import type {
 	SummarizeResult,
 	TranscriptEvent,
 	UpdateResult,
+	VersionLogs,
 	VideoGenerateRequest,
 	VideoJob,
 	VideoModelInfo,
@@ -179,6 +180,10 @@ export const api = {
 			`/api/session/${id}/transcript?version=${encodeURIComponent(version)}`,
 			{ method: 'DELETE' },
 		),
+	/** The log lines one transcript version was produced by. The live capture
+	 *  is version 'original'; every re-transcription is its job id. */
+	getVersionLogs: (id: string, version: string) =>
+		request<VersionLogs>(`/api/session/${id}/logs?version=${encodeURIComponent(version)}`),
 	setSpeakerNames: (id: string, names: Record<string, string>) =>
 		request<{ ok: boolean }>(`/api/session/${id}/speakers`, {
 			method: 'PUT',

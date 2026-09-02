@@ -175,6 +175,14 @@ class VideoGenerateRequest(BaseModel):
     seed: int | None = None
 
 
+class VersionLogs(BaseModel):
+    """One transcript version's stored log file."""
+
+    session_id: str
+    version: str
+    logs: str
+
+
 class OkResponse(BaseModel):
     """Generic success acknowledgement."""
 

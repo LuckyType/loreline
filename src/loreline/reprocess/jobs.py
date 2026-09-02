@@ -23,7 +23,7 @@ from loreline.bus import EventBus
 from loreline.diarization.merge import assign_speakers
 from loreline.diarization.provider import create_diarizer
 from loreline.export import variant_rows
-from loreline.logging import get_logger
+from loreline.logging import bind_log_context, get_logger
 from loreline.models import (
     DIARIZE_SOURCE_PREFIX,
     ORIGINAL_VERSION,
@@ -136,6 +136,7 @@ class ReprocessManager:
         reprocess: ReprocessRepository,
         secrets: SecretStore,
         audio_store: AudioStore,
+        transcript_bus: EventBus[TranscriptEvent],
         backend_factory: BackendFactory | None = None,
         diarizer_factory: DiarizerFactory | None = None,
     ) -> None:
@@ -146,6 +147,10 @@ class ReprocessManager:
         self._reprocess = reprocess
         self._secrets = secrets
         self._audio_store = audio_store
+        # The app-wide bus the WebSockets read, not the job-local one below: a
+        # run writes into an existing session's history, so its events have to
+        # reach whoever is watching that session (see _drive).
+        self._bus = transcript_bus
         self._backend_factory = backend_factory or create_backend
         self._diarizer_factory = diarizer_factory or create_diarizer
         self._tasks: dict[str, asyncio.Task[None]] = {}
@@ -271,6 +276,12 @@ class ReprocessManager:
         campaign_id: str | None,
         started_mono: float,
     ) -> None:
+        # Attribute every line this task emits, including the router's and the
+        # backend's - which know nothing about jobs - to the session and the
+        # version being written. That routes them into this version's log file
+        # and keeps them off the dashboard, which shows the live capture only
+        # (see loreline.logging.bind_log_context).
+        bind_log_context(session_id=job.session_id, job_id=job.id)
         job.status = JobStatus.RUNNING
         job.started_at = time.time()
         await self._reprocess.update(job)
@@ -389,6 +400,12 @@ class ReprocessManager:
         close sentinel) is missed. The running count is published to the job row
         as it grows, so the page shows the version filling up rather than a
         motionless "running".
+
+        Each persisted event is also republished on the app-wide bus, tagged
+        with this version's source, so a session-filtered ``/ws/transcript``
+        subscriber sees the text arrive as it is produced rather than only
+        after the job ends. The tag is what keeps it out of the original: a
+        subscriber files an event under the version its ``source`` names.
         """
         source = f"{REPROCESS_SOURCE_PREFIX}{job.id}"
         live = _LiveSegmentCount(job, self._reprocess)
@@ -400,6 +417,7 @@ class ReprocessManager:
                     rebased = rebase_transcript(event, started_mono)
                     tagged = rebased.model_copy(update={"source": source})
                     await self._transcripts.add(tagged)
+                    await self._bus.publish(tagged)
                     count += 1
                     await live.set(count)
             finally:

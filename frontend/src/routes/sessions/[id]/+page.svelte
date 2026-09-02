@@ -29,6 +29,7 @@ import { confirm } from '$lib/confirm.svelte'
 import Dropdown from '$lib/Dropdown.svelte'
 import Foldable from '$lib/Foldable.svelte'
 import GenerateVideoDialog from '$lib/GenerateVideoDialog.svelte'
+import LogLine from '$lib/LogLine.svelte'
 import ModelPicker from '$lib/ModelPicker.svelte'
 import { providerName } from '$lib/stores'
 import TranscriptList from '$lib/TranscriptList.svelte'
@@ -45,6 +46,7 @@ import {
 	type TranscriptEvent,
 	type VideoJob,
 } from '$lib/types'
+import { connect, type LiveSocket } from '$lib/ws'
 
 let detail = $state<SessionDetail | null>(null)
 let providers = $state<ProviderConfig[]>([])
@@ -148,12 +150,65 @@ async function selectVersion(version: string) {
 	}
 }
 
-function selectable(job: ReprocessJob): boolean {
-	return job.status === 'done' && job.segments_added > 0
-}
-
 function inFlight(job: ReprocessJob): boolean {
 	return job.status === 'queued' || job.status === 'running'
+}
+
+/** Whether a row can be opened. A running job counts: it publishes each
+ *  segment as it is written, so its version is worth watching while it fills
+ *  up. A finished one with nothing in it is not (there is nothing to show). */
+function selectable(job: ReprocessJob): boolean {
+	return inFlight(job) || (job.status === 'done' && job.segments_added > 0)
+}
+
+// --- live re-processing ---
+// A running job publishes every segment it persists, so the selected version
+// fills up here instead of appearing all at once when the job ends. The
+// event's `source` names the version that produced it, which is what keeps a
+// re-transcription's text out of the original and out of the other versions.
+let txSock: LiveSocket | null = null
+
+function onLiveEvent(data: string) {
+	let event: TranscriptEvent
+	try {
+		event = JSON.parse(data) as TranscriptEvent
+	} catch {
+		return // ignore a malformed frame
+	}
+	if (event.source !== `reprocess:${selectedVersion}`) return
+	const shown = versionEvents ?? []
+	// selectVersion's fetch and this socket can overlap by a segment.
+	if (shown.some((e) => e.start_ts === event.start_ts && e.text === event.text)) return
+	versionEvents = [...shown, event]
+}
+
+// --- stored logs ---
+let logsOpen = $state(false)
+let logsVersion = $state('original')
+let logsLines = $state<string[]>([])
+let logsError = $state('')
+
+/** Show the log lines one version was produced by.
+ *
+ * Fetched on demand rather than with the version list: a whole session's log
+ * is far larger than the row it belongs to, and nobody reads it until
+ * something about that version looks wrong. */
+async function showLogs(version: string) {
+	logsVersion = version
+	logsLines = []
+	logsError = ''
+	logsOpen = true
+	try {
+		const stored = await api.getVersionLogs(id, version)
+		logsLines = stored.logs.split('\n').filter((line) => line !== '')
+	} catch (err) {
+		logsError =
+			err instanceof ApiError && err.status === 404
+				? 'No logs were stored for this version.'
+				: err instanceof ApiError
+					? err.message
+					: 'failed to load logs'
+	}
 }
 
 /** Delete one re-transcription version, its diarization, and its job rows.
@@ -445,11 +500,15 @@ onMount(async () => {
 	} catch (err) {
 		error = err instanceof ApiError ? err.message : 'failed to load'
 	}
+	// Filtered to this session, so the socket carries its re-processing runs
+	// (and its live capture) and nothing else.
+	txSock = connect(`/ws/transcript?session_id=${encodeURIComponent(id)}`, onLiveEvent)
 })
 
 onDestroy(() => {
 	if (poll) clearInterval(poll)
 	if (videoPoll) clearInterval(videoPoll)
+	txSock?.close()
 })
 </script>
 
@@ -543,8 +602,21 @@ onDestroy(() => {
 								<Badge variant={originalStatus.variant}>{originalStatus.label}</Badge>
 							</TableCell>
 							<!-- No delete for the original: it is the live capture, and unlike
-							     every re-transcription there is no way to produce it again. -->
-							<TableCell></TableCell>
+							     every re-transcription there is no way to produce it again. Its
+							     log is the one worth keeping most, for the same reason. -->
+							<TableCell>
+								<Button
+									variant="ghost"
+									size="sm"
+									title="The log lines this capture was recorded and transcribed by"
+									onclick={(e: MouseEvent) => {
+										e.stopPropagation() // the row click selects the version
+										void showLogs('original')
+									}}
+								>
+									Show logs
+								</Button>
+							</TableCell>
 						</TableRow>
 						{#each transcribeJobs as j (j.id)}
 							<TableRow
@@ -589,20 +661,33 @@ onDestroy(() => {
 									</Badge>
 								</TableCell>
 								<TableCell>
-									<Button
-										variant="ghost"
-										size="sm"
-										disabled={inFlight(j)}
-										title={inFlight(j)
-											? 'Wait for the job to finish'
-											: 'Delete this transcription and its diarization'}
-										onclick={(e: MouseEvent) => {
-											e.stopPropagation() // the row click selects the version
-											void deleteVersion(j)
-										}}
-									>
-										Delete
-									</Button>
+									<div class="flex gap-1">
+										<Button
+											variant="ghost"
+											size="sm"
+											title="The log lines this transcription was produced by"
+											onclick={(e: MouseEvent) => {
+												e.stopPropagation() // the row click selects the version
+												void showLogs(j.id)
+											}}
+										>
+											Show logs
+										</Button>
+										<Button
+											variant="ghost"
+											size="sm"
+											disabled={inFlight(j)}
+											title={inFlight(j)
+												? 'Wait for the job to finish'
+												: 'Delete this transcription and its diarization'}
+											onclick={(e: MouseEvent) => {
+												e.stopPropagation() // the row click selects the version
+												void deleteVersion(j)
+											}}
+										>
+											Delete
+										</Button>
+									</div>
 								</TableCell>
 							</TableRow>
 						{/each}
@@ -831,6 +916,37 @@ onDestroy(() => {
 	{defaults}
 	onqueued={refreshVideoJobs}
 />
+
+<Dialog bind:open={logsOpen}>
+	<DialogContent class="sm:max-w-3xl">
+		<DialogHeader>
+			<DialogTitle>
+				Logs · {logsVersion === 'original' ? 'original' : logsVersion.slice(0, 8)}
+			</DialogTitle>
+			<DialogDescription>
+				What this version was produced by, kept per version: the live view on the Dashboard only
+				holds the last few hundred lines of the running capture.
+			</DialogDescription>
+		</DialogHeader>
+		{#if logsError}
+			<p class="m-0 text-sm text-muted-foreground">{logsError}</p>
+		{:else}
+			<div
+				class="max-h-[60vh] overflow-auto rounded-md bg-accent/40 px-3 py-2 font-mono text-xs leading-relaxed"
+			>
+				{#each logsLines as line, i (i)}
+					<LogLine {line} wrap={false} />
+				{/each}
+				{#if logsLines.length === 0}
+					<span class="text-muted-foreground">Loading…</span>
+				{/if}
+			</div>
+		{/if}
+		<DialogFooter>
+			<Button variant="outline" onclick={() => (logsOpen = false)}>Close</Button>
+		</DialogFooter>
+	</DialogContent>
+</Dialog>
 
 <Dialog bind:open={renameOpen}>
 	<DialogContent class="sm:max-w-md">

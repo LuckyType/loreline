@@ -56,7 +56,9 @@ all STT and diarization run on remote endpoints (cloud APIs or self-hosted LAN s
   Default provider/model are configurable in Settings.
 - **Exports** - txt, md, srt, vtt, json.
 - **Web UI** - SvelteKit SPA served by FastAPI: live transcript, session history,
-  provider/glossary config, live logs, health and alerting.
+  provider/glossary config, live logs, health and alerting. The Dashboard's transcript and
+  log panels show the running capture only; every transcript version (the live capture and
+  each re-processing run) keeps its own log file, readable from the session page.
 - **Ops** - JWT-cookie auth, push alerts, health endpoint, and self-update.
 
 ## Configuration
