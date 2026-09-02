@@ -190,10 +190,16 @@ class TestInlineDiarization:
     def test_gemini_transcribe_diarizes(self) -> None:
         assert supports_inline_diarization(ProviderKind.GEMINI, "gemini-3.5-transcribe")
 
-    def test_connectors_that_discard_speakers_report_false(self) -> None:
-        """Not a provider limitation in every case - OpenRouter's response
-        schema carries `speaker`, but our batch connector reads only `text`."""
-        assert not supports_inline_diarization(ProviderKind.OPENROUTER_STT, "x-ai/grok-stt-1.0")
+    def test_openrouter_grok_stt_diarizes(self) -> None:
+        """The one model in OpenRouter's transcription catalogue that
+        advertises diarization. Needs no request flag - the labels ride along
+        on the verbose_json body, which the connector now parses."""
+        assert supports_inline_diarization(ProviderKind.OPENROUTER_STT, "x-ai/grok-stt-1.0")
+
+    def test_models_that_return_no_speakers_report_false(self) -> None:
+        """Parsing speakers does not conjure them: Whisper produces none, and
+        neither does OpenAI's realtime transcription model."""
+        assert not supports_inline_diarization(ProviderKind.OPENROUTER_STT, "openai/whisper-1")
         assert not supports_inline_diarization(ProviderKind.OPENAI_COMPAT, "whisper-1")
         assert not supports_inline_diarization(ProviderKind.OPENAI, "gpt-live-transcribe")
 

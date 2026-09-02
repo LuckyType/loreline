@@ -85,11 +85,12 @@ _TRANSCRIBE_NAME_MARKERS = ("whisper", "transcribe", "parakeet", "asr", "stt", "
 # itself. That makes it a candidate source for the *remote* diarizer path, not
 # inline STT diarization.
 #
-# Not listed, and why: openrouter_stt reaches models that *can* diarize (e.g.
-# x-ai/grok-stt-1.0, and OpenRouter's response schema does carry `speaker` on
-# both segments and words), but our OpenAI-compatible batch connector reads
-# only the `text` field and discards the rest. That is a wiring gap, not a
-# provider limitation - see stt/backends/openai_compat.py.
+# - https://openrouter.ai/x-ai/grok-stt-1.0 - "transcription with word-level
+#   timestamps, optional speaker diarization, and multichannel audio". It is
+#   the only model in OpenRouter's transcription catalogue that advertises
+#   diarization, and it needs no request flag: the labels simply appear on the
+#   verbose_json body's words/segments, which the OpenAI-compatible connector
+#   now parses.
 _INLINE_DIARIZATION_MODELS: dict[ProviderKind, frozenset[str]] = {
     ProviderKind.DEEPGRAM: frozenset(
         {
@@ -111,6 +112,7 @@ _INLINE_DIARIZATION_MODELS: dict[ProviderKind, frozenset[str]] = {
         }
     ),
     ProviderKind.GEMINI: frozenset({"gemini-3.5-transcribe"}),
+    ProviderKind.OPENROUTER_STT: frozenset({"x-ai/grok-stt-1.0"}),
 }
 
 
