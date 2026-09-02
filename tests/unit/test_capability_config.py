@@ -20,9 +20,13 @@ from loreline.stt.backends import load as load_backends
 
 
 def _transcriber(**overrides: object) -> dict[str, object]:
+    # Marked default because a provider that offers models must mark exactly
+    # one per interaction; a helper that produced an unmarked model would fail
+    # every spec built from it for a reason unrelated to what is under test.
     model: dict[str, object] = {
         "id": "some-model",
         "interactions": ["transcribe"],
+        "default": True,
         "transcribe": {"realtime": False, "batch": True},
     }
     model.update(overrides)
@@ -68,7 +72,7 @@ def test_glossary_supported_requires_a_field_name() -> None:
 
 
 def _summarizer(llm: dict[str, object]) -> dict[str, object]:
-    return {"id": "m", "interactions": ["summarize"], "llm": llm}
+    return {"id": "m", "interactions": ["summarize"], "default": True, "llm": llm}
 
 
 def test_reasoning_without_effort_values_is_allowed() -> None:
@@ -226,6 +230,71 @@ def test_model_cannot_exceed_its_provider_interactions() -> None:
         )
 
 
+def test_two_defaults_for_one_interaction_are_rejected() -> None:
+    """Two would put the answer back where the marker took it from: list order."""
+    with pytest.raises(ValidationError, match="exactly one transcribe model as default"):
+        ProviderSpec.model_validate(_provider(models=[_transcriber(id="a"), _transcriber(id="b")]))
+
+
+def test_offered_models_without_a_default_are_rejected() -> None:
+    """None leaves the health probe with no model to name for the kind."""
+    with pytest.raises(ValidationError, match="exactly one transcribe model as default"):
+        ProviderSpec.model_validate(_provider(models=[_transcriber(default=False)]))
+
+
+def test_a_provider_that_curates_nothing_needs_no_default() -> None:
+    """The self-hosted kind's catalogue is whatever the operator installed, so
+    there is no model here to vouch for and its connector needs none."""
+    spec = ProviderSpec.model_validate(
+        _provider(
+            hosting="selfhosted",
+            auth="optional",
+            key_url=None,
+            models=[],
+            model_patterns=[
+                {"match": "*", "interactions": ["transcribe"], "transcribe": {"batch": True}}
+            ],
+        )
+    )
+    assert spec.default_model(Interaction.TRANSCRIBE) is None
+
+
+def test_a_hidden_model_cannot_be_the_default() -> None:
+    """Hidden means its connector is unverified - exactly what must not run
+    when nobody chose."""
+    with pytest.raises(ValidationError, match="hidden and cannot be a default"):
+        ProviderSpec.model_validate(_provider(models=[_transcriber(hidden=True)]))
+
+
+def test_a_retiring_model_cannot_be_the_default() -> None:
+    """The failure mode this whole marker exists for: the connectors' hardcoded
+    defaults named whisper-1 and nova-2 long after both were superseded. Dating
+    the marked model now fails the file, which forces the successor to be
+    picked in the same edit."""
+    with pytest.raises(ValidationError, match="cannot be a default"):
+        ProviderSpec.model_validate(_provider(models=[_transcriber(deprecated="2027-02-26")]))
+
+
+def test_shipped_config_marks_one_default_per_offered_interaction() -> None:
+    """The guard on the real file, kind by kind and interaction by interaction.
+
+    A default is per (kind, interaction) because a single provider row serves
+    several: OpenRouter transcribes, summarizes and generates video, and the
+    bug this replaced was a "default" that meant the first model of *any*
+    interaction, which handed a chat model to a transcription provider.
+    """
+    for kind, provider in load().providers.items():
+        for interaction in provider.interactions:
+            offered = provider.models_for(interaction)
+            chosen = provider.default_model(interaction)
+            if not offered:
+                assert chosen is None, f"{kind.value} curates no {interaction.value} models"
+                continue
+            assert chosen in {m.id for m in offered}, (
+                f"{kind.value}/{interaction.value} has no usable default"
+            )
+
+
 def test_cloud_key_provider_needs_a_key_url() -> None:
     """The setup wizard links this; a blank link is a dead end for the user."""
     with pytest.raises(ValidationError, match="key_url"):
@@ -269,7 +338,12 @@ def test_find_prefers_exact_id_then_pattern() -> None:
 
 
 def test_models_for_scopes_by_interaction() -> None:
-    brain: dict[str, object] = {"id": "brain", "interactions": ["summarize"], "llm": {}}
+    brain: dict[str, object] = {
+        "id": "brain",
+        "interactions": ["summarize"],
+        "default": True,
+        "llm": {},
+    }
     spec = ProviderSpec.model_validate(
         _provider(
             interactions=["transcribe", "summarize"],
@@ -299,6 +373,7 @@ def test_load_reads_a_file(tmp_path: Path) -> None:
                 models:
                   - id: m
                     interactions: [transcribe]
+                    default: true
                     transcribe: {{batch: true}}
             """
         ).rstrip()

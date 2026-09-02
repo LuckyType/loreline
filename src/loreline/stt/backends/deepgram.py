@@ -38,7 +38,6 @@ from loreline.stt.registry import register
 log = get_logger(__name__)
 
 _DEFAULT_URL = "wss://api.deepgram.com/v1/listen"
-_DEFAULT_MODEL = "nova-2"
 # Safety net per received frame; CloseStream -> Metadata is the real
 # end-of-flush signal, and results stream back within a couple of seconds.
 _RECV_TIMEOUT_S = 10.0
@@ -51,25 +50,36 @@ class DeepgramBackend:
         self,
         config: ProviderConfig,
         *,
+        model: str | None = None,
         api_key: str | None = None,
         language: str | None = None,
     ) -> None:
         self.config = config
         self._api_key = api_key
         self._language = language or config.language
-        self._model = config.model or _DEFAULT_MODEL
+        self._model = model
         self._url = config.base_url or _DEFAULT_URL
 
     def _build_url(self, glossary: Glossary | None) -> str:
-        params: list[tuple[str, str]] = [
-            ("model", self._model),
-            ("language", self._language),
-            ("encoding", "linear16"),
-            ("sample_rate", str(self.config.sample_rate)),
-            ("channels", "1"),
-            ("diarize", "true"),
-            ("punctuate", "true"),
-        ]
+        params: list[tuple[str, str]] = []
+        # Sent only when one was resolved, the way AssemblyAI's speech_model is:
+        # Deepgram applies its own current default to a request that names no
+        # model, which is a better thing to inherit than a value pinned here.
+        # This connector used to pin nova-2, which stayed put long after nova-3
+        # shipped and quietly cost every session the newer model's keyterm
+        # biasing (nova-2 takes the legacy `keywords` field instead).
+        if self._model:
+            params.append(("model", self._model))
+        params.extend(
+            [
+                ("language", self._language),
+                ("encoding", "linear16"),
+                ("sample_rate", str(self.config.sample_rate)),
+                ("channels", "1"),
+                ("diarize", "true"),
+                ("punctuate", "true"),
+            ]
+        )
         params.extend(("keyterm", term) for term in glossary_terms(glossary))
         return f"{self._url}?{urlencode(params)}"
 
@@ -176,7 +186,7 @@ def _parse_results(message: dict[str, object], *, offset: float) -> tuple[str, l
 
 @register(ProviderKind.DEEPGRAM, realtime=True)
 def _factory(  # pyright: ignore[reportUnusedFunction]
-    config: ProviderConfig, secrets: SecretStore
+    config: ProviderConfig, secrets: SecretStore, model: str | None
 ) -> DeepgramBackend:
     api_key = secrets.get(config.auth_ref) if config.auth_ref else None
-    return DeepgramBackend(config, api_key=api_key)
+    return DeepgramBackend(config, model=model, api_key=api_key)

@@ -11,6 +11,14 @@
 # we vouch for. A model absent from here is unknown, never unsupported, and the
 # strict-filtering setting decides whether unknown models are offered.
 #
+# One model per provider and interaction carries `default: true`: the model
+# this file vouches for when a connector must name one and nobody chose. It is
+# scoped by interaction because a provider row serves several at once, and it
+# is marked rather than inferred from list order so reordering a list cannot
+# silently change what runs. The loader enforces exactly one per offered
+# interaction and refuses a hidden or retiring model, which is what makes the
+# stale connector constants this replaced impossible to reintroduce.
+#
 # Researched against official vendor documentation on 2026-09-02. Per-claim doc
 # URLs are kept inline as comments. Schema and validation rules live in
 # loreline/capability_config.py; every rule there exists because getting a leaf
@@ -64,6 +72,10 @@ providers:
       - id: nova-3
         label: Nova-3
         interactions: [transcribe]
+        # Deepgram's current flagship, and the only one taking the modern
+        # `keyterm` biasing field - the constant this replaces still named
+        # nova-2, which silently fell back to legacy `keywords`.
+        default: true
         transcribe:
           # https://developers.deepgram.com/docs/model (Nova-3 listed for Pre-recorded + Streaming)
           realtime: true
@@ -194,6 +206,9 @@ providers:
       - id: universal-3-5-pro
         label: Universal-3.5 Pro
         interactions: [transcribe]
+        # The streaming endpoint's own default too, so naming it here and
+        # omitting it from the request would pick the same model.
+        default: true
         transcribe:
           # "available for both pre-recorded (async) and streaming use cases"
           # async: speech_models: ["universal-3-5-pro"]; streaming: speech_model=universal-3-5-pro (the default)
@@ -283,6 +298,11 @@ providers:
       - id: gpt-transcribe
         label: GPT Transcribe
         interactions: [transcribe]
+        # The batch workhorse, and the model the batch factory already
+        # named. It settles the transport for a config that chose nothing:
+        # the health probe then hits /models rather than opening a Realtime
+        # session, which exercises the same key more cheaply.
+        default: true
         transcribe:
           realtime: true
           batch: true
@@ -456,6 +476,9 @@ providers:
       - id: gpt-5.6-luna
         label: GPT-5.6 Luna
         interactions: [summarize]
+        # Cheapest of the family, per the price note above: a summary is one
+        # long-context call per session, so this is the one to run by default.
+        default: true
         llm:
           reasoning: {supported: true, efforts: [none, low, medium, high, xhigh, max]}
           context_length: 1050000
@@ -536,6 +559,9 @@ providers:
       - id: openai/gpt-5.6-luna
         label: "GPT-5.6 Luna"
         interactions: [summarize]
+        # Same reasoning as the direct OpenAI entry, and the successor to the
+        # gpt-4o-mini the deleted constant named.
+        default: true
         llm:
           reasoning: {supported: true, efforts: [max, xhigh, high, medium, low, none]}
           context_length: 1050000
@@ -719,6 +745,9 @@ providers:
       - id: openai/whisper-large-v3-turbo
         label: "Whisper Large V3 Turbo"
         interactions: [transcribe]
+        # Cheap, fast and multilingual - re-processing replays a whole
+        # session's audio, so throughput is what matters here.
+        default: true
         transcribe:
           realtime: false
           batch: true
@@ -881,6 +910,11 @@ providers:
       - id: google/veo-3.1-fast
         label: "Veo 3.1 Fast"
         interactions: [video]
+        # Nothing reads a video default today (the generate dialog makes the
+        # GM pick, and the API requires it), but every offered interaction
+        # states one so the rule stays one rule. The fast variant: same
+        # durations and resolutions as Veo 3.1 for less money per clip.
+        default: true
         video:
           durations: [4, 6, 8]
           resolutions: ["720p", "1080p", "4K"]
@@ -1033,6 +1067,10 @@ providers:
       - id: gemini-3.5-transcribe
         label: Gemini 3.5 Transcribe
         interactions: [transcribe]
+        # The only offered Gemini transcription model: the -live variant is
+        # hidden until its connector is verified, and a hidden model may not
+        # be a default.
+        default: true
         transcribe:
           realtime: false
           batch: true
@@ -1105,6 +1143,13 @@ providers:
       # - id: gemini-3.5-flash
       # label: Gemini 3.5 Flash
       # interactions: [summarize]
+      # # The summarize default when this block is enabled: the only model
+      # # here that accepts every reasoning effort the OpenAI-compatible shim
+      # # can send (3.8-flash rejects "minimal", flash-lite rejects "none",
+      # # 3.1-pro rejects both), so it is the one that cannot fail a request
+      # # over a level carried across from another provider. Marked rather
+      # # than inferred, and the loader will insist on exactly one here.
+      # default: true
       # llm:
       # reasoning:
       # supported: true
@@ -1178,6 +1223,11 @@ providers:
     base_url: null            # user supplied, required
     catalog_endpoint: "{base_url}/v1/models"
     interactions: [transcribe, summarize]
+    # No curated models, so no `default: true` anywhere below, and none is
+    # missing: any id written here would be a guess about a server we have
+    # never seen. The connector sends no model when it has none, and the one
+    # caller that reaches it without one is the health probe
+    # (GET {base_url}/v1/models), which names no model either way.
     models: []                # discovered at runtime
     # Ordered most specific first, because find() takes the first match. The
     # English-only rule has to precede the general one or "*whisper*" swallows

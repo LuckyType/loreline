@@ -25,15 +25,26 @@ from loreline.secrets import SecretStore
 from loreline.settings import Settings
 from loreline.web.app import create_app
 
+# Any model id: the fake backend never looks at it, but the API requires one -
+# a provider row carries no model, so the request is where it is decided.
+_MODEL = "fake-model"
+
 _SAMPLE_RATE = 16000
 _FRAME_BYTES = int(_SAMPLE_RATE * 0.02) * 2  # 20 ms of int16 mono
 
 
 class FakeBackend:
-    """STT backend emitting one final event per utterance."""
+    """STT backend emitting one final event per utterance.
 
-    def __init__(self, config: ProviderConfig, _secrets: SecretStore) -> None:
+    Takes the model the same way a real factory does (config, secrets, model),
+    and keeps it so a test can assert which one the session resolved.
+    """
+
+    def __init__(
+        self, config: ProviderConfig, _secrets: SecretStore, model: str | None = None
+    ) -> None:
         self.config = config
+        self.model = model
 
     async def transcribe(
         self,
@@ -68,9 +79,13 @@ class GlossaryRecordingBackend(FakeBackend):
     """
 
     def __init__(
-        self, config: ProviderConfig, secrets: SecretStore, seen: list[object] | None = None
+        self,
+        config: ProviderConfig,
+        secrets: SecretStore,
+        model: str | None = None,
+        seen: list[object] | None = None,
     ) -> None:
-        super().__init__(config, secrets)
+        super().__init__(config, secrets, model)
         self.seen: list[object] = seen if seen is not None else []
 
     async def transcribe(
@@ -152,7 +167,9 @@ async def _create_provider(client: AsyncClient) -> str:
 async def test_session_lifecycle(session_client: AsyncClient) -> None:
     pid = await _create_provider(session_client)
 
-    start = await session_client.post("/api/session/start", json={"primary_provider": pid})
+    start = await session_client.post(
+        "/api/session/start", json={"primary_provider": pid, "model": _MODEL}
+    )
     assert start.status_code == 201
     session_id = start.json()["id"]
 
@@ -172,26 +189,35 @@ async def test_session_lifecycle(session_client: AsyncClient) -> None:
 
 
 async def test_start_unknown_provider(session_client: AsyncClient) -> None:
-    resp = await session_client.post("/api/session/start", json={"primary_provider": "missing"})
+    resp = await session_client.post(
+        "/api/session/start", json={"primary_provider": "missing", "model": _MODEL}
+    )
     assert resp.status_code == 404
 
 
 async def test_double_start_conflicts(session_client: AsyncClient) -> None:
     pid = await _create_provider(session_client)
-    first = await session_client.post("/api/session/start", json={"primary_provider": pid})
+    first = await session_client.post(
+        "/api/session/start", json={"primary_provider": pid, "model": _MODEL}
+    )
     assert first.status_code == 201
-    second = await session_client.post("/api/session/start", json={"primary_provider": pid})
+    second = await session_client.post(
+        "/api/session/start", json={"primary_provider": pid, "model": _MODEL}
+    )
     assert second.status_code == 409
     await session_client.post("/api/session/stop")
 
 
-async def test_start_overrides_model(session_settings: Settings) -> None:
-    """A `model` in the start request overrides the provider's stored model."""
+async def test_start_names_the_model_for_the_backend(session_settings: Settings) -> None:
+    """The start request's model is what the connector is built with.
+
+    It is also the only source now: the provider row holds none, so this is
+    where a session's model is decided, full stop."""
     captured: dict[str, str | None] = {}
 
-    def factory(config: ProviderConfig, secrets: SecretStore) -> FakeBackend:
-        captured["model"] = config.model
-        return FakeBackend(config, secrets)
+    def factory(config: ProviderConfig, secrets: SecretStore, model: str | None) -> FakeBackend:
+        captured["model"] = model
+        return FakeBackend(config, secrets, model)
 
     app = create_app(
         session_settings,
@@ -211,14 +237,15 @@ async def test_start_overrides_model(session_settings: Settings) -> None:
             await ac.post("/api/session/stop")
 
 
-async def test_start_overrides_fallback_model(session_settings: Settings) -> None:
-    """`fallback_model` overrides the *fallback* provider's model, independently
-    of the primary's - the two providers have separate model lists."""
+async def test_start_names_the_fallback_model_separately(session_settings: Settings) -> None:
+    """`fallback_model` names the *fallback* provider's model, independently of
+    the primary's - the two providers have separate model lists, so one pick
+    cannot serve both."""
     seen: list[str | None] = []
 
-    def factory(config: ProviderConfig, secrets: SecretStore) -> FakeBackend:
-        seen.append(config.model)
-        return FakeBackend(config, secrets)
+    def factory(config: ProviderConfig, secrets: SecretStore, model: str | None) -> FakeBackend:
+        seen.append(model)
+        return FakeBackend(config, secrets, model)
 
     app = create_app(
         session_settings,
@@ -250,8 +277,10 @@ async def test_start_applies_the_glossary_unless_switched_off(session_settings: 
     off means the backend is handed no glossary at all, not an empty one."""
     seen: list[object] = []
 
-    def factory(config: ProviderConfig, secrets: SecretStore) -> GlossaryRecordingBackend:
-        return GlossaryRecordingBackend(config, secrets, seen)
+    def factory(
+        config: ProviderConfig, secrets: SecretStore, model: str | None
+    ) -> GlossaryRecordingBackend:
+        return GlossaryRecordingBackend(config, secrets, model, seen)
 
     app = create_app(
         session_settings,
@@ -265,14 +294,15 @@ async def test_start_applies_the_glossary_unless_switched_off(session_settings: 
             pid = await _create_provider(ac)
             await ac.put("/api/glossary", json={"terms": ["Drakonia"]})
 
-            await ac.post("/api/session/start", json={"primary_provider": pid})
+            await ac.post("/api/session/start", json={"primary_provider": pid, "model": _MODEL})
             await ac.post("/api/session/stop")
             assert seen, "the backend was never asked to transcribe"
             assert [getattr(g, "terms", None) for g in seen] == [["Drakonia"]] * len(seen)
 
             seen.clear()
             await ac.post(
-                "/api/session/start", json={"primary_provider": pid, "use_glossary": False}
+                "/api/session/start",
+                json={"primary_provider": pid, "model": _MODEL, "use_glossary": False},
             )
             await ac.post("/api/session/stop")
             assert seen, "the backend was never asked to transcribe"
@@ -291,7 +321,9 @@ async def test_start_disabled_provider_conflicts(session_client: AsyncClient) ->
         json={"name": "Fake", "kind": "openai_compat", "protocol": "http_batch", "enabled": False},
     )
     assert disabled.status_code == 200
-    resp = await session_client.post("/api/session/start", json={"primary_provider": pid})
+    resp = await session_client.post(
+        "/api/session/start", json={"primary_provider": pid, "model": _MODEL}
+    )
     assert resp.status_code == 409
     assert "disabled" in resp.json()["detail"]
 
@@ -317,7 +349,9 @@ async def test_merge_concatenates_audio(tmp_path: Path) -> None:
 
             ids: list[str] = []
             for _ in range(2):
-                start = await client.post("/api/session/start", json={"primary_provider": pid})
+                start = await client.post(
+                    "/api/session/start", json={"primary_provider": pid, "model": _MODEL}
+                )
                 ids.append(start.json()["id"])
                 await client.post("/api/session/stop")
 
@@ -343,7 +377,8 @@ async def test_merge_concatenates_audio(tmp_path: Path) -> None:
 
             # ...which makes the merged session re-processable end to end.
             enqueue = await client.post(
-                "/api/reprocess", json={"session_id": merged["id"], "provider_id": pid}
+                "/api/reprocess",
+                json={"session_id": merged["id"], "provider_id": pid, "model": _MODEL},
             )
             assert enqueue.status_code == 202
             job_id = enqueue.json()["id"]
@@ -389,7 +424,9 @@ async def test_stop_returns_despite_hung_backend(
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             pid = await _create_provider(client)
-            start = await client.post("/api/session/start", json={"primary_provider": pid})
+            start = await client.post(
+                "/api/session/start", json={"primary_provider": pid, "model": _MODEL}
+            )
             session_id = start.json()["id"]
             await asyncio.sleep(0.1)  # let capture hand the utterance to the hung backend
 
@@ -429,7 +466,9 @@ async def test_startup_rebuilds_orphaned_index(
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             pid = await _create_provider(client)
-            start = await client.post("/api/session/start", json={"primary_provider": pid})
+            start = await client.post(
+                "/api/session/start", json={"primary_provider": pid, "model": _MODEL}
+            )
             session_id = start.json()["id"]
             await client.post("/api/session/stop")
         store = app.state.ctx.audio_store  # pyright: ignore[reportAny]

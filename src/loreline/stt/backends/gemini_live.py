@@ -58,7 +58,6 @@ _DEFAULT_URL = (
     "wss://generativelanguage.googleapis.com/ws/"
     "google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
 )
-_DEFAULT_MODEL = "gemini-3.5-transcribe-live"
 # The documented chunk cadence; at 16 kHz s16le that is 3200 bytes per message.
 _CHUNK_MS = 100
 _MS_PER_S = 1000
@@ -92,13 +91,14 @@ class GeminiLiveBackend:
         self,
         config: ProviderConfig,
         *,
+        model: str | None = None,
         api_key: str | None = None,
         language: str | None = None,
     ) -> None:
         self.config = config
         self._api_key = api_key
         self._language = language or config.language
-        self._model = config.model or _DEFAULT_MODEL
+        self._model = model
         self._url = config.base_url or _DEFAULT_URL
 
     def _session_url(self) -> str:
@@ -116,14 +116,18 @@ class GeminiLiveBackend:
         transcription: dict[str, object] = {
             "languageCodes": [self._language] if self._language else []
         }
-        model = self._model if "/" in self._model else f"models/{self._model}"
-        return {
-            "setup": {
-                "model": model,
-                "generationConfig": {"responseModalities": ["TEXT"]},
-                "inputAudioTranscription": transcription,
-            }
+        setup: dict[str, object] = {
+            "generationConfig": {"responseModalities": ["TEXT"]},
+            "inputAudioTranscription": transcription,
         }
+        # Required by the protocol, and this kind always resolves one (see the
+        # Gemini default in capabilities.yaml). Omitted rather than replaced
+        # with a guess if that marker ever goes missing: the service then says
+        # which field is absent, where a substituted model id would run the
+        # wrong one silently.
+        if self._model:
+            setup["model"] = self._model if "/" in self._model else f"models/{self._model}"
+        return {"setup": setup}
 
     def _audio_message(self, chunk: bytes) -> dict[str, object]:
         return {
@@ -229,7 +233,7 @@ def _audio_chunks(pcm: bytes, sample_rate: int) -> list[bytes]:
 
 @register(ProviderKind.GEMINI, realtime=True)
 def _factory(  # pyright: ignore[reportUnusedFunction]
-    config: ProviderConfig, secrets: SecretStore
+    config: ProviderConfig, secrets: SecretStore, model: str | None
 ) -> GeminiLiveBackend:
     api_key = secrets.get(config.auth_ref) if config.auth_ref else None
-    return GeminiLiveBackend(config, api_key=api_key)
+    return GeminiLiveBackend(config, model=model, api_key=api_key)

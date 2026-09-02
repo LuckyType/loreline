@@ -250,6 +250,22 @@ class ModelSpec(_Strict):
     # connector that is written but unverified against the real API: flipping
     # one flag here is the whole release step.
     hidden: bool = False
+    # The model this file vouches for when a connector must name one and
+    # nobody chose: the health probe in POST /providers/{id}/test is the only
+    # caller left, since every action route now requires a model. Marked here,
+    # per model, rather than derived from list order, because "first entry
+    # wins" is silently wrong the moment someone reorders the list, and it is
+    # scoped by interaction because one provider row serves several: an
+    # OpenRouter entry that transcribes, summarizes and generates video has no
+    # single correct model. A model marked here defaults for every interaction
+    # it declares, which is why the validator below refuses two defaults for
+    # the same one. It replaces the _DEFAULT_MODEL constants the connectors
+    # used to carry, all four of which had gone stale (whisper-1 deprecated,
+    # nova-2 on the legacy keyword field, gpt-4o-mini absent from this file
+    # entirely) - which is precisely the hand-maintained drift this file
+    # exists to end, so the default now lives next to the deprecation date
+    # that invalidates it.
+    default: bool = False
     # Vendor-announced sunset, ISO date. A property of the model as a whole,
     # not of one capability: OpenAI is retiring whole transcription models, and
     # the Sora video models, on stated dates. Shown as a warning beside the
@@ -285,6 +301,28 @@ class ModelSpec(_Strict):
                 )
         if not self.interactions:
             raise ValueError(f"model {self.id!r} declares no interactions")
+        return self
+
+    @model_validator(mode="after")
+    def _default_is_one_we_would_offer(self) -> Self:
+        """A default may be neither hidden nor retiring.
+
+        Both would be a default nobody can see is wrong: a hidden model is one
+        whose connector is unverified, and a dated model is one the vendor has
+        announced it will stop serving. Failing here is the point - adding a
+        sunset date to the marked model is exactly the moment someone has to
+        choose the next one, which is what the constants this replaces never
+        forced anyone to do.
+        """
+        if not self.default:
+            return self
+        if self.hidden:
+            raise ValueError(f"model {self.id!r} is hidden and cannot be a default")
+        if self.deprecated:
+            raise ValueError(
+                f"model {self.id!r} retires on {self.deprecated} and cannot be a default; "
+                "mark a current model instead"
+            )
         return self
 
     def capabilities_for(
@@ -360,6 +398,31 @@ class ProviderSpec(_Strict):
             raise ValueError(f"cloud provider {self.label!r} needs a key_url for the setup wizard")
         return self
 
+    @model_validator(mode="after")
+    def _one_default_per_offered_interaction(self) -> Self:
+        """Exactly one default wherever this provider offers models at all.
+
+        Two would make the answer depend on list order, which is the failure
+        the marker exists to avoid; none would leave a connector with no model
+        to name. A kind whose catalogue is discovered at runtime lists no
+        models and therefore marks none: the self-hosted one is the case where
+        any default we could write down would be a guess about someone else's
+        server, and its connector needs none (its health probe is
+        ``GET /models``, and every action route now carries a chosen model).
+        """
+        for interaction in self.interactions:
+            offered = self.models_for(interaction)
+            if not offered:
+                continue
+            defaults = [m.id for m in offered if m.default]
+            if len(defaults) != 1:
+                found = ", ".join(defaults) or "none"
+                raise ValueError(
+                    f"provider {self.label!r} must mark exactly one {interaction.value} "
+                    f"model as default (found: {found})"
+                )
+        return self
+
     def find(self, model_id: str) -> ModelSpec | ModelPattern | None:
         """Curated entry for a model id, by exact match then by glob.
 
@@ -380,6 +443,16 @@ class ProviderSpec(_Strict):
     def models_for(self, interaction: Interaction) -> list[ModelSpec]:
         """Models offered for an interaction. Hidden entries are excluded."""
         return [m for m in self.models if interaction in m.interactions and not m.hidden]
+
+    def default_model(self, interaction: Interaction) -> str | None:
+        """The model marked default for an interaction, or None.
+
+        None means this provider curates no catalogue for it (the self-hosted
+        kind), never "pick something plausible": a connector that gets None
+        omits the model and lets the endpoint apply its own, which is the only
+        honest answer for a server whose models we have never seen.
+        """
+        return next((m.id for m in self.models_for(interaction) if m.default), None)
 
     def annotations_for(self, interaction: Interaction) -> list[ModelSpec | ModelPattern]:
         """Every capability source for an interaction, models and patterns.

@@ -58,9 +58,12 @@ _RECV_TIMEOUT_S = 15.0
 class AssemblyAIBackend:
     """Streaming transcription with inline diarization via AssemblyAI v3."""
 
-    def __init__(self, config: ProviderConfig, *, api_key: str | None = None) -> None:
+    def __init__(
+        self, config: ProviderConfig, *, model: str | None = None, api_key: str | None = None
+    ) -> None:
         self.config = config
         self._api_key = api_key
+        self._model = model
         self._language = config.language
         self._url = config.base_url or _DEFAULT_URL
 
@@ -75,8 +78,8 @@ class AssemblyAIBackend:
         # own current default (universal-3-5-pro), which is a better thing to
         # inherit than a value pinned here. Until this was wired the model
         # picker had no effect at all on what AssemblyAI ran.
-        if self.config.model:
-            params.append(("speech_model", self.config.model))
+        if self._model:
+            params.append(("speech_model", self._model))
         # Requested unconditionally, matching the Deepgram connector: the
         # backend always asks for speakers and the router decides whether to
         # use them (see stt/router.py's DiarizationMode.INLINE branch), so the
@@ -205,7 +208,7 @@ def _parse_words(message: dict[str, object], *, offset: float) -> list[Word]:
 
 @register(ProviderKind.ASSEMBLYAI, realtime=True)
 def _factory(  # pyright: ignore[reportUnusedFunction]
-    config: ProviderConfig, secrets: SecretStore
+    config: ProviderConfig, secrets: SecretStore, model: str | None
 ) -> AssemblyAIBackend:
     api_key = secrets.get(config.auth_ref) if config.auth_ref else None
-    return AssemblyAIBackend(config, api_key=api_key)
+    return AssemblyAIBackend(config, model=model, api_key=api_key)

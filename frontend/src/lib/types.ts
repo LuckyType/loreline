@@ -98,6 +98,12 @@ export interface ModelSpec {
 	/** Present but not offered: the release gate for a connector that is
 	 *  written but unverified. No picker may ever list one. */
 	hidden: boolean
+	/** The model this config vouches for on this kind, for each interaction it
+	 *  declares, when a connector must name one and nobody chose. Server-side
+	 *  only: the pickers here seed from the action default and then the
+	 *  provider's favourites, and deliberately do not fall back to this - a
+	 *  default that is right for a health probe is not a recommendation. */
+	default: boolean
 	/** Vendor-announced sunset, ISO date. Warned about, never hidden. */
 	deprecated: string | null
 	transcribe: TranscribeCapabilities | null
@@ -254,7 +260,9 @@ export interface ProviderConfig {
 	base_url: string | null
 	auth_ref: string | null
 	protocol: ProtocolKind
-	model: string | null
+	/** No `model`: a row serves every interaction its kind declares, so one
+	 *  stored model cannot be right for all of them. Each picker chooses per
+	 *  request; `favorite_models` is the row's shortlist, not its choice. */
 	favorite_models: string[]
 	sample_rate: number
 	language: string
@@ -270,7 +278,6 @@ export interface ProviderCreate {
 	kind: ProviderKind
 	protocol: ProtocolKind
 	base_url?: string | null
-	model?: string | null
 	favorite_models?: string[]
 	sample_rate?: number
 	language?: string
@@ -340,7 +347,8 @@ export interface Session {
 
 export interface SummarizeRequest {
 	provider_id: string
-	model?: string | null
+	/** Required by the API, and recorded as the summary's model. */
+	model: string
 	/** Only meaningful for a model whose ModelInfo.supports_reasoning is true. */
 	reasoning_effort?: string | null
 }
@@ -408,7 +416,10 @@ export interface StartSessionRequest {
 	fallback_provider?: string | null
 	campaign_id?: string | null
 	device?: number | string | null
-	model?: string | null
+	/** Required by the API: nothing else decides which model transcribes. */
+	model: string
+	/** Required as soon as a fallback provider is named - it has its own model
+	 *  list, so the primary's choice means nothing to it. */
 	fallback_model?: string | null
 	diarization?: DiarizationConfig
 	use_glossary?: boolean
@@ -441,6 +452,7 @@ export interface ReprocessRequest {
 	provider_id?: string
 	operation?: 'transcribe' | 'diarize'
 	diarization?: DiarizationConfig
+	/** Required by the API for a "transcribe" job, ignored for "diarize". */
 	model?: string | null
 	target?: string
 	use_glossary?: boolean

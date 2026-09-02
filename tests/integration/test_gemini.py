@@ -20,6 +20,9 @@ from loreline.models import Glossary, Protocol, ProviderConfig, ProviderKind, Tr
 from loreline.stt.backends.gemini import GeminiSTTBackend
 
 BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
+# Passed in explicitly, the way the registry passes it: the connector carries no
+# default of its own any more (capabilities.yaml holds the one default there is).
+MODEL = "gemini-3.5-transcribe"
 
 
 def _config() -> ProviderConfig:
@@ -83,7 +86,7 @@ async def test_transcribe_maps_words_onto_session_time() -> None:
         )
 
     async with _client(handler) as client:
-        backend = GeminiSTTBackend(_config(), client=client, language="de-DE")
+        backend = GeminiSTTBackend(_config(), model=MODEL, client=client, language="de-DE")
         events: list[TranscriptEvent] = [
             e
             async for e in backend.transcribe(
@@ -104,7 +107,7 @@ async def test_transcribe_maps_words_onto_session_time() -> None:
     assert event.speaker == "Speaker spk_1"
 
     body = captured[0]
-    assert body["model"] == "gemini-3.5-transcribe"
+    assert body["model"] == MODEL
     audio = body["input"][0]
     assert audio["mime_type"] == "audio/wav"
     # Inline audio is base64 of a real WAV container, not raw PCM.

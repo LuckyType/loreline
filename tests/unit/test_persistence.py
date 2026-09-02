@@ -36,6 +36,7 @@ from loreline.web.schemas import ActionDefaults
 _V_DROP_GOOGLE = 10  # v11: delete rows of the removed Google STT v2 kind
 _V_MERGE_KINDS = 11  # v12: fold openrouter_stt / openai_chat onto merged kinds
 _V_DROP_VOSK = 14  # v15: delete rows of the removed vosk kind and what named them
+_V_DROP_PROVIDER_MODEL = 15  # v16: drop providers.model, chosen per request now
 
 
 @pytest_asyncio.fixture
@@ -57,7 +58,7 @@ async def test_migrations_idempotent(tmp_path: Path) -> None:
         async with database.connection.execute("SELECT MAX(version) FROM schema_version;") as cur:
             row = await cur.fetchone()
         assert row is not None
-        assert row[0] == 15
+        assert row[0] == 16
 
 
 async def test_glossary_get_effective_merges_default_and_campaign(db: Database) -> None:
@@ -131,7 +132,7 @@ async def test_provider_roundtrip(db: Database) -> None:
         base_url=None,
         auth_ref="deepgram",
         protocol=Protocol.WS,
-        model="nova-3",
+        favorite_models=["nova-3"],
         capabilities=ProviderCaps(streaming=True, inline_diarization=True, vocab_param="keyterm"),
     )
     await repo.upsert(provider)
@@ -198,10 +199,10 @@ async def test_migration_removes_rows_of_the_dropped_google_kind(tmp_path: Path)
         await conn.execute(
             """
             INSERT INTO providers
-                (id, name, kind, base_url, auth_ref, protocol, model, sample_rate,
+                (id, name, kind, base_url, auth_ref, protocol, sample_rate,
                  language, capabilities, enabled)
             VALUES ('g1', 'Google STT v2', 'google', 'my-project', NULL, 'grpc',
-                    'chirp_2', 16000, 'de', '{}', 1);
+                    16000, 'de', '{}', 1);
             """
         )
         # Rewind past the removal migration so re-connecting replays it, the
@@ -239,10 +240,10 @@ async def test_migration_removes_the_dropped_vosk_kind_and_its_references(
         await conn.execute(
             """
             INSERT INTO providers
-                (id, name, kind, base_url, auth_ref, protocol, model, sample_rate,
+                (id, name, kind, base_url, auth_ref, protocol, sample_rate,
                  language, capabilities, enabled)
             VALUES ('v1', 'Vosk server', 'vosk', 'ws://localhost:2700', NULL, 'ws',
-                    NULL, 16000, 'de', '{}', 1);
+                    16000, 'de', '{}', 1);
             """
         )
         await conn.execute(
@@ -332,9 +333,9 @@ async def test_migration_folds_retired_kinds_onto_the_merged_ones(tmp_path: Path
             await conn.execute(
                 """
                 INSERT INTO providers
-                    (id, name, kind, base_url, auth_ref, protocol, model, sample_rate,
+                    (id, name, kind, base_url, auth_ref, protocol, sample_rate,
                      language, capabilities, enabled)
-                VALUES (?, ?, ?, ?, NULL, 'http_batch', NULL, 16000, 'de', '{}', 1);
+                VALUES (?, ?, ?, ?, NULL, 'http_batch', 16000, 'de', '{}', 1);
                 """,
                 (pid, pid, kind, base_url),
             )
@@ -347,6 +348,48 @@ async def test_migration_folds_retired_kinds_onto_the_merged_ones(tmp_path: Path
         for pid, _, _, expected_kind, expected_url in rows:
             assert stored[pid].kind.value == expected_kind
             assert stored[pid].base_url == expected_url
+
+
+async def test_migration_drops_the_provider_model_column(tmp_path: Path) -> None:
+    """A provider row cannot hold one model, because it serves several roles.
+
+    An OpenRouter row transcribes, summarizes and generates video, so a single
+    stored model was wrong for at least two of them - and it was consulted
+    *before* the per-action defaults that do this properly, so it shadowed
+    them. The column goes, and the values with it: nothing records which of the
+    row's roles the value was meant for, so there is nowhere honest to migrate
+    it to. Nothing is lost but a pre-selection.
+    """
+    path = tmp_path / "legacy-model.db"
+    async with Database(path) as database:
+        conn = database.connection
+        # Put the column back to stand in for a pre-v16 database, then run only
+        # the migration under test: rewinding schema_version and reconnecting
+        # would replay every later migration too, and an ALTER TABLE cannot be
+        # applied twice.
+        await conn.execute("ALTER TABLE providers ADD COLUMN model TEXT;")
+        await conn.execute(
+            """
+            INSERT INTO providers
+                (id, name, kind, base_url, auth_ref, protocol, model, sample_rate,
+                 language, capabilities, enabled, favorite_models)
+            VALUES ('or1', 'OpenRouter', 'openrouter', NULL, NULL, 'http_batch',
+                    'openai/gpt-4o-mini', 16000, 'de', '{}', 1, '["deepgram/nova-3"]');
+            """
+        )
+        await conn.executescript(MIGRATIONS[_V_DROP_PROVIDER_MODEL])
+        await conn.commit()
+
+        async with conn.execute("SELECT * FROM providers;") as cur:
+            row = await cur.fetchone()
+        assert row is not None
+        assert "model" not in set(row.keys()), "the column survived the migration"
+
+        # The row still loads, and keeps everything that was not the model.
+        stored = await ProviderRepository(database).get("or1")
+        assert stored is not None
+        assert stored.name == "OpenRouter"
+        assert stored.favorite_models == ["deepgram/nova-3"]
 
 
 async def test_provider_routing_survives_a_round_trip(db: Database) -> None:

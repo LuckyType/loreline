@@ -28,6 +28,13 @@ async def _two_utterances() -> AsyncIterator[Utterance]:
     yield Utterance(pcm=b"\x02\x00" * 1600, start=0.5, end=0.6)
 
 
+# The registry resolves the model and hands it over; the connector keeps none
+# of its own. capabilities.yaml declares Gemini's default, and this model is
+# hidden there until the connector is verified against the real service, so it
+# only ever arrives from a config that names it.
+MODEL = "gemini-3.5-transcribe-live"
+
+
 def _config(port: int, language: str = "de") -> ProviderConfig:
     return ProviderConfig(
         id="gem-live-1",
@@ -35,7 +42,6 @@ def _config(port: int, language: str = "de") -> ProviderConfig:
         kind=ProviderKind.GEMINI,
         base_url=f"ws://127.0.0.1:{port}",
         protocol=Protocol.WS,
-        model="gemini-3.5-transcribe-live",
         language=language,
     )
 
@@ -43,7 +49,7 @@ def _config(port: int, language: str = "de") -> ProviderConfig:
 async def test_gemini_live_streaming_transcribe() -> None:
     async with serve(gemini_live_handler, "127.0.0.1", 0) as server:
         port = server.sockets[0].getsockname()[1]
-        backend = GeminiLiveBackend(_config(port), api_key="secret")
+        backend = GeminiLiveBackend(_config(port), model=MODEL, api_key="secret")
         glossary = Glossary(campaign_id="c1", terms=["Drakonia"])  # ignored, but must not break
         events: list[TranscriptEvent] = [
             e
@@ -90,12 +96,12 @@ async def test_gemini_live_setup_and_key_on_the_wire() -> None:
 
     async with serve(recording, "127.0.0.1", 0) as server:
         port = server.sockets[0].getsockname()[1]
-        backend = GeminiLiveBackend(_config(port), api_key="sekret")
+        backend = GeminiLiveBackend(_config(port), model=MODEL, api_key="sekret")
         _ = [e async for e in backend.transcribe(_one_utterance(), session_id="s1")]
 
     assert "key=sekret" in cast("str", seen["path"])
     setup = cast("dict[str, object]", seen["setup"])
-    assert setup["model"] == "models/gemini-3.5-transcribe-live"
+    assert setup["model"] == f"models/{MODEL}"
     assert setup["generationConfig"] == {"responseModalities": ["TEXT"]}
     assert setup["inputAudioTranscription"] == {"languageCodes": ["de"]}
     assert seen["mime"] == "audio/pcm;rate=16000"
@@ -114,7 +120,7 @@ async def test_gemini_live_one_session_per_utterance() -> None:
 
     async with serve(counting, "127.0.0.1", 0) as server:
         port = server.sockets[0].getsockname()[1]
-        backend = GeminiLiveBackend(_config(port), api_key="secret")
+        backend = GeminiLiveBackend(_config(port), model=MODEL, api_key="secret")
         events = [e async for e in backend.transcribe(_two_utterances(), session_id="s1")]
         await backend.aclose()
 
@@ -126,9 +132,11 @@ async def test_gemini_live_one_session_per_utterance() -> None:
 async def test_gemini_live_health_ok() -> None:
     async with serve(gemini_live_handler, "127.0.0.1", 0) as server:
         port = server.sockets[0].getsockname()[1]
-        assert await GeminiLiveBackend(_config(port), api_key="secret").health() is True
+        assert (
+            await GeminiLiveBackend(_config(port), model=MODEL, api_key="secret").health() is True
+        )
 
 
 async def test_gemini_live_health_false_when_unreachable() -> None:
     # Nothing is listening on port 1 -> connect refused -> unhealthy.
-    assert await GeminiLiveBackend(_config(1), api_key="x").health() is False
+    assert await GeminiLiveBackend(_config(1), model=MODEL, api_key="x").health() is False

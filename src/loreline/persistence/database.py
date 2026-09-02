@@ -251,6 +251,28 @@ MIGRATIONS: list[str] = [
 
     DELETE FROM providers WHERE kind = 'vosk';
     """,
+    # v16 - drop providers.model. One row serves every interaction its kind
+    # declares (an OpenRouter provider transcribes, summarizes and generates
+    # video), so a single stored model could not be right for more than one of
+    # them, and it sat *above* the per-action defaults that do the job properly
+    # (kv_settings 'action_defaults': stt_model, summarize_model, video_model),
+    # quietly overriding them. The model is now chosen per request and required
+    # by every action route, so nothing reads this column any more.
+    #
+    # The values are dropped rather than migrated anywhere. There is no
+    # interaction to migrate them *to*: the column says nothing about which of
+    # its provider's roles it was meant for, so folding it into any one of the
+    # three action defaults would be a guess, and folding it into all three
+    # would seed a chat model into the transcription picker. What is lost is a
+    # pre-selection, not a capability: every picker still offers the same
+    # models, seeded from the action default and then the row's favourites,
+    # which the column shadowed anyway.
+    #
+    # ALTER TABLE ... DROP COLUMN needs SQLite 3.35 (2021-03); the aiosqlite
+    # wheels this app pins are well past that.
+    """
+    ALTER TABLE providers DROP COLUMN model;
+    """,
 ]
 
 

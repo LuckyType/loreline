@@ -16,6 +16,10 @@ from loreline.llm import LLMError
 from loreline.settings import Settings
 from loreline.web.app import create_app
 
+# Any model id: the fake backend never looks at it, but the API requires one -
+# a provider row carries no model, so the request is where it is decided.
+_MODEL = "fake-model"
+
 
 @pytest_asyncio.fixture
 async def client(tmp_path: Path) -> AsyncIterator[AsyncClient]:
@@ -40,7 +44,9 @@ async def _session_with_transcript(client: AsyncClient) -> str:
             json={"name": "STT", "kind": "openai_compat", "protocol": "http_batch"},
         )
     ).json()["id"]
-    sid = (await client.post("/api/session/start", json={"primary_provider": stt})).json()["id"]
+    sid = (
+        await client.post("/api/session/start", json={"primary_provider": stt, "model": _MODEL})
+    ).json()["id"]
     await client.post("/api/session/stop")
     return sid
 
@@ -75,12 +81,13 @@ async def test_summarize_uses_configured_system_prompt(
     sid = await _session_with_transcript(client)
     llm = await _llm_provider(client)
 
-    resp = await client.post(f"/api/session/{sid}/summarize", json={"provider_id": llm})
+    body = {"provider_id": llm, "model": "gpt-5.6-luna"}
+    resp = await client.post(f"/api/session/{sid}/summarize", json=body)
     assert resp.status_code == 200
     assert seen["system_prompt"] is None  # nothing configured -> built-in default
 
     await client.put("/api/system/defaults", json={"summarize_prompt": "Nur Stichpunkte."})
-    resp = await client.post(f"/api/session/{sid}/summarize", json={"provider_id": llm})
+    resp = await client.post(f"/api/session/{sid}/summarize", json=body)
     assert resp.status_code == 200
     assert seen["system_prompt"] == "Nur Stichpunkte."
 
@@ -136,13 +143,17 @@ async def test_summarize_rejects_non_llm_provider(client: AsyncClient) -> None:
             json={"name": "STT2", "kind": "deepgram", "protocol": "ws"},
         )
     ).json()["id"]
-    resp = await client.post(f"/api/session/{sid}/summarize", json={"provider_id": stt})
+    resp = await client.post(
+        f"/api/session/{sid}/summarize", json={"provider_id": stt, "model": "nova-3"}
+    )
     assert resp.status_code == 400
 
 
 async def test_summarize_unknown_session(client: AsyncClient) -> None:
     llm = await _llm_provider(client)
-    resp = await client.post("/api/session/nope/summarize", json={"provider_id": llm})
+    resp = await client.post(
+        "/api/session/nope/summarize", json={"provider_id": llm, "model": "gpt-5.6-luna"}
+    )
     assert resp.status_code == 404
 
 
@@ -150,7 +161,11 @@ async def test_summarize_with_openrouter_provider(
     client: AsyncClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """OpenRouter is an LLM kind too - the route accepts it and records the
-    ``vendor/model`` id it defaulted to as the summary's provenance."""
+    ``vendor/model`` id the request named as the summary's provenance.
+
+    Recording what was asked for is now the same thing as recording what ran:
+    the route hands the summarizer that model and nothing re-derives it, so the
+    two cannot disagree the way a duplicated fallback chain let them."""
 
     async def fake_summarize(**_kwargs: object) -> str:
         return "The party bargained with a dragon."
@@ -165,9 +180,12 @@ async def test_summarize_with_openrouter_provider(
         )
     ).json()["id"]
 
-    resp = await client.post(f"/api/session/{sid}/summarize", json={"provider_id": llm})
+    resp = await client.post(
+        f"/api/session/{sid}/summarize",
+        json={"provider_id": llm, "model": "openai/gpt-5.6-luna"},
+    )
     assert resp.status_code == 200
 
     detail = (await client.get(f"/api/session/{sid}")).json()["session"]
     assert detail["summary"] == "The party bargained with a dragon."
-    assert detail["summary_model"] == "openai/gpt-4o-mini"
+    assert detail["summary_model"] == "openai/gpt-5.6-luna"

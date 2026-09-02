@@ -65,7 +65,11 @@ class CaptureSource(Protocol):
 
 
 CaptureFactory = Callable[["StartSessionRequest", int], tuple[CaptureSource, SpeechDetector]]
-BackendFactory = Callable[["ProviderConfig", "SecretStore"], "STTBackend"]
+# (config, secrets, model). The model is the request's, passed alongside the
+# config rather than stamped onto a copy of it: a provider row has no model
+# field to stamp, and the connector and the transport lookup must agree on
+# which one is running.
+BackendFactory = Callable[["ProviderConfig", "SecretStore", str | None], "STTBackend"]
 DiarizerFactory = Callable[["DiarizationConfig"], "DiarizationProvider"]
 
 
@@ -188,11 +192,9 @@ class SessionManager:
         """
         if req.diarization.mode is not DiarizationMode.INLINE:
             return
-        # The request's model override wins, exactly as it does for the backend.
-        model = req.model or config.model
-        if not supports_inline_diarization(config.kind, model):
+        if not supports_inline_diarization(config.kind, req.model):
             msg = (
-                f"model {model or '(none)'!r} on {config.name!r} returns no speaker labels - "
+                f"model {req.model!r} on {config.name!r} returns no speaker labels - "
                 "inline diarization would produce an unlabelled transcript"
             )
             raise SessionConfigError(msg)
@@ -210,9 +212,6 @@ class SessionManager:
             raise ProviderDisabledError(msg)
         self._check_live_capable(primary_cfg, "primary")
         self._check_inline_diarization(primary_cfg, req)
-        if req.model:
-            # Model is chosen on demand at start time, overriding the stored default.
-            primary_cfg = primary_cfg.model_copy(update={"model": req.model})
 
         fallback_cfg: ProviderConfig | None = None
         if req.fallback_provider:
@@ -224,25 +223,30 @@ class SessionManager:
                 msg = f"fallback provider {req.fallback_provider!r} is disabled"
                 raise ProviderDisabledError(msg)
             self._check_live_capable(fallback_cfg, "fallback")
-            if req.fallback_model:
-                fallback_cfg = fallback_cfg.model_copy(update={"model": req.fallback_model})
         return primary_cfg, fallback_cfg
 
     def _build_backends(
-        self, primary_cfg: ProviderConfig, fallback_cfg: ProviderConfig | None
+        self,
+        req: StartSessionRequest,
+        primary_cfg: ProviderConfig,
+        fallback_cfg: ProviderConfig | None,
     ) -> tuple[STTBackend, STTBackend | None, list[STTBackend]]:
         """Instantiate the primary (+ optional fallback) STT backend(s).
+
+        Each gets the model the request chose for *that* provider: the two are
+        different vendors with disjoint model lists, so the primary's pick
+        means nothing to the fallback.
 
         Wraps the factory's ``ValueError`` (a provider kind with no registered
         backend) as ``SessionConfigError`` so the route can answer 400 instead
         of leaking an unhandled 500.
         """
         try:
-            primary = self._backend_factory(primary_cfg, self._secrets)
+            primary = self._backend_factory(primary_cfg, self._secrets, req.model)
             backends: list[STTBackend] = [primary]
             fallback: STTBackend | None = None
             if fallback_cfg is not None:
-                fallback = self._backend_factory(fallback_cfg, self._secrets)
+                fallback = self._backend_factory(fallback_cfg, self._secrets, req.fallback_model)
                 backends.append(fallback)
         except ValueError as exc:
             raise SessionConfigError(str(exc)) from exc
@@ -262,7 +266,7 @@ class SessionManager:
                 raise SessionActiveError
 
             primary_cfg, fallback_cfg = await self._resolve_providers(req)
-            primary, fallback, backends = self._build_backends(primary_cfg, fallback_cfg)
+            primary, fallback, backends = self._build_backends(req, primary_cfg, fallback_cfg)
             # Skipped entirely when the GM opted out, so no glossary reaches the
             # backend as keyterms or as a prompt.
             glossary = (

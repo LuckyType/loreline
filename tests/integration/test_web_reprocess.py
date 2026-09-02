@@ -23,6 +23,10 @@ from loreline.secrets import SecretStore
 from loreline.settings import Settings
 from loreline.web.app import create_app
 
+# Any model id: the fake backend never looks at it, but the API requires one -
+# a provider row carries no model, so the request is where it is decided.
+_MODEL = "fake-model"
+
 
 @pytest_asyncio.fixture
 async def client(tmp_path: Path) -> AsyncIterator[AsyncClient]:
@@ -48,7 +52,7 @@ async def _provider(client: AsyncClient) -> str:
 
 
 async def _run_session(client: AsyncClient, pid: str) -> str:
-    start = await client.post("/api/session/start", json={"primary_provider": pid})
+    start = await client.post("/api/session/start", json={"primary_provider": pid, "model": _MODEL})
     session_id: str = start.json()["id"]
     await client.post("/api/session/stop")
     return session_id
@@ -80,15 +84,18 @@ async def test_audio_download(client: AsyncClient) -> None:
     assert resp.content[:4] == b"RIFF"
 
 
-async def test_reprocess_transcribe_with_on_demand_model(tmp_path: Path) -> None:
-    """A "transcribe" reprocess job can override the provider's stored model,
-    same as starting a live session (see test_start_session_with_on_demand_model)."""
+async def test_reprocess_transcribe_names_the_model_it_runs(tmp_path: Path) -> None:
+    """A "transcribe" job names its model, same as starting a live session.
+
+    Required rather than optional: the provider row holds no model, so a job
+    with none would have nothing to run - and the row's `model` column would go
+    back to claiming null while a constant inside a connector decided."""
     settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t")
     captured: dict[str, str | None] = {}
 
-    def factory(config: ProviderConfig, secrets: SecretStore) -> FakeBackend:
-        captured["model"] = config.model
-        return FakeBackend(config, secrets)
+    def factory(config: ProviderConfig, secrets: SecretStore, model: str | None) -> FakeBackend:
+        captured["model"] = model
+        return FakeBackend(config, secrets, model)
 
     app = create_app(
         settings,
@@ -117,7 +124,7 @@ async def test_reprocess_transcribe_with_on_demand_model(tmp_path: Path) -> None
                 await asyncio.sleep(0.02)
             assert job["status"] == "done"
             assert captured["model"] == "nova-9000"
-            # The override is recorded on the job row as the model that ran.
+            # And the job row records the model that actually ran.
             assert job["model"] == "nova-9000"
 
 
@@ -129,8 +136,10 @@ async def test_reprocess_applies_the_glossary_unless_switched_off(tmp_path: Path
     settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t")
     seen: list[object] = []
 
-    def factory(config: ProviderConfig, secrets: SecretStore) -> GlossaryRecordingBackend:
-        return GlossaryRecordingBackend(config, secrets, seen)
+    def factory(
+        config: ProviderConfig, secrets: SecretStore, model: str | None
+    ) -> GlossaryRecordingBackend:
+        return GlossaryRecordingBackend(config, secrets, model, seen)
 
     app = create_app(
         settings,
@@ -148,7 +157,7 @@ async def test_reprocess_applies_the_glossary_unless_switched_off(tmp_path: Path
 
             seen.clear()
             enqueue = await client.post(
-                "/api/reprocess", json={"session_id": sid, "provider_id": pid}
+                "/api/reprocess", json={"session_id": sid, "provider_id": pid, "model": _MODEL}
             )
             await ctx.reprocess.wait(enqueue.json()["id"])
             job = (await client.get(f"/api/reprocess/{enqueue.json()['id']}")).json()
@@ -159,7 +168,12 @@ async def test_reprocess_applies_the_glossary_unless_switched_off(tmp_path: Path
             seen.clear()
             enqueue = await client.post(
                 "/api/reprocess",
-                json={"session_id": sid, "provider_id": pid, "use_glossary": False},
+                json={
+                    "session_id": sid,
+                    "provider_id": pid,
+                    "model": _MODEL,
+                    "use_glossary": False,
+                },
             )
             await ctx.reprocess.wait(enqueue.json()["id"])
             job = (await client.get(f"/api/reprocess/{enqueue.json()['id']}")).json()
@@ -186,7 +200,7 @@ async def test_reprocess_job(tmp_path: Path) -> None:
             sid = await _run_session(client, pid)
 
             enqueue = await client.post(
-                "/api/reprocess", json={"session_id": sid, "provider_id": pid}
+                "/api/reprocess", json={"session_id": sid, "provider_id": pid, "model": _MODEL}
             )
             assert enqueue.status_code == 202
             job_id = enqueue.json()["id"]
@@ -200,9 +214,10 @@ async def test_reprocess_job(tmp_path: Path) -> None:
             assert job["status"] == "done"
             assert int(job["segments_added"]) >= 1  # type: ignore[arg-type]
 
-            # The job records the model it resolved at enqueue time (the
-            # provider here has none stored and no override was given).
-            assert job["model"] is None
+            # The job records the model the request named, which is the model
+            # that ran: there is no other source for one, and no connector
+            # constant left to quietly substitute a different one.
+            assert job["model"] == _MODEL
 
             jobs = await client.get("/api/reprocess", params={"session_id": sid})
             assert len(jobs.json()) == 1
@@ -226,7 +241,7 @@ async def test_reprocess_job(tmp_path: Path) -> None:
 
             # A second run with the same provider is a NEW version; both are kept.
             second = await client.post(
-                "/api/reprocess", json={"session_id": sid, "provider_id": pid}
+                "/api/reprocess", json={"session_id": sid, "provider_id": pid, "model": _MODEL}
             )
             second_id = second.json()["id"]
             for _ in range(50):
@@ -252,12 +267,14 @@ async def test_reprocess_accepts_a_kind_barred_from_live_capture(client: AsyncCl
     )
     batch_pid = batch.json()["id"]
 
-    start = await client.post("/api/session/start", json={"primary_provider": batch_pid})
+    start = await client.post(
+        "/api/session/start", json={"primary_provider": batch_pid, "model": _MODEL}
+    )
     assert start.status_code == 400
     assert "live" in start.json()["detail"]
 
     enqueue = await client.post(
-        "/api/reprocess", json={"session_id": sid, "provider_id": batch_pid}
+        "/api/reprocess", json={"session_id": sid, "provider_id": batch_pid, "model": _MODEL}
     )
     assert enqueue.status_code == 202
     job_id = enqueue.json()["id"]
@@ -273,7 +290,9 @@ async def test_reprocess_accepts_a_kind_barred_from_live_capture(client: AsyncCl
 
 async def test_reprocess_unknown_session(client: AsyncClient) -> None:
     pid = await _provider(client)
-    resp = await client.post("/api/reprocess", json={"session_id": "missing", "provider_id": pid})
+    resp = await client.post(
+        "/api/reprocess", json={"session_id": "missing", "provider_id": pid, "model": _MODEL}
+    )
     assert resp.status_code == 404
 
 
@@ -337,7 +356,9 @@ async def test_diarize_session_relabels_globally(tmp_path: Path) -> None:
             assert all(s["speaker"] == "Speaker A" for s in diarized)
 
             # Diarizing a re-transcribed version relabels ONLY that version.
-            rp = await client.post("/api/reprocess", json={"session_id": sid, "provider_id": pid})
+            rp = await client.post(
+                "/api/reprocess", json={"session_id": sid, "provider_id": pid, "model": _MODEL}
+            )
             rp_id = rp.json()["id"]
             for _ in range(50):
                 if (await client.get(f"/api/reprocess/{rp_id}")).json()["status"] == "done":
@@ -410,11 +431,15 @@ async def test_delete_transcript_version(tmp_path: Path) -> None:
             ctx = app.state.ctx  # pyright: ignore[reportAny]
 
             first = (
-                await client.post("/api/reprocess", json={"session_id": sid, "provider_id": pid})
+                await client.post(
+                    "/api/reprocess", json={"session_id": sid, "provider_id": pid, "model": _MODEL}
+                )
             ).json()["id"]
             await _wait_done(client, first)
             second = (
-                await client.post("/api/reprocess", json={"session_id": sid, "provider_id": pid})
+                await client.post(
+                    "/api/reprocess", json={"session_id": sid, "provider_id": pid, "model": _MODEL}
+                )
             ).json()["id"]
             await _wait_done(client, second)
             diar = (
@@ -491,8 +516,14 @@ class _GatedBackend(FakeBackend):
     is done - a blocked live session would just sit in the stop drain instead.
     """
 
-    def __init__(self, config: ProviderConfig, secrets: SecretStore, gate: asyncio.Event) -> None:
-        super().__init__(config, secrets)
+    def __init__(
+        self,
+        config: ProviderConfig,
+        secrets: SecretStore,
+        model: str | None,
+        gate: asyncio.Event,
+    ) -> None:
+        super().__init__(config, secrets, model)
         self._gate = gate
         self._seen = 0
 
@@ -536,8 +567,8 @@ async def test_running_job_publishes_its_segment_count(tmp_path: Path) -> None:
     gate = asyncio.Event()
     gate.set()  # open for the live capture below; closed before the job runs
 
-    def factory(config: ProviderConfig, secrets: SecretStore) -> _GatedBackend:
-        return _GatedBackend(config, secrets, gate)
+    def factory(config: ProviderConfig, secrets: SecretStore, model: str | None) -> _GatedBackend:
+        return _GatedBackend(config, secrets, model, gate)
 
     app = create_app(
         settings,
@@ -555,7 +586,9 @@ async def test_running_job_publishes_its_segment_count(tmp_path: Path) -> None:
 
             gate.clear()
             job_id = (
-                await client.post("/api/reprocess", json={"session_id": sid, "provider_id": pid})
+                await client.post(
+                    "/api/reprocess", json={"session_id": sid, "provider_id": pid, "model": _MODEL}
+                )
             ).json()["id"]
             job: dict[str, object] = {}
             for _ in range(100):

@@ -67,6 +67,70 @@ def supports(kind: ProviderKind, interaction: Interaction) -> bool:
     return interaction in interactions_for(kind)
 
 
+def default_model(kind: ProviderKind, interaction: Interaction) -> str | None:
+    """The model to use for this pair when the caller named none.
+
+    Scoped by interaction on purpose. A provider row serves several at once -
+    OpenRouter transcribes, summarizes and generates video - so "the model for
+    this kind" is not a question with an answer, and the last attempt at one
+    ("first non-hidden model of any interaction") handed a chat model to a
+    transcription provider. This asks the narrower question the yaml can
+    actually answer, next to the deprecation date that invalidates it.
+
+    Only one caller has no model from anyone: the health probe behind
+    POST /providers/{id}/test, whose websocket kinds name a model in the
+    handshake. Every action route requires the GM to choose. None means this
+    kind curates no catalogue (the self-hosted one), and the connector then
+    sends no model at all.
+    """
+    spec = _provider(kind)
+    return spec.default_model(interaction) if spec else None
+
+
+def curates_a_catalogue(kind: ProviderKind) -> bool:
+    """Whether this file lists models for a kind at all (any interaction).
+
+    The difference between "we vouch for nothing here on purpose" and "we have
+    nothing left". The self-hosted kind curates nothing by design, since its
+    catalogue is whatever the operator installed, and a connector for it works
+    perfectly well naming no model. A kind that does curate must always leave
+    a default behind; if it does not, something is wrong with the file rather
+    than with the request, and the caller should hear that instead of the
+    vendor's complaint about a missing field.
+    """
+    spec = _provider(kind)
+    return bool(spec and spec.models)
+
+
+def default_diarizing_model(kind: ProviderKind) -> str | None:
+    """The model to run when the caller needs speaker labels, not just text.
+
+    A different question from :func:`default_model`, which picks for
+    transcription and on OpenAI picks gpt-transcribe - a model that returns no
+    speakers at all, so a diarization pass cannot inherit it. This asks which
+    of the offered models this file says returns speakers.
+
+    Answered without depending on list order: the interaction default when it
+    diarizes (Deepgram, AssemblyAI and Gemini all do with theirs), else the one
+    model that does. Several candidates with the default not among them is
+    ambiguous rather than defaultable, and returns None so the caller names one
+    - the guard test in tests/unit/test_capabilities.py fails the moment a kind
+    lands in that state, which is the point at which a human has to choose.
+    """
+    spec = _provider(kind)
+    if spec is None:
+        return None
+    candidates = [
+        m.id
+        for m in spec.models_for(Interaction.TRANSCRIBE)
+        if m.transcribe and m.transcribe.inline_diarization
+    ]
+    preferred = spec.default_model(Interaction.TRANSCRIBE)
+    if preferred in candidates:
+        return preferred
+    return candidates[0] if len(candidates) == 1 else None
+
+
 def kinds_for(interaction: Interaction) -> frozenset[ProviderKind]:
     """Every provider kind that can serve an interaction."""
     return frozenset(k for k in config().providers if supports(k, interaction))
@@ -141,16 +205,18 @@ def is_realtime_model(kind: ProviderKind, model: str | None) -> bool:
     """Whether this provider+model pair transcribes over a streaming transport.
 
     This picks the connector for kinds that offer both transports, so it must
-    answer for any model string, curated or not. An unset model keeps the
-    kind's historical default: a Deepgram or OpenAI config predating per-model
-    resolution has always run the streaming session.
+    answer for any model string, curated or not. None reaches here only for a
+    kind that curates no catalogue, since :func:`default_model` has already
+    answered for every other one; such a kind keeps the transport it has
+    always had.
     """
     spec = _provider(kind)
     if spec is None:
         return False
     if model is None:
-        # Configs stored before per-model resolution carry no model and must
-        # keep running the connector they always got.
+        # No model to resolve against: the kind lists none of its own and the
+        # caller named none either. Fall back to the kind's own transport,
+        # which is the connector such a config has always got.
         return supports_realtime(kind)
     entry = spec.find(model)
     caps = entry.transcribe if entry else None

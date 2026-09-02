@@ -16,6 +16,10 @@ from loreline.models import TranscriptEvent
 from loreline.settings import Settings
 from loreline.web.app import create_app
 
+# Any model id: the fake backend never looks at it, but the API requires one -
+# a provider row carries no model, so the request is where it is decided.
+_MODEL = "fake-model"
+
 log = get_logger("tests.chatty_backend")
 
 
@@ -61,14 +65,16 @@ def _provider(client: TestClient) -> str:
 
 
 def _run_session(client: TestClient, pid: str) -> str:
-    session_id: str = client.post("/api/session/start", json={"primary_provider": pid}).json()["id"]
+    session_id: str = client.post(
+        "/api/session/start", json={"primary_provider": pid, "model": _MODEL}
+    ).json()["id"]
     client.post("/api/session/stop")
     return session_id
 
 
 def _reprocess(client: TestClient, session_id: str, pid: str) -> str:
     job_id: str = client.post(
-        "/api/reprocess", json={"session_id": session_id, "provider_id": pid}
+        "/api/reprocess", json={"session_id": session_id, "provider_id": pid, "model": _MODEL}
     ).json()["id"]
     for _ in range(100):
         if client.get(f"/api/reprocess/{job_id}").json()["status"] in {"done", "error"}:

@@ -698,7 +698,11 @@ class TestLiveCaptureGuard:
                     )
                 ).json()
                 resp = await ac.post(
-                    "/api/session/start", json={"primary_provider": provider["id"]}
+                    "/api/session/start",
+                    json={
+                        "primary_provider": provider["id"],
+                        "model": "openai/whisper-large-v3-turbo",
+                    },
                 )
                 assert resp.status_code == 400
                 assert "re-processing" in resp.json()["detail"]
@@ -729,26 +733,27 @@ class TestInlineDiarizationGuard:
                 await ac.post("/api/session/stop")
 
     @staticmethod
-    async def _deepgram(client: AsyncClient, model: str) -> str:
+    async def _deepgram(client: AsyncClient) -> str:
+        # The provider row carries no model: the start request names it, which
+        # is also what the guard reads.
         return (
             await client.post(
                 "/api/providers",
-                json={
-                    "name": "Deepgram",
-                    "kind": "deepgram",
-                    "protocol": "ws",
-                    "model": model,
-                },
+                json={"name": "Deepgram", "kind": "deepgram", "protocol": "ws"},
             )
         ).json()["id"]
 
     async def test_rejects_inline_for_a_model_without_speaker_labels(
         self, client: AsyncClient
     ) -> None:
-        provider = await self._deepgram(client, "flux-general-en")
+        provider = await self._deepgram(client)
         resp = await client.post(
             "/api/session/start",
-            json={"primary_provider": provider, "diarization": {"mode": "inline"}},
+            json={
+                "primary_provider": provider,
+                "model": "flux-general-en",
+                "diarization": {"mode": "inline"},
+            },
         )
         assert resp.status_code == 400
         assert "speaker labels" in resp.json()["detail"]
@@ -760,9 +765,13 @@ class TestInlineDiarizationGuard:
         Runs against the fake capture pipeline, so it exercises the guard
         without touching audio hardware.
         """
-        provider = await self._deepgram(client, "flux-general-en")
+        provider = await self._deepgram(client)
         resp = await client.post(
             "/api/session/start",
-            json={"primary_provider": provider, "diarization": {"mode": "none"}},
+            json={
+                "primary_provider": provider,
+                "model": "flux-general-en",
+                "diarization": {"mode": "none"},
+            },
         )
         assert resp.status_code != 400

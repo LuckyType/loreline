@@ -114,9 +114,6 @@ interface ProviderChoice {
 	protocol: ProtocolKind
 	baseUrlPlaceholder: string | null
 	note: string
-	/** Seed for the model field: the first model the config vouches for, so a
-	 *  retired id cannot linger here the way a hardcoded one did. */
-	defaultModel: string
 }
 
 const catalog = $derived(
@@ -134,7 +131,6 @@ const catalog = $derived(
 			protocol: copy.protocol,
 			baseUrlPlaceholder: needsBaseUrl ? (copy.baseUrlPlaceholder ?? '') : null,
 			note: copy.note,
-			defaultModel: spec?.models.find((m) => !m.hidden)?.id ?? '',
 		}
 	}),
 )
@@ -152,7 +148,6 @@ const blank = (): ProviderCreate => ({
 	kind: 'openai_compat',
 	protocol: 'http_batch',
 	base_url: '',
-	model: '',
 	favorite_models: [],
 	sample_rate: 16000,
 	language: 'de',
@@ -361,7 +356,6 @@ async function save() {
 			...form,
 			name: effectiveName,
 			base_url: form.base_url || null,
-			model: form.model || null,
 			// Routing is an OpenRouter body extension - never store it on the
 			// seven STT kinds or on a plain OpenAI-compatible endpoint.
 			routing: form.kind === 'openrouter' ? form.routing : null,
@@ -393,7 +387,12 @@ function pickHosting(h: Hosting) {
 
 function pickProvider(meta: ProviderChoice) {
 	selectedKind = meta.kind
-	form = { ...blank(), kind: meta.kind, protocol: meta.protocol, model: meta.defaultModel }
+	// No model is seeded because a provider row no longer holds one: it serves
+	// several interactions at once, so any single seed would be the wrong
+	// answer for every picker but one. Each interaction-scoped picker chooses
+	// per request instead, and capabilities.yaml carries the one default a
+	// connector still needs when nobody chose (the health probe).
+	form = { ...blank(), kind: meta.kind, protocol: meta.protocol }
 	step = 3
 }
 
@@ -413,7 +412,6 @@ function edit(p: ProviderConfig) {
 		kind: p.kind,
 		protocol: p.protocol,
 		base_url: p.base_url ?? '',
-		model: p.model ?? '',
 		favorite_models: [...p.favorite_models],
 		sample_rate: p.sample_rate,
 		language: p.language,

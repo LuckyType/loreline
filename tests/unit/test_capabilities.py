@@ -11,6 +11,9 @@ import pytest
 
 from loreline.capabilities import (
     INTERACTIONS_BY_KIND,
+    config,
+    default_diarizing_model,
+    default_model,
     filter_models,
     interactions_for,
     is_realtime_model,
@@ -61,6 +64,82 @@ class TestCapabilityTable:
         assert not supports(ProviderKind.DEEPGRAM, Interaction.VIDEO)
         assert not supports(ProviderKind.DEEPGRAM, Interaction.SUMMARIZE)
         assert not supports(ProviderKind.OPENAI, Interaction.VIDEO)
+
+
+class TestDefaultModel:
+    """The one default left: what a connector names when nobody chose.
+
+    Every action route now requires a model, so this answers for the health
+    probe alone (POST /providers/{id}/test), whose websocket kinds name a model
+    in the handshake.
+    """
+
+    def test_the_default_is_scoped_to_the_interaction(self) -> None:
+        """The regression in one assertion. OpenRouter serves three
+        interactions from one provider row, and its catalogues are disjoint, so
+        a per-kind default was guaranteed wrong for two of them - the previous
+        attempt ("first non-hidden model of any interaction") handed a chat
+        model to a transcription provider."""
+        transcribe = default_model(ProviderKind.OPENROUTER, Interaction.TRANSCRIBE)
+        summarize = default_model(ProviderKind.OPENROUTER, Interaction.SUMMARIZE)
+        assert transcribe != summarize
+        spec = config().providers[ProviderKind.OPENROUTER]
+        assert transcribe in {m.id for m in spec.models_for(Interaction.TRANSCRIBE)}
+        assert summarize in {m.id for m in spec.models_for(Interaction.SUMMARIZE)}
+
+    def test_a_kind_with_no_curated_catalogue_has_no_default(self) -> None:
+        """The self-hosted kind. Its connector then names no model at all, which
+        is the only honest answer for a server whose models nobody has seen -
+        the constant it replaced pinned whisper-1 onto every such server."""
+        assert default_model(ProviderKind.OPENAI_COMPAT, Interaction.TRANSCRIBE) is None
+
+    def test_an_unknown_interaction_for_a_kind_has_no_default(self) -> None:
+        """Deepgram transcribes and nothing else, so there is no chat model to
+        fall back to and asking must not invent one."""
+        assert default_model(ProviderKind.DEEPGRAM, Interaction.SUMMARIZE) is None
+
+    def test_the_transcription_default_decides_the_transport(self) -> None:
+        """The default and the connector lookup read the same value, so a probe
+        cannot open a Realtime session while the model that would run posts."""
+        chosen = default_model(ProviderKind.OPENAI, Interaction.TRANSCRIBE)
+        assert chosen == "gpt-transcribe"
+        assert not is_realtime_model(ProviderKind.OPENAI, chosen)
+
+
+class TestDiarizingModel:
+    """Which model answers "give me speakers", when the caller names none."""
+
+    def test_every_kind_that_can_diarize_offers_a_default(self) -> None:
+        """The guard the resolution rule leans on.
+
+        The rule is order-free by construction: the interaction default when it
+        diarizes, else the single model that does. That leaves exactly one
+        undefined case - several diarizing models with the default not among
+        them - and this fails there, because picking by list position is what
+        the whole marker exists to avoid. The fix at that point is a human
+        decision, not a code change.
+        """
+        for kind, spec in config().providers.items():
+            diarizers = [
+                m.id
+                for m in spec.models_for(Interaction.TRANSCRIBE)
+                if m.transcribe and m.transcribe.inline_diarization
+            ]
+            chosen = default_diarizing_model(kind)
+            if not diarizers:
+                assert chosen is None, f"{kind.value} offers no diarizing model"
+                continue
+            assert chosen in diarizers, (
+                f"{kind.value} has {len(diarizers)} diarizing models and no way to pick one"
+            )
+
+    def test_it_is_not_just_the_transcription_default(self) -> None:
+        """On OpenAI the two genuinely differ: the transcription default
+        (gpt-transcribe) returns no speakers, so a diarization pass that
+        inherited it would produce an unlabelled timeline and no error."""
+        assert default_model(ProviderKind.OPENAI, Interaction.TRANSCRIBE) == "gpt-transcribe"
+        assert default_diarizing_model(ProviderKind.OPENAI) == "gpt-4o-transcribe-diarize"
+        assert not supports_inline_diarization(ProviderKind.OPENAI, "gpt-transcribe")
 
 
 class TestLiveCapture:
@@ -125,8 +204,10 @@ class TestRealtimeModelResolution:
         assert is_realtime_model(ProviderKind.ASSEMBLYAI, None)
 
     def test_an_unset_model_keeps_the_kinds_historical_connector(self) -> None:
-        """Configs stored before per-model resolution carry no model; they must
-        keep running exactly the connector they always got."""
+        """None is answered against the kind alone. In practice only a kind
+        that curates no catalogue reaches this, since create_backend resolves
+        the declared default first, but the answer must stay defined: a lookup
+        that raised here would break the health probe rather than the pick."""
         assert is_realtime_model(ProviderKind.OPENAI, None)
         assert not is_realtime_model(ProviderKind.GEMINI, None)
 

@@ -2,7 +2,8 @@
 
 Talks to any OpenAI-compatible chat endpoint (OpenAI cloud, OpenRouter, Ollama,
 LM Studio, vLLM, …) via ``POST /chat/completions``. A single connector covers
-them all; only the ``base_url``, API key and default model differ per kind.
+them all; only the ``base_url`` and the API key differ per kind, and the model
+comes from the request (see :func:`summarize_transcript`).
 """
 
 from __future__ import annotations
@@ -23,8 +24,6 @@ log = get_logger(__name__)
 
 _DEFAULT_BASE_URL = "https://api.openai.com/v1"
 _OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-DEFAULT_MODEL = "gpt-4o-mini"
-_OPENROUTER_DEFAULT_MODEL = "openai/gpt-4o-mini"
 _TIMEOUT_S = 120.0
 
 # Provider kinds that summarize, i.e. speak chat-completions rather than STT.
@@ -74,15 +73,6 @@ class LLMError(Exception):
 def default_base_url(kind: ProviderKind) -> str:
     """Endpoint an LLM kind talks to when its config names no ``base_url``."""
     return _OPENROUTER_BASE_URL if kind is ProviderKind.OPENROUTER else _DEFAULT_BASE_URL
-
-
-def default_model(kind: ProviderKind) -> str:
-    """Model an LLM kind summarizes with when neither call nor config picks one.
-
-    OpenRouter addresses models as ``vendor/model``, so a bare OpenAI model name
-    is not a valid id there.
-    """
-    return _OPENROUTER_DEFAULT_MODEL if kind is ProviderKind.OPENROUTER else DEFAULT_MODEL
 
 
 def routing_payload(config: ProviderConfig) -> dict[str, object] | None:
@@ -161,13 +151,19 @@ async def summarize_transcript(
     *,
     config: ProviderConfig,
     api_key: str | None,
-    model: str | None,
+    model: str,
     transcript: str,
     system_prompt: str | None = None,
     reasoning_effort: str | None = None,
     client_factory: ClientFactory | None = None,
 ) -> str:
     """Summarize ``transcript`` via the provider's chat-completions endpoint.
+
+    ``model`` is required: the summarize route makes the caller choose one, so
+    there is no second place that decides what ran. There used to be a chain
+    here (request, else the provider row's model, else a constant), duplicated
+    verbatim in the route so it could record the choice - two copies that could
+    disagree about what the request actually used.
 
     ``system_prompt`` overrides the built-in summary instructions; blank or
     None falls back to :data:`DEFAULT_SYSTEM_PROMPT`.
@@ -181,10 +177,9 @@ async def summarize_transcript(
     invalid model id, a bad key, a rate limit, or a plain connection failure
     should all read as *why it failed*, not surface as an opaque 500.
     """
-    chosen_model = model or config.model or default_model(config.kind)
     instructions = (system_prompt or "").strip() or DEFAULT_SYSTEM_PROMPT
     payload: dict[str, object] = {
-        "model": chosen_model,
+        "model": model,
         "messages": [
             {"role": "system", "content": instructions},
             {"role": "user", "content": f"Summarize this session transcript:\n\n{transcript}"},

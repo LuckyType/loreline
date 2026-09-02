@@ -92,6 +92,15 @@ const DEFAULT_DIAR_ENDPOINT = 'http://diarization:8001'
 // under the field it's about instead of at the bottom of the card.
 const endpointMissing = $derived(diarMode === 'remote' && !diarEndpoint.trim())
 
+// A fallback provider needs its own model: it is a different vendor with its
+// own list, so the primary's pick means nothing to it, and the API rejects the
+// pair. Blank with no fallback selected is fine - the fallback is optional.
+const fallbackModelMissing = $derived(!!fallback && !fallbackModel)
+
+// Everything the advanced panel can get wrong, so the Start button and the
+// collapsed summary agree about whether it is safe to press.
+const startBlocked = $derived(endpointMissing || fallbackModelMissing)
+
 // A stored default (or an earlier pick) of "inline" must not survive a switch
 // to a model that returns no speakers - the backend would reject the start.
 $effect(() => {
@@ -120,9 +129,14 @@ function setDiarMode(mode: string) {
 // what each is set to, and turns red when something needs attention.
 let advancedOpen = $state(false)
 
-const fallbackSummary = $derived(
-	fallbackProvider ? [fallbackProvider.name, fallbackModel].filter(Boolean).join(' · ') : 'None',
-)
+const fallbackSummary = $derived.by(() => {
+	if (!fallbackProvider) return 'None'
+	// Named but modelless is a problem the collapsed panel must not hide: the
+	// API rejects the pair, so this would otherwise read as configured while
+	// the Start button stays greyed for no visible reason.
+	if (!fallbackModel) return `${fallbackProvider.name} - model missing`
+	return `${fallbackProvider.name} · ${fallbackModel}`
+})
 
 const diarSummary = $derived.by(() => {
 	if (diarMode === 'none') return 'Off'
@@ -134,10 +148,14 @@ const diarSummary = $derived.by(() => {
 	return `Remote - ${diarEndpoint}`
 })
 
-const advancedProblem = $derived(
+// Split out so each half of the summary line can colour itself: a missing
+// fallback model is not a diarization problem and must not paint one red.
+const diarProblem = $derived(
 	endpointMissing ||
 		(diarMode === 'remote' && !!$health?.diarizer_endpoint && $health.diarizer_reachable === false),
 )
+
+const advancedProblem = $derived(startBlocked || diarProblem)
 
 const capturing = $derived($health?.capture_status === 'capturing')
 
@@ -273,7 +291,7 @@ async function start() {
 		await api.startSession({
 			primary_provider: primary,
 			fallback_provider: fallback || null,
-			model: model || null,
+			model,
 			fallback_model: fallbackModel || null,
 			diarization: {
 				mode: diarMode,
@@ -394,9 +412,14 @@ onDestroy(() => {
 							defaultModel={defaults.stt_model}
 						/>
 					</div>
-					<Button onclick={start} disabled={busy || !primary || endpointMissing}>
+					<Button onclick={start} disabled={busy || !primary || !model || startBlocked}>
 						Start session
 					</Button>
+					{#if !model && primary}
+						<span class="text-xs text-muted-foreground">
+							Pick a model to start - it is chosen per session, not stored on the provider.
+						</span>
+					{/if}
 				</div>
 
 				<div
@@ -406,12 +429,12 @@ onDestroy(() => {
 						class={cn('size-1.5 shrink-0 rounded-full', advancedProblem ? 'bg-destructive' : 'bg-emerald-500')}
 					></span>
 					<span class="text-muted-foreground">Fallback</span>
-					<span class="text-foreground">{fallbackSummary}</span>
+					<span class={fallbackModelMissing ? 'text-destructive' : 'text-foreground'}
+						>{fallbackSummary}</span
+					>
 					<span class="text-muted-foreground">·</span>
 					<span class="text-muted-foreground">Diarization</span>
-					<span class={advancedProblem ? 'text-destructive' : 'text-foreground'}
-						>{diarSummary}</span
-					>
+					<span class={diarProblem ? 'text-destructive' : 'text-foreground'}>{diarSummary}</span>
 					<span class="text-muted-foreground">·</span>
 					<span class="text-muted-foreground">Glossary</span>
 					<span class="text-foreground"

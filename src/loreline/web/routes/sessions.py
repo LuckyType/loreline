@@ -17,7 +17,7 @@ from starlette.status import (
 )
 
 from loreline.export import EXPORTERS, canonical_transcript, relabel_speakers, to_txt, variant_view
-from loreline.llm import LLM_KINDS, LLMError, default_model, summarize_transcript
+from loreline.llm import LLM_KINDS, LLMError, summarize_transcript
 from loreline.models import (
     ORIGINAL_VERSION,
     Session,
@@ -206,9 +206,6 @@ async def summarize_session(
     if not events:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="session has no transcript")
     api_key = state.secrets.get(provider.auth_ref) if provider.auth_ref else None
-    # Resolve the model the same way summarize_transcript does, so the stored
-    # provenance records what actually ran, not just what was requested.
-    chosen_model = body.model or provider.model or default_model(provider.kind)
     defaults = await load_action_defaults(state)
     try:
         summary = await summarize_transcript(
@@ -223,9 +220,10 @@ async def summarize_session(
         )
     except LLMError as exc:
         raise HTTPException(status_code=HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
-    await state.sessions.set_summary(
-        session_id, summary, provider_id=provider.id, model=chosen_model
-    )
+    # The request's model is the only one there is, so what is recorded is by
+    # construction what ran. This used to re-derive it here, duplicating the
+    # chain inside summarize_transcript so the two could disagree.
+    await state.sessions.set_summary(session_id, summary, provider_id=provider.id, model=body.model)
     return SummarizeResult(summary=summary)
 
 

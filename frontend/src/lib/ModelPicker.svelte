@@ -104,12 +104,11 @@ $effect(() => {
 	const pid = provider?.id ?? ''
 	if (!pid) return
 	// Same rule as `options`: never seed a model the selected provider can't
-	// serve. Falls through to its favourites, then its own stored model.
-	const prefs = withoutHidden(kind, [
-		...defaultForThisProvider,
-		...favorites,
-		provider?.model ?? '',
-	]).filter(Boolean)
+	// serve. The action default first, then the provider's favourites, and
+	// nothing after: the row used to carry a `model` that was consulted last,
+	// which made a single stored value shadow the per-action default for every
+	// interaction that provider serves.
+	const prefs = withoutHidden(kind, [...defaultForThisProvider, ...favorites]).filter(Boolean)
 	const want = prefs[0] ?? ''
 	const userOverrode = !!value && value !== seededValue
 	if (pid !== seededFor || !userOverrode) {

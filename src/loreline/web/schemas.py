@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Literal, Self
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from loreline.models import (
     ORIGINAL_VERSION,
@@ -30,7 +30,8 @@ class ProviderCreate(BaseModel):
     kind: ProviderKind
     protocol: Protocol
     base_url: str | None = None
-    model: str | None = None
+    # No `model`: a provider row serves every interaction its kind declares, so
+    # it cannot hold one model. See ProviderConfig in src/loreline/models.py.
     favorite_models: list[str] = Field(default_factory=list[str])
     sample_rate: int = 16000
     language: str = "de"
@@ -62,15 +63,34 @@ class StartSessionRequest(BaseModel):
     fallback_provider: str | None = None
     campaign_id: str | None = None
     device: int | str | None = None
-    model: str | None = None
-    """Override the primary provider's model for this session (chosen on demand)."""
+    model: str = Field(min_length=1)
+    """The model to transcribe with. Required, and the only place it is decided:
+    a provider row carries no model any more, so there is nothing to fall back
+    to and no way for a session to run on a model nobody picked. The Start
+    button is disabled until the picker has one, so the UI cannot send a
+    request this rejects."""
     fallback_model: str | None = None
-    """Same, for the fallback provider - it has its own model list."""
+    """Same, for the fallback provider - it has its own model list. Optional
+    only because the fallback itself is; required as soon as one is named (see
+    the validator below)."""
     diarization: DiarizationConfig = Field(default_factory=DiarizationConfig)
     use_glossary: bool = True
     """Feed the campaign glossary to the STT provider (as keyterms or a prompt).
     Defaults to on, which is what capture always did before the option existed;
     turn it off to hear what the provider makes of the audio unbiased."""
+
+    @model_validator(mode="after")
+    def _fallback_model_required_with_a_fallback(self) -> Self:
+        """A named fallback provider needs its own model.
+
+        The fallback has its own model list - it is a different vendor, often
+        with a different transport - so the primary's choice cannot carry over.
+        Left blank it would be a fallback that fails the moment it is needed,
+        which is the worst time to find out.
+        """
+        if self.fallback_provider and not (self.fallback_model or "").strip():
+            raise ValueError("fallback_model is required when a fallback_provider is set")
+        return self
 
 
 class DeviceSetting(BaseModel):
@@ -121,7 +141,9 @@ class SummarizeRequest(BaseModel):
     """Summarize a session with the chosen LLM provider + model."""
 
     provider_id: str
-    model: str | None = None
+    model: str = Field(min_length=1)
+    """Required: nothing else decides it. The provider row carries no model, and
+    the summarizer is handed exactly what is recorded as the summary's model."""
     reasoning_effort: str | None = None
     """How hard a reasoning model should think. Only meaningful for a model
     that advertises support (ModelInfo.supports_reasoning); ignored otherwise,
@@ -142,13 +164,24 @@ class ReprocessRequest(BaseModel):
     operation: Literal["transcribe", "diarize"] = "transcribe"
     diarization: DiarizationConfig = Field(default_factory=DiarizationConfig)
     model: str | None = None
-    """Override the provider's model for this job (chosen on demand), "transcribe" only."""
+    """The model to re-transcribe with. Required for "transcribe" (see the
+    validator below) and ignored for "diarize", which runs the diarizer rather
+    than an STT provider - the same split ``provider_id`` has. It is what the
+    job row records, so a stored version says which model actually produced it
+    instead of naming whatever the provider row happened to hold."""
     target: str = ORIGINAL_VERSION
     """Transcript version a "diarize" job relabels ("original" or a transcribe job id)."""
     use_glossary: bool = True
     """Feed the campaign glossary to the STT provider, "transcribe" only.
     Defaults to on, matching what re-processing always did before the option
     existed; off produces a version comparable against a glossary-biased one."""
+
+    @model_validator(mode="after")
+    def _transcribe_needs_a_model(self) -> Self:
+        """Re-transcription must name a model; a diarize job has no use for one."""
+        if self.operation == "transcribe" and not (self.model or "").strip():
+            raise ValueError('model is required for a "transcribe" job')
+        return self
 
 
 class VideoGenerateRequest(BaseModel):

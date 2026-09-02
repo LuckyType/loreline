@@ -20,9 +20,8 @@ def _backend(client: httpx.AsyncClient) -> OpenAICompatBackend:
         kind=ProviderKind.OPENAI_COMPAT,
         base_url="http://mock/v1",
         protocol=Protocol.HTTP_BATCH,
-        model="whisper-1",
     )
-    return OpenAICompatBackend(config, client=client, language="de")
+    return OpenAICompatBackend(config, model="whisper-1", client=client, language="de")
 
 
 async def _utterances(items: list[Utterance]) -> AsyncIterator[Utterance]:

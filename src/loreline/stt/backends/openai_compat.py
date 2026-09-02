@@ -32,7 +32,6 @@ from loreline.stt.registry import register
 log = get_logger(__name__)
 
 _DEFAULT_BASE_URL = "https://api.openai.com/v1"
-_DEFAULT_MODEL = "whisper-1"
 
 
 class _Transcription(NamedTuple):
@@ -55,19 +54,25 @@ class OpenAICompatBackend:
         self,
         config: ProviderConfig,
         *,
+        model: str | None = None,
         client: httpx.AsyncClient | None = None,
         api_key: str | None = None,
         language: str | None = None,
         default_base_url: str = _DEFAULT_BASE_URL,
-        default_model: str = _DEFAULT_MODEL,
         extra_headers: dict[str, str] | None = None,
     ) -> None:
-        """``default_base_url``/``default_model``/``extra_headers`` let a kind
-        that speaks this same wire format reuse the backend rather than copy it
-        - see loreline/stt/backends/openrouter.py."""
+        """``default_base_url``/``extra_headers`` let a kind that speaks this
+        same wire format reuse the backend rather than copy it - see
+        loreline/stt/backends/openrouter.py.
+
+        ``model`` may be None, and this is the one connector where that is a
+        normal state rather than a missing default: it also serves the
+        self-hosted kind, whose catalogue is whatever the operator installed,
+        so capabilities.yaml curates no models for it and can vouch for none.
+        The field is then left out and the server transcribes with its own."""
         self.config = config
         self._language = language or config.language
-        self._model = config.model or default_model
+        self._model = model
         base_url = config.base_url or default_base_url
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
         headers.update(extra_headers or {})
@@ -140,10 +145,15 @@ class OpenAICompatBackend:
 
     async def _post(self, wav: bytes, *, prompt: str | None, verbose: bool) -> httpx.Response:
         data: dict[str, object] = {
-            "model": self._model,
             "language": self._language,
             "response_format": "verbose_json" if verbose else "json",
         }
+        # Omitted when none was resolved, which happens only for the
+        # self-hosted kind: a server with a single model loaded transcribes
+        # with it regardless, and naming a model it does not have would fail a
+        # request that otherwise works.
+        if self._model:
+            data["model"] = self._model
         if verbose:
             # Repeated form field, per the OpenAI multipart convention. Without
             # it a verbose_json body carries segments but no `words` array.
@@ -167,15 +177,15 @@ class OpenAICompatBackend:
 
 @register(ProviderKind.OPENAI_COMPAT)
 def _factory(  # pyright: ignore[reportUnusedFunction]
-    config: ProviderConfig, secrets: SecretStore
+    config: ProviderConfig, secrets: SecretStore, model: str | None
 ) -> OpenAICompatBackend:
     api_key = secrets.get(config.auth_ref) if config.auth_ref else None
-    return OpenAICompatBackend(config, api_key=api_key)
+    return OpenAICompatBackend(config, model=model, api_key=api_key)
 
 
 @register(ProviderKind.OPENAI)
 def _openai_batch_factory(  # pyright: ignore[reportUnusedFunction]
-    config: ProviderConfig, secrets: SecretStore
+    config: ProviderConfig, secrets: SecretStore, model: str | None
 ) -> OpenAICompatBackend:
     """OpenAI cloud's batch transcription models (whisper-1, gpt-transcribe).
 
@@ -188,9 +198,7 @@ def _openai_batch_factory(  # pyright: ignore[reportUnusedFunction]
     """
     api_key = secrets.get(config.auth_ref) if config.auth_ref else None
     return OpenAICompatBackend(
-        config.model_copy(update={"base_url": None}),
-        api_key=api_key,
-        default_model="gpt-transcribe",
+        config.model_copy(update={"base_url": None}), model=model, api_key=api_key
     )
 
 

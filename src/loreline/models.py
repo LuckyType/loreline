@@ -172,7 +172,14 @@ class ProviderConfig(BaseModel):
         description="Secret name in the secret store; never the raw key.",
     )
     protocol: Protocol
-    model: str | None = None
+    # No `model` field, deliberately. One row serves every interaction its kind
+    # declares - an OpenRouter provider transcribes, summarizes and generates
+    # video - so a single stored model is the wrong answer for at least two of
+    # them, and it was silently overriding the per-action defaults that already
+    # do this job properly (ActionDefaults.stt_model / summarize_model /
+    # video_model). The model is now chosen per request instead, required by
+    # every action route; ``favorite_models`` is what a row still carries, as a
+    # shortlist rather than a choice.
     favorite_models: list[str] = Field(default_factory=list[str])  # picked from the live model list
     sample_rate: int = 16000
     language: str = "de"

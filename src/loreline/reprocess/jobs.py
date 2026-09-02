@@ -56,7 +56,9 @@ if TYPE_CHECKING:
 
 log = get_logger(__name__)
 
-BackendFactory = Callable[["ProviderConfig", "SecretStore"], "STTBackend"]
+# (config, secrets, model) - the job's model, which for a transcribe job is
+# always set. See loreline.stt.registry.create_backend.
+BackendFactory = Callable[["ProviderConfig", "SecretStore", str | None], "STTBackend"]
 DiarizerFactory = Callable[["DiarizationConfig"], "DiarizationProvider"]
 
 
@@ -170,9 +172,6 @@ class ReprocessManager:
             if provider is None:
                 msg = f"unknown provider {req.provider_id!r}"
                 raise ProviderNotFoundError(msg)
-            if req.model:
-                # Model is chosen on demand at enqueue time, overriding the stored default.
-                provider = provider.model_copy(update={"model": req.model})
         elif req.target != ORIGINAL_VERSION:
             events = await self._transcripts.for_session(req.session_id)
             if not variant_rows(events, req.target):
@@ -184,9 +183,13 @@ class ReprocessManager:
             session_id=req.session_id,
             provider_id=req.provider_id if req.operation == "transcribe" else "",
             operation=req.operation,
-            # Resolved here (request override or provider default) so the job
-            # row records what the run actually used, not just the request.
-            model=provider.model if provider is not None else None,
+            # What the run will actually use, because it is the only model
+            # there is: the request must name one for a transcribe job and the
+            # provider row carries none. This used to record the row's model,
+            # which was routinely null while a constant inside the connector
+            # decided what really ran, so the row misreported the version's
+            # provenance.
+            model=req.model if req.operation == "transcribe" else None,
             target=req.target if req.operation == "diarize" else ORIGINAL_VERSION,
             # Same reason as `model`: the row says whether this version was
             # produced with the glossary, not merely what was asked for.
@@ -312,7 +315,7 @@ class ReprocessManager:
         if provider is None:
             msg = "transcribe requires a provider"
             raise ProviderNotFoundError(msg)
-        backend = self._backend_factory(provider, self._secrets)
+        backend = self._backend_factory(provider, self._secrets, job.model)
         diarizer = await self._build_diarizer(job.diarization)
         # Not loaded at all when the job opted out, so no glossary reaches the
         # backend as keyterms or as a prompt.

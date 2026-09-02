@@ -37,7 +37,6 @@ from loreline.stt.registry import register
 log = get_logger(__name__)
 
 _DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
-_DEFAULT_MODEL = "gemini-3.5-transcribe"
 # The API caps custom_vocabulary at 1000 terms; a longer glossary is truncated
 # rather than rejected outright mid-session.
 _MAX_VOCABULARY = 1000
@@ -70,6 +69,7 @@ class GeminiSTTBackend:
         self,
         config: ProviderConfig,
         *,
+        model: str | None = None,
         client: httpx.AsyncClient | None = None,
         api_key: str | None = None,
         language: str | None = None,
@@ -77,7 +77,7 @@ class GeminiSTTBackend:
     ) -> None:
         self.config = config
         self._language = language or config.language
-        self._model = config.model or _DEFAULT_MODEL
+        self._model = model
         self._diarize = diarize
         base_url = config.base_url or _DEFAULT_BASE_URL
         # Gemini authenticates with this header rather than a bearer token.
@@ -111,8 +111,7 @@ class GeminiSTTBackend:
             transcription["language_codes"] = [self._language]
         if vocabulary:
             transcription["custom_vocabulary"] = vocabulary
-        return {
-            "model": self._model,
+        body: dict[str, object] = {
             "input": [
                 {
                     "type": "audio",
@@ -122,6 +121,14 @@ class GeminiSTTBackend:
             ],
             "generation_config": {"transcription_config": transcription},
         }
+        # The Interactions API requires a model, and this kind always has one:
+        # capabilities.yaml marks a Gemini transcription default, so the only
+        # way to get here without one is that marker going missing - in which
+        # case Google's own 400 names the field, which beats this connector
+        # substituting a model id it invented.
+        if self._model:
+            body["model"] = self._model
+        return body
 
     async def _transcribe_one(
         self, utterance: Utterance, *, session_id: str, vocabulary: list[str]
@@ -212,7 +219,7 @@ class GeminiSTTBackend:
 
 @register(ProviderKind.GEMINI)
 def _factory(  # pyright: ignore[reportUnusedFunction]
-    config: ProviderConfig, secrets: SecretStore
+    config: ProviderConfig, secrets: SecretStore, model: str | None
 ) -> GeminiSTTBackend:
     api_key = secrets.get(config.auth_ref) if config.auth_ref else None
-    return GeminiSTTBackend(config, api_key=api_key)
+    return GeminiSTTBackend(config, model=model, api_key=api_key)

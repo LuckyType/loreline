@@ -408,14 +408,14 @@ async function refreshJobs() {
 }
 
 async function reprocess() {
-	if (!rpProvider) return
+	if (!rpProvider || !rpModel) return
 	rpBusy = true
 	error = ''
 	try {
 		await api.enqueueReprocess({
 			session_id: id,
 			provider_id: rpProvider,
-			model: rpModel || null,
+			model: rpModel,
 			use_glossary: rpUseGlossary,
 		})
 		await refreshJobs()
@@ -490,13 +490,13 @@ async function openSummarize() {
 }
 
 async function runSummarize() {
-	if (!sumProvider) return
+	if (!sumProvider || !sumModel) return
 	sumBusy = true
 	sumError = ''
 	try {
 		await api.summarizeSession(id, {
 			provider_id: sumProvider,
-			model: sumModel || null,
+			model: sumModel,
 			reasoning_effort: sumEfforts.length ? sumEffort || null : null,
 		})
 		detail = await api.getSession(id) // refresh to show the stored summary
@@ -750,7 +750,14 @@ onDestroy(() => {
 							/>
 							<span class={rpGlossaryBlocked ? 'text-muted-foreground' : ''}>Use glossary</span>
 						</label>
-						<Button variant="outline" onclick={reprocess} disabled={rpBusy || !rpProvider}>
+						<!-- A model is required: the provider row carries none, so
+						     there is nothing for the server to fall back to. -->
+						<Button
+							variant="outline"
+							onclick={reprocess}
+							disabled={rpBusy || !rpProvider || !rpModel}
+							title={rpProvider && !rpModel ? 'Pick a model to re-process with.' : ''}
+						>
 							{rpBusy ? 'Queuing…' : 'Re-process audio'}
 						</Button>
 					</div>
@@ -1048,7 +1055,12 @@ onDestroy(() => {
 		{/if}
 		<DialogFooter>
 			<Button variant="outline" onclick={() => (summarizeOpen = false)}>Cancel</Button>
-			<Button onclick={runSummarize} disabled={sumBusy || !sumProvider}>
+			<!-- Same rule as re-processing: the model is chosen here or nowhere. -->
+			<Button
+				onclick={runSummarize}
+				disabled={sumBusy || !sumProvider || !sumModel}
+				title={sumProvider && !sumModel ? 'Pick a model to summarize with.' : ''}
+			>
 				{sumBusy ? 'Summarizing…' : 'Summarize'}
 			</Button>
 		</DialogFooter>

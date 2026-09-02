@@ -7,10 +7,10 @@ append the utterance's PCM as a single base64 chunk, commit the buffer, and emit
 the final ``conversation.item.input_audio_transcription.completed`` transcript as
 one ``TranscriptEvent``.
 
-The default model is ``gpt-realtime-whisper`` (the natively-streaming
-transcription model). ``gpt-4o-transcribe`` / ``gpt-4o-mini-transcribe`` /
-``whisper-1`` also work for non-streaming workflows via the batch
-``openai_compat`` backend instead.
+Which OpenAI transcription models reach this connector rather than the batch
+one is decided per model in capabilities.yaml: gpt-live-transcribe and
+gpt-realtime-whisper stream, while gpt-transcribe / gpt-4o-transcribe /
+whisper-1 post through the ``openai_compat`` backend instead.
 
 Docs:
 - https://developers.openai.com/api/docs/guides/realtime-transcription
@@ -40,7 +40,6 @@ from loreline.stt.registry import register
 log = get_logger(__name__)
 
 _DEFAULT_URL = "wss://api.openai.com/v1/realtime?intent=transcription"
-_DEFAULT_MODEL = "gpt-realtime-whisper"
 _COMPLETED = "conversation.item.input_audio_transcription.completed"
 _FAILED = "conversation.item.input_audio_transcription.failed"
 # OpenAI Realtime rejects input sample rates below 24 kHz, while our capture
@@ -76,13 +75,14 @@ class OpenAIRealtimeBackend:
         self,
         config: ProviderConfig,
         *,
+        model: str | None = None,
         api_key: str | None = None,
         language: str | None = None,
     ) -> None:
         self.config = config
         self._api_key = api_key
         self._language = language or config.language
-        self._model = config.model or _DEFAULT_MODEL
+        self._model = model
         self._url = config.base_url or _DEFAULT_URL
         self._out_rate = max(config.sample_rate, _OUTPUT_RATE)
         self._ws: ClientConnection | None = None
@@ -94,10 +94,13 @@ class OpenAIRealtimeBackend:
         return {"Authorization": f"Bearer {self._api_key}"} if self._api_key else {}
 
     def _session_update(self) -> str:
-        transcription: dict[str, object] = {
-            "model": self._model,
-            "language": self._language,
-        }
+        transcription: dict[str, object] = {"language": self._language}
+        # A transcription session with no model named runs OpenAI's own
+        # default, which is the right thing to inherit when nobody chose - and
+        # nobody can reach this connector without choosing except the health
+        # probe, whose point is the handshake rather than the model.
+        if self._model:
+            transcription["model"] = self._model
         if self._prompt and not self._prompt_rejected:
             # Bias recognition toward the campaign glossary (spell/char/place names).
             transcription["prompt"] = self._prompt
@@ -262,7 +265,7 @@ class OpenAIRealtimeBackend:
 
 @register(ProviderKind.OPENAI, realtime=True)
 def _factory(  # pyright: ignore[reportUnusedFunction]
-    config: ProviderConfig, secrets: SecretStore
+    config: ProviderConfig, secrets: SecretStore, model: str | None
 ) -> OpenAIRealtimeBackend:
     api_key = secrets.get(config.auth_ref) if config.auth_ref else None
-    return OpenAIRealtimeBackend(config, api_key=api_key)
+    return OpenAIRealtimeBackend(config, model=model, api_key=api_key)

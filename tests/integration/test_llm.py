@@ -117,7 +117,7 @@ async def test_summarize_unexpected_payload_yields_empty() -> None:
     out = await summarize_transcript(
         config=_config(),
         api_key=None,
-        model=None,
+        model="m",
         transcript="x",
         client_factory=lambda: _client(transport),
     )
@@ -215,9 +215,11 @@ async def test_chat_health_ok_and_failure() -> None:
 async def test_openrouter_endpoint_attribution_headers_and_model_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An OpenRouter provider needs nothing configured: it defaults to
-    OpenRouter's endpoint, sends the two optional attribution headers, and
-    falls back to a ``vendor/model`` id."""
+    """An OpenRouter provider needs nothing configured beyond the model: it
+    defaults to OpenRouter's endpoint and sends the two optional attribution
+    headers. The model is not defaulted here any more - the summarize route
+    requires one and passes it straight through, so what goes on the wire is
+    exactly what the GM picked, in OpenRouter's ``vendor/model`` form."""
     seen: dict[str, str] = {}
 
     def handle(request: httpx.Request) -> httpx.Response:
@@ -244,7 +246,7 @@ async def test_openrouter_endpoint_attribution_headers_and_model_id(
 
     monkeypatch.setattr(httpx, "AsyncClient", fake_client)
     out = await summarize_transcript(
-        config=_openrouter_config(), api_key="k", model=None, transcript="x"
+        config=_openrouter_config(), api_key="k", model="openai/gpt-5.6-luna", transcript="x"
     )
 
     assert out == "A summary."
@@ -252,7 +254,7 @@ async def test_openrouter_endpoint_attribution_headers_and_model_id(
     assert seen["Authorization"] == "Bearer k"
     assert seen["HTTP-Referer"].startswith("https://")
     assert seen["X-Title"] == "Loreline"
-    assert seen["model"] == "openai/gpt-4o-mini"  # a bare OpenAI name is no id there
+    assert seen["model"] == "openai/gpt-5.6-luna"  # a bare OpenAI name is no id there
 
 
 async def test_openrouter_routing_prefs_ride_along_as_the_provider_object() -> None:
@@ -274,7 +276,7 @@ async def test_openrouter_routing_prefs_ride_along_as_the_provider_object() -> N
     await summarize_transcript(
         config=config,
         api_key="k",
-        model=None,
+        model="openai/gpt-5.6-luna",
         transcript="[00:00] GM: You enter the cave.",
         client_factory=lambda: _client(transport),
     )
@@ -339,7 +341,7 @@ class TestReasoningEffort:
         await summarize_transcript(
             config=_openrouter_config(),
             api_key="k",
-            model=None,
+            model="openai/gpt-5.6-luna",
             transcript="t",
             reasoning_effort="high",
             client_factory=lambda: _client(httpx.MockTransport(handle)),
@@ -381,7 +383,7 @@ class TestReasoningEffort:
         await summarize_transcript(
             config=_openrouter_config(),
             api_key="k",
-            model=None,
+            model="openai/gpt-5.6-luna",
             transcript="t",
             client_factory=lambda: _client(httpx.MockTransport(handle)),
         )

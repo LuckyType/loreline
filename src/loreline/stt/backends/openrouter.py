@@ -1,8 +1,10 @@
 """OpenRouter transcription backend.
 
 OpenRouter's STT is an OpenAI-compatible ``POST /audio/transcriptions``, so this
-reuses :class:`OpenAICompatBackend` wholesale and only supplies the endpoint,
-the attribution headers and a ``vendor/model`` default.
+reuses :class:`OpenAICompatBackend` wholesale and only supplies the endpoint
+and the attribution headers. The model arrives resolved from the registry,
+which for this kind means an id in OpenRouter's ``vendor/model`` form - a bare
+OpenAI model name is not a valid id here.
 
 **Re-processing only.** OpenRouter offers no streaming, realtime or websocket
 transcription - a single request/response file upload is the entire API. It is
@@ -24,8 +26,6 @@ from loreline.stt.backends.openai_compat import OpenAICompatBackend
 from loreline.stt.registry import register
 
 _BASE_URL = "https://openrouter.ai/api/v1"
-# Cheap, fast and multilingual - a sane default for replaying a whole session.
-_DEFAULT_MODEL = "openai/whisper-large-v3-turbo"
 
 # Same leaderboard attribution headers the chat and video connectors send.
 _HEADERS = {
@@ -36,13 +36,13 @@ _HEADERS = {
 
 @register(ProviderKind.OPENROUTER)
 def _factory(  # pyright: ignore[reportUnusedFunction]
-    config: ProviderConfig, secrets: SecretStore
+    config: ProviderConfig, secrets: SecretStore, model: str | None
 ) -> OpenAICompatBackend:
     api_key = secrets.get(config.auth_ref) if config.auth_ref else None
     return OpenAICompatBackend(
         config,
+        model=model,
         api_key=api_key,
         default_base_url=_BASE_URL,
-        default_model=_DEFAULT_MODEL,
         extra_headers=_HEADERS,
     )

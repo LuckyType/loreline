@@ -1,4 +1,10 @@
-"""OpenAI batch speaker diarization (``gpt-4o-transcribe-diarize``).
+"""OpenAI batch speaker diarization.
+
+Which model that is comes from capabilities.yaml, not from here: it is the one
+OpenAI transcription model the file records as returning speaker labels (see
+``default_diarizing_model``). This connector used to pin the id, and the pin
+went stale in the usual way - the model it named has a published removal date
+sitting in that same file, where nothing here could see it.
 
 Runs the whole continuous session audio through OpenAI's diarization model in one
 batch call (REST ``/v1/audio/transcriptions``, ``response_format=diarized_json``)
@@ -21,13 +27,13 @@ from typing import cast
 
 import httpx
 
+from loreline.capabilities import default_diarizing_model
 from loreline.logging import get_logger
-from loreline.models import SpeakerSegment
+from loreline.models import ProviderKind, SpeakerSegment
 
 log = get_logger(__name__)
 
 _DEFAULT_BASE_URL = "https://api.openai.com/v1"
-_DEFAULT_MODEL = "gpt-4o-transcribe-diarize"
 _MAX_UPLOAD_BYTES = 25 * 1024 * 1024  # OpenAI /v1/audio/transcriptions limit
 
 
@@ -43,7 +49,18 @@ class OpenAIDiarizer:
         client: httpx.AsyncClient | None = None,
     ) -> None:
         self._api_key = api_key if api_key is not None else os.environ.get("OPENAI_API_KEY")
-        self._model = model or _DEFAULT_MODEL
+        resolved = model or default_diarizing_model(ProviderKind.OPENAI)
+        if resolved is None:
+            # Every OpenAI model that returns speakers has been removed from
+            # the capability file, or more than one now does and none is the
+            # kind's default. Either way this pass cannot pick for the GM, and
+            # saying so beats posting a request with no model in it.
+            msg = (
+                "capabilities.yaml names no OpenAI model that returns speaker labels; "
+                "pass one explicitly or use the remote diarizer"
+            )
+            raise ValueError(msg)
+        self._model = resolved
         headers = {"Authorization": f"Bearer {self._api_key}"} if self._api_key else {}
         self._owns_client = client is None
         self._client = client or httpx.AsyncClient(

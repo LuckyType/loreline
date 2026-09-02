@@ -52,13 +52,13 @@ class ProviderRepository:
         await self._db.connection.execute(
             """
             INSERT INTO providers
-                (id, name, kind, base_url, auth_ref, protocol, model, sample_rate,
+                (id, name, kind, base_url, auth_ref, protocol, sample_rate,
                  language, capabilities, enabled, favorite_models, routing)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 name=excluded.name, kind=excluded.kind, base_url=excluded.base_url,
                 auth_ref=excluded.auth_ref, protocol=excluded.protocol,
-                model=excluded.model, sample_rate=excluded.sample_rate,
+                sample_rate=excluded.sample_rate,
                 language=excluded.language, capabilities=excluded.capabilities,
                 enabled=excluded.enabled, favorite_models=excluded.favorite_models,
                 routing=excluded.routing;
@@ -70,7 +70,6 @@ class ProviderRepository:
                 provider.base_url,
                 provider.auth_ref,
                 provider.protocol.value,
-                provider.model,
                 provider.sample_rate,
                 provider.language,
                 provider.capabilities.model_dump_json(),
@@ -398,7 +397,6 @@ def _row_to_provider(row: aiosqlite.Row) -> ProviderConfig:
         base_url=row["base_url"],
         auth_ref=row["auth_ref"],
         protocol=Protocol(row["protocol"]),
-        model=row["model"],
         sample_rate=row["sample_rate"],
         language=row["language"],
         capabilities=ProviderCaps.model_validate_json(row["capabilities"]),
