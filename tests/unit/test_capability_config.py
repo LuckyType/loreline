@@ -321,12 +321,13 @@ def test_every_offered_transcription_model_can_actually_be_routed() -> None:
 
     The failure this prevents is invisible in the UI: a model appears in the
     picker, the GM selects it, and the job dies with "no STT backend
-    registered". It has happened before: Deepgram's hosted Whisper and
-    AssemblyAI's Universal-2 are batch only while this repo has just their
-    streaming connectors, and the vosk kind was offered for a while with no
-    connector at all (removed in migration v15). A model qualifies if at least
-    ONE of its transports has a backend, because the streaming connectors also
-    serve re-processing.
+    registered". It has happened before: the vosk kind was offered for a while
+    with no connector at all (removed in migration v15), and Deepgram's hosted
+    Whisper and AssemblyAI's Universal-2 had to stay out of this file entirely
+    while their vendors' only connector here was the streaming one, because
+    both models are batch only. They are described now that the batch
+    connectors exist. A model qualifies if at least ONE of its transports has a
+    backend, because the streaming connectors also serve re-processing.
     """
     load_backends()
     registered = registry.registered_transports()
@@ -339,6 +340,38 @@ def test_every_offered_transcription_model_can_actually_be_routed() -> None:
             if not transports & {rt for k, rt in registered if k is kind}:
                 unroutable.append(f"{kind.value}/{model.id}")
     assert not unroutable, f"offered but unroutable: {', '.join(unroutable)}"
+
+
+def test_every_registered_connector_serves_a_described_model() -> None:
+    """The inverse guard: a transport nothing uses is a connector nobody calls.
+
+    Registering (kind, transport) pairs and describing models are two halves of
+    one decision, and only the halves together make a model reachable. The
+    other direction is caught above; this one catches a connector left behind
+    after its models were dropped, or written for a transport this file never
+    claims, which is dead code that still passes every other test.
+
+    Hidden models count here, unlike above: hiding is a release gate on
+    offering a model, not on the connector existing, and an unverified
+    connector plus its hidden model is exactly the intended state (Gemini's
+    Live API, Deepgram Whisper, AssemblyAI Universal-2). Patterns count too,
+    because a kind whose catalogue is discovered at runtime lists no models at
+    all and declares its transports by glob.
+    """
+    load_backends()
+    unused: list[str] = []
+    for kind, provider in load().providers.items():
+        described: set[bool] = set()
+        for entry in (*provider.models, *provider.model_patterns):
+            caps = entry.transcribe
+            if caps is None:
+                continue
+            described.update(rt for rt, on in ((True, caps.realtime), (False, caps.batch)) if on)
+        for registered_kind, realtime in registry.registered_transports():
+            if registered_kind is kind and realtime not in described:
+                transport = "streaming" if realtime else "batch"
+                unused.append(f"{kind.value} ({transport})")
+    assert not unused, f"connector registered for a transport no model uses: {', '.join(unused)}"
 
 
 def test_summarize_and_video_providers_have_a_client_that_can_serve_them() -> None:

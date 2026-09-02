@@ -142,11 +142,53 @@ providers:
           # https://developers.deepgram.com/docs/flux/feature-overview (10 languages)
           languages: codeswitch
         deprecated: null
-      # Deepgram's hosted Whisper is NOT offered: it is batch only, and this
-      # repo has no Deepgram batch connector (only the streaming one, see
-      # stt/backends/deepgram.py), so nothing could route a job to it. Nova and
-      # Flux are unaffected because they stream, and the streaming connector
-      # serves re-processing too by feeding it VAD-chunked utterances.
+
+      # Deepgram's hosted Whisper. Pre-recorded only, which is why it was absent
+      # until this repo had a batch connector: "Live streaming is not available
+      # with Deepgram Whisper Cloud. If you would like to transcribe live
+      # streamed audio, we recommend using our Nova-3 model."
+      # https://developers.deepgram.com/docs/deepgram-whisper-cloud
+      #
+      # HIDDEN UNTIL VERIFIED AGAINST THE REAL API. The connector exists
+      # (stt/backends/deepgram_batch.py) and matches the documented request and
+      # response shapes, but nobody has run it against api.deepgram.com: this
+      # repo has no Deepgram key. A maintainer with one flips this gate by
+      # posting a real utterance to /v1/listen?model=whisper-large and checking
+      # the three things a mock cannot settle: that the transcript arrives under
+      # results.channels[0].alternatives[0], whether words[] carries `speaker`
+      # (see the diarization conflict below), and that the request succeeds with
+      # no biasing parameter at all. Then set hidden: false here and add
+      # "whisper-large" to _CURATED in stt/catalog.py, which is the other half
+      # of the gate for a kind whose catalogue is not fetched live.
+      - id: whisper-large
+        label: Whisper Large (Deepgram Cloud)
+        interactions: [transcribe]
+        hidden: true
+        transcribe:
+          realtime: false
+          batch: true
+          # DOCS CONFLICT, encoded conservatively. The Whisper Cloud feature
+          # table marks Diarization supported, while the diarization page says
+          # "Diarization is compatible with all Nova batch models (Nova-1,
+          # Nova-2, Nova-3) as well as enhanced and base. Whisper is not
+          # supported." Promising speakers that never arrive is the worse
+          # failure, so this stays false until the verification run settles it.
+          # https://developers.deepgram.com/docs/deepgram-whisper-cloud
+          # https://developers.deepgram.com/docs/diarization
+          inline_diarization: false
+          # "Keywords | Not supported" in the Whisper Cloud feature table, and
+          # keyterm prompting is Nova-3 and Flux only, so this model has no
+          # biasing field at all: the connector sends neither parameter.
+          # https://developers.deepgram.com/docs/keyterm
+          # https://developers.deepgram.com/docs/keywords
+          glossary: {supported: false}
+          # The Whisper Cloud response carries word-level start/end, which is
+          # named as the reason to run Whisper here rather than at OpenAI.
+          word_timestamps: true
+          # Whisper's own multilingual set, via `language` or detect_language.
+          # Deepgram claims code-switching for Nova and Flux, never for Whisper.
+          languages: multi
+        deprecated: null
 
     # Task-tuned Nova variants (nova-2-meeting, nova-2-phonecall, nova-3-medical
     # and friends) are annotated but not listed: a picker with ten near-identical
@@ -174,6 +216,21 @@ providers:
           languages: codeswitch
           # Nova-2 does not accept `keyterm`; it takes legacy `keywords`.
           glossary: {supported: true, field: keywords, max_terms: 100}
+      # The other Whisper Cloud sizes (whisper-tiny/base/small/medium, and the
+      # bare "whisper" alias for medium). Same transport and same feature set as
+      # whisper-large above, differing only in model size, so they are annotated
+      # rather than listed. What the pattern buys is routing: without it an
+      # uncurated Deepgram model is assumed to stream, and these cannot.
+      # https://developers.deepgram.com/docs/model
+      - match: "whisper*"
+        interactions: [transcribe]
+        transcribe:
+          realtime: false
+          batch: true
+          inline_diarization: false   # see the docs conflict on whisper-large
+          glossary: {supported: false}
+          word_timestamps: true
+          languages: multi
 
   assemblyai:
     label: AssemblyAI
@@ -218,9 +275,51 @@ providers:
           # "18-language support, native code switching" (async and streaming)
           languages: codeswitch
         deprecated: null
-      # Universal-2 is NOT offered: async only, and this repo has just the
-      # streaming AssemblyAI connector, so a job for it could not be routed.
-      # https://www.assemblyai.com/docs/speech-to-text/pre-recorded-audio
+
+      # HIDDEN UNTIL VERIFIED AGAINST THE REAL API. Universal-2 is pre-recorded
+      # only ("High-volume, price-sensitive batch transcription"; it appears in
+      # no streaming model list), so it was unreachable until this repo had an
+      # async connector. That connector exists (stt/backends/assemblyai_batch.py)
+      # and matches the documented upload/create/poll flow, but nobody has run
+      # it against api.assemblyai.com: this repo has no AssemblyAI key. A
+      # maintainer with one flips this gate by transcribing a real utterance and
+      # checking the three things a mock cannot settle: that
+      # `speech_models: ["universal-2"]` is accepted, that `keyterms_prompt` is
+      # accepted on THIS model (the prompting page is written for
+      # universal-3-5-pro; only the model overview mentions universal-2's
+      # 200-word limit), and that words[] carries `speaker` with speaker_labels
+      # on. Then set hidden: false here and add "universal-2" to _CURATED in
+      # stt/catalog.py, which is the other half of the gate for a kind with no
+      # live catalogue.
+      # https://www.assemblyai.com/docs/getting-started/models
+      - id: universal-2
+        label: Universal-2
+        interactions: [transcribe]
+        hidden: true
+        transcribe:
+          # Async only: `speech_models: ["universal-2"]` is a pre-recorded
+          # value, and the streaming model list names only universal-3-5-pro and
+          # the two universal-streaming models.
+          # https://www.assemblyai.com/docs/pre-recorded-audio/select-the-speech-model
+          # https://www.assemblyai.com/docs/streaming/select-the-speech-model
+          realtime: false
+          batch: true
+          # "Supported models: universal-3-5-pro, universal-2" on the async
+          # diarization page; the parameter is `speaker_labels: true`.
+          # https://www.assemblyai.com/docs/pre-recorded-audio/label-speakers
+          inline_diarization: true
+          # "Keyterms prompting up to 200 words": a fifth of universal-3-5-pro's
+          # async ceiling on the same field, which is why the limit belongs to
+          # the model rather than the vendor. No max_terms_realtime, because
+          # this model has no streaming transport to override.
+          glossary: {supported: true, field: keyterms_prompt, max_terms: 200}
+          # words[] with start/end in milliseconds is included by default on the
+          # async API. https://www.assemblyai.com/docs/api-reference/transcripts/get
+          word_timestamps: true
+          # "Support across 99 languages ... It supports code switching"
+          languages: codeswitch
+        deprecated: null
+
       - id: universal-streaming-english
         label: Universal-Streaming English
         interactions: [transcribe]

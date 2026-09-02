@@ -28,22 +28,14 @@ from loreline.audio.chunker import Utterance
 from loreline.logging import get_logger
 from loreline.models import Glossary, ProviderConfig, ProviderKind, TranscriptEvent, Word
 from loreline.secrets import SecretStore
-from loreline.stt.backends._ws import (
-    as_dict,
-    as_list,
-    as_obj_dict,
-    get_bool,
-    get_float,
-    get_str,
-    probe_health,
-)
+from loreline.stt.backends._assemblyai import auth_headers, glossary_for, parse_words
+from loreline.stt.backends._ws import as_dict, get_bool, get_float, get_str, probe_health
 from loreline.stt.base import glossary_terms
 from loreline.stt.registry import register
 
 log = get_logger(__name__)
 
 _DEFAULT_URL = "wss://streaming.assemblyai.com/v3/ws"
-_MS_PER_S = 1000.0
 # The v3 endpoint rejects any single audio message outside 50-1000 ms (close
 # code 3007), so utterances are re-chunked before sending.
 _CHUNK_MS = 800
@@ -83,14 +75,14 @@ class AssemblyAIBackend:
         # words already carry labels whichever mode the session ends up in.
         # Note AssemblyAI bills streaming diarization as a paid add-on.
         params.append(("speaker_labels", "true"))
-        terms = glossary_terms(glossary)
+        terms = glossary_for(self.config.model, glossary_terms(glossary), realtime=True)
         if terms:
             params.append(("keyterms_prompt", json.dumps(terms)))
         return f"{self._url}?{urlencode(params)}"
 
     @property
     def _headers(self) -> dict[str, str]:
-        return {"Authorization": self._api_key} if self._api_key else {}
+        return auth_headers(self._api_key)
 
     async def transcribe(
         self,
@@ -133,7 +125,7 @@ class AssemblyAIBackend:
                 if kind == "Turn" and get_bool(message, "end_of_turn"):
                     turns[int(get_float(message, "turn_order"))] = (
                         get_str(message, "transcript"),
-                        _parse_words(message, offset=utterance.start),
+                        parse_words(message.get("words"), offset=utterance.start),
                     )
                 elif kind == "Termination":
                     break
@@ -181,26 +173,6 @@ def _audio_chunks(pcm: bytes, sample_rate: int) -> list[bytes]:
         chunks.append(pcm[pos:end])
         pos = end
     return chunks
-
-
-def _parse_words(message: dict[str, object], *, offset: float) -> list[Word]:
-    words: list[Word] = []
-    for raw_word in as_list(message.get("words")):
-        word_map = as_obj_dict(raw_word)
-        if not word_map:
-            continue
-        speaker_raw = word_map.get("speaker")
-        speaker = f"Speaker {speaker_raw}" if speaker_raw is not None else None
-        words.append(
-            Word(
-                text=get_str(word_map, "text"),
-                start=get_float(word_map, "start") / _MS_PER_S + offset,
-                end=get_float(word_map, "end") / _MS_PER_S + offset,
-                confidence=get_float(word_map, "confidence") or None,
-                speaker=speaker,
-            )
-        )
-    return words
 
 
 @register(ProviderKind.ASSEMBLYAI, realtime=True)
