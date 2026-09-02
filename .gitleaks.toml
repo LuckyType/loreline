@@ -1,0 +1,30 @@
+# Gitleaks configuration.
+#
+# Extends the bundled rule set rather than replacing it, so new detectors
+# arrive with each gitleaks upgrade; the allowlist below only carves out
+# findings checked by hand and confirmed not to be secrets.
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = """
+tests/integration/test_google.py - a synthetic Google-shaped string used as a
+NEGATIVE test case (a bare API key the credential loader must reject).
+Confirmed dead against Google's API (400 API_KEY_INVALID) on 2026-09-02.
+
+Safe to allowlist by path because that file was deleted along with the Google
+STT v2 provider: the hits are history-only and the path cannot come back to
+hide a future secret without someone re-adding the file deliberately.
+"""
+paths = ['''tests/integration/test_google\.py''']
+
+[[allowlists]]
+description = """
+deploy/install.sh - `AUTH_PASSWORD=""`, an empty shell variable initialiser.
+The real password is prompted for, or generated, at install time. The regex is
+deliberately anchored to the empty value so a real one assigned here would
+still be reported.
+"""
+regexTarget = "match"
+regexes = ['''AUTH_PASSWORD=""''']

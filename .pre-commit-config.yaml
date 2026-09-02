@@ -34,3 +34,33 @@ repos:
       - id: check-yaml
       - id: check-added-large-files
       - id: check-merge-conflict
+
+  # --- secret scanning -------------------------------------------------
+  #
+  # Two scanners because they disagree usefully. gitleaks is regex/entropy
+  # based and catches secret-*shaped* strings; trufflehog additionally calls
+  # the provider to check whether a candidate is actually live. Neither
+  # subsumes the other - on this repo gitleaks flagged a Google-shaped test
+  # fixture that trufflehog ignored, and trufflehog is the one that would tell
+  # you a real key still works.
+  #
+  # Both look only at what is being committed (--staged / --since-commit HEAD),
+  # so they stay fast enough for a commit hook. A full-history sweep is a
+  # separate, occasional job:
+  #     gitleaks git --redact .
+  #     trufflehog git file://. --results=verified,unknown
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
+
+  - repo: local
+    hooks:
+      # No hosted mirror exists for trufflehog, so this shells out to the
+      # binary and needs it on PATH:
+      #     curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh | sh -s -- -b /usr/local/bin
+      - id: trufflehog
+        name: trufflehog (verified secrets)
+        entry: bash -c "trufflehog git file://. --since-commit HEAD --results=verified,unknown --fail"
+        language: system
+        pass_filenames: false
