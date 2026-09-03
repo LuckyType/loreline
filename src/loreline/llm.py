@@ -17,6 +17,7 @@ from openrouter.components.chatrequest import ChatRequestReasoning
 from openrouter.components.providerpreferences import ProviderPreferences
 
 from loreline.capabilities import kinds_for
+from loreline.health import HealthReport, error_body, error_detail, probe_endpoint
 from loreline.logging import get_logger
 from loreline.models import Interaction, OpenRouterRouting, ProviderConfig, ProviderKind
 
@@ -41,6 +42,11 @@ _BASE_URLS: dict[ProviderKind, str] = {
     ProviderKind.GEMINI: _GEMINI_BASE_URL,
 }
 _TIMEOUT_S = 120.0
+# OpenRouter's /models is public: it answers with the full catalogue and no
+# Authorization header at all, so grading it can never tell a good key from a
+# bad one. /key describes the calling key itself and 401s when there is none.
+# https://openrouter.ai/docs/api-reference/limits
+_OPENROUTER_HEALTH_PATH = "/key"
 
 # Provider kinds that summarize, i.e. speak chat-completions rather than STT.
 # Derived from the one capability table rather than re-listed here - see
@@ -223,7 +229,7 @@ async def summarize_transcript(
                 del payload[field]
                 response = await _post_completion(client, payload)
         if response.status_code >= HTTPStatus.BAD_REQUEST:
-            raise LLMError(_error_detail(response))
+            raise LLMError(error_detail(response))
         return _parse_completion(response.json())
     finally:
         await client.aclose()
@@ -236,35 +242,11 @@ async def _post_completion(client: httpx.AsyncClient, payload: dict[str, object]
         raise LLMError(f"could not reach {client.base_url}: {exc}") from exc
 
 
-def _error_body(response: httpx.Response) -> dict[str, object] | None:
-    """The error envelope of a failed response, unwrapped, or None if unreadable.
-
-    Google's OpenAI-compatible endpoint wraps it in a one-element JSON array,
-    ``[{"error": {...}}]``, where every other endpoint here returns the bare
-    object - verified against the live API, and inconsistently even there: the
-    same base URL's ``/models`` errors come back unwrapped. Without this a
-    Gemini failure would surface as a bare "404 Not Found" instead of the
-    message naming the model that does not exist.
-
-    Note Google's error object carries ``code``/``message``/``status`` and no
-    ``param``, so :func:`_rejects_parameter` never fires for it. That costs
-    nothing as long as capabilities.yaml keeps its per-model effort lists
-    honest, which is where the retry would otherwise be the safety net.
-    """
-    try:
-        payload: object = response.json()
-    except ValueError:
-        return None
-    if isinstance(payload, list) and payload:
-        payload = cast("list[object]", payload)[0]
-    return cast("dict[str, object]", payload) if isinstance(payload, dict) else None
-
-
 def _rejects_parameter(response: httpx.Response, name: str) -> bool:
     """True if the model rejected this specific parameter (not some other 400)."""
     if response.status_code != HTTPStatus.BAD_REQUEST:
         return False
-    payload = _error_body(response)
+    payload = error_body(response)
     if payload is None:
         return False
     error = payload.get("error")
@@ -273,35 +255,37 @@ def _rejects_parameter(response: httpx.Response, name: str) -> bool:
     return cast("dict[str, object]", error).get("param") == name
 
 
-def _error_detail(response: httpx.Response) -> str:
-    """Pull the message out of an OpenAI-compatible error body, else fall back."""
-    payload = _error_body(response)
-    if payload is not None:
-        error = payload.get("error")
-        if isinstance(error, dict):
-            message = cast("dict[str, object]", error).get("message")
-            if isinstance(message, str) and message:
-                return message
-        elif isinstance(error, str) and error:
-            return error
-    return f"{response.status_code} {response.reason_phrase}"
-
-
 async def chat_health(
     *,
     config: ProviderConfig,
     api_key: str | None,
     client_factory: ClientFactory | None = None,
-) -> bool:
-    """Reachability probe for an LLM provider (``GET /models``)."""
+) -> HealthReport:
+    """Probe an LLM provider's credential and endpoint. Never raises.
+
+    ``GET /models`` for most kinds, because it is free, exercises the key and
+    is the one route every OpenAI-compatible server implements. OpenRouter is
+    the exception: it serves its catalogue to anonymous callers (verified live,
+    425 models with no ``Authorization`` header at all), so asking it proves
+    only that openrouter.ai is up. ``GET /key`` there describes the calling key
+    itself and 401s without one, which is the question actually being asked.
+
+    This used to return a bool from ``status_code < 500``, and was wrong for
+    every kind here: a corrupted Google key (400), a corrupted OpenAI key
+    (401), no key at all, and even a base_url pointing at a live host's wrong
+    path (404) all came back healthy. See :mod:`loreline.health` for the
+    grading that replaces it.
+    """
     client = _client(config, api_key, client_factory)
     try:
-        response = await client.get("/models")
-        return response.status_code < HTTPStatus.INTERNAL_SERVER_ERROR
-    except httpx.HTTPError:
-        return False
+        return await probe_endpoint(client, _health_path(config.kind))
     finally:
         await client.aclose()
+
+
+def _health_path(kind: ProviderKind) -> str:
+    """The cheapest read that actually exercises this kind's credential."""
+    return _OPENROUTER_HEALTH_PATH if kind is ProviderKind.OPENROUTER else "/models"
 
 
 def _parse_completion(payload: object) -> str:

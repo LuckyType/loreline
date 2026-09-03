@@ -10,6 +10,7 @@ from websockets.asyncio.server import ServerConnection, serve
 
 from loreline.audio.chunker import Utterance
 from loreline.audio.resample import resample_pcm16
+from loreline.health import HealthStatus
 from loreline.models import Glossary, Protocol, ProviderConfig, ProviderKind, TranscriptEvent
 from loreline.stt.backends.openai_realtime import OpenAIRealtimeBackend
 from mocks.openai_realtime_ws import openai_realtime_handler
@@ -222,7 +223,8 @@ async def test_realtime_health_ok() -> None:
             protocol=Protocol.WS,
             sample_rate=24000,
         )
-        assert await OpenAIRealtimeBackend(config, api_key="secret").health() is True
+        report = await OpenAIRealtimeBackend(config, api_key="secret").health()
+        assert report.status is HealthStatus.HEALTHY
 
 
 async def test_realtime_health_false_when_unreachable() -> None:
@@ -234,7 +236,8 @@ async def test_realtime_health_false_when_unreachable() -> None:
         protocol=Protocol.WS,
         sample_rate=24000,
     )
-    assert await OpenAIRealtimeBackend(config, api_key="x").health() is False
+    report = await OpenAIRealtimeBackend(config, api_key="x").health()
+    assert report.status is HealthStatus.UNREACHABLE
 
 
 def test_resample_pcm16_upsamples_16k_to_24k() -> None:

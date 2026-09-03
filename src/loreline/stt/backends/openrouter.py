@@ -26,6 +26,12 @@ from loreline.stt.backends.openai_compat import OpenAICompatBackend
 from loreline.stt.registry import register
 
 _BASE_URL = "https://openrouter.ai/api/v1"
+# Not /models: verified live, OpenRouter serves its whole catalogue to an
+# anonymous caller (425 models, no Authorization header), so probing it would
+# call any key healthy, including none. /key describes the calling key itself.
+# The chat connector asks the same route for the same reason; see
+# loreline.llm._OPENROUTER_HEALTH_PATH.
+_HEALTH_PATH = "/key"
 
 # Same leaderboard attribution headers the chat and video connectors send.
 _HEADERS = {
@@ -45,4 +51,5 @@ def _factory(  # pyright: ignore[reportUnusedFunction]
         api_key=api_key,
         default_base_url=_BASE_URL,
         extra_headers=_HEADERS,
+        health_path=_HEALTH_PATH,
     )

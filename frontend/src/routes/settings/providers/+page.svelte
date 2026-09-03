@@ -63,6 +63,7 @@ import {
 	type Hosting,
 	type ProtocolKind,
 	capabilityBadges,
+	type HealthStatus,
 	type ModelInfo,
 	type OpenRouterRouting,
 	type ProviderConfig,
@@ -159,7 +160,37 @@ const blank = (): ProviderCreate => ({
 let providers = $state<ProviderConfig[]>([])
 let editing = $state<string | null>(null)
 let message = $state('')
-let testResults = $state<Record<string, 'testing' | 'healthy' | 'down'>>({})
+/**
+ * Per-provider outcome of the Test button.
+ *
+ * `testing` is the only client-side state; the rest are HealthStatus straight
+ * off the wire, so the page never re-derives a verdict the backend already
+ * graded. `detail` is the vendor's own message ("API key not valid.") and is
+ * shown as the badge's tooltip: it is what turns "something is wrong" into
+ * "fix this field".
+ */
+type TestState = { status: HealthStatus | 'testing'; detail?: string | null }
+
+let testResults = $state<Record<string, TestState>>({})
+
+/**
+ * Badge styling per state. Two failures, and they need opposite fixes: a
+ * rejected key is not a wrong base URL, and rendering both as "down" is what
+ * this table used to do. `degraded` is amber rather than red because the
+ * credential is provably fine, and `unknown` stays grey because an
+ * inconclusive probe must not read as a broken provider.
+ */
+const TEST_BADGE: Record<
+	TestState['status'],
+	{ label: string; variant: 'secondary' | 'destructive' | 'outline'; dot: string }
+> = {
+	testing: { label: 'testing…', variant: 'secondary', dot: 'bg-amber-500' },
+	healthy: { label: 'healthy', variant: 'secondary', dot: 'bg-emerald-500' },
+	degraded: { label: 'degraded', variant: 'secondary', dot: 'bg-amber-500' },
+	unauthorized: { label: 'auth failed', variant: 'destructive', dot: 'bg-red-500' },
+	unreachable: { label: 'unreachable', variant: 'destructive', dot: 'bg-red-500' },
+	unknown: { label: 'unknown', variant: 'outline', dot: 'bg-muted-foreground' },
+}
 let form = $state<ProviderCreate>(blank())
 let availableModels = $state<ModelInfo[]>([])
 let modelsLoading = $state(false)
@@ -427,12 +458,17 @@ function edit(p: ProviderConfig) {
 }
 
 async function testOne(id: string) {
-	testResults = { ...testResults, [id]: 'testing' }
+	testResults = { ...testResults, [id]: { status: 'testing' } }
 	try {
 		const r = await api.testProvider(id)
-		testResults = { ...testResults, [id]: r.healthy ? 'healthy' : 'down' }
-	} catch {
-		testResults = { ...testResults, [id]: 'down' }
+		testResults = { ...testResults, [id]: { status: r.status, detail: r.detail } }
+	} catch (e) {
+		// Our own API did not answer, which says nothing about the provider.
+		// Reporting it as unreachable would blame the wrong endpoint.
+		testResults = {
+			...testResults,
+			[id]: { status: 'unknown', detail: e instanceof Error ? e.message : null },
+		}
 	}
 }
 
@@ -508,21 +544,17 @@ onMount(async () => {
 							><code class="text-muted-foreground">{p.secret_hint ?? '- none -'}</code></TableCell
 						>
 						<TableCell>
-							{#if testResults[p.id] === 'healthy'}
-								<Badge variant="secondary" class="gap-1.5"
-									><span class="size-2 rounded-full bg-emerald-500"></span>healthy</Badge
-								>
-							{:else if testResults[p.id] === 'down'}
-								<Badge variant="destructive" class="gap-1.5"
-									><span class="size-2 rounded-full bg-red-500"></span>down</Badge
-								>
-							{:else if testResults[p.id] === 'testing'}
-								<Badge variant="secondary" class="gap-1.5"
-									><span class="size-2 rounded-full bg-amber-500"></span>testing…</Badge
+							{@const result = testResults[p.id]}
+							{#if result}
+								{@const badge = TEST_BADGE[result.status]}
+								<!-- The tooltip carries the vendor's own message, which is the
+								     difference between "unauthorized" and "API key not valid." -->
+								<Badge variant={badge.variant} class="gap-1.5" title={result.detail ?? undefined}
+									><span class="size-2 rounded-full {badge.dot}"></span>{badge.label}</Badge
 								>
 							{:else}
-								<Badge variant="outline" class="gap-1.5"
-									><span class="size-2 rounded-full bg-muted-foreground"></span>unknown</Badge
+								<Badge variant="outline" class="gap-1.5" title="never tested"
+									><span class="size-2 rounded-full bg-muted-foreground"></span>not tested</Badge
 								>
 							{/if}
 						</TableCell>

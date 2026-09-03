@@ -5,6 +5,7 @@ import type {
 	AlertChannel,
 	AlertChannelWrite,
 	AlertTestResult,
+	ProviderTestResult,
 	AutostartState,
 	CapabilityConfig,
 	DeviceSetting,
@@ -158,7 +159,7 @@ export const api = {
 			body: JSON.stringify({ value }),
 		}),
 	testProvider: (id: string) =>
-		request<{ healthy: boolean }>(`/api/providers/${id}/test`, { method: 'POST' }),
+		request<ProviderTestResult>(`/api/providers/${id}/test`, { method: 'POST' }),
 
 	// --- glossary ---
 	getGlossary: (campaign: string) => request<Glossary>(`/api/glossary/${campaign}`),

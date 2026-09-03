@@ -28,6 +28,7 @@ import httpx
 
 from loreline.audio.chunker import Utterance
 from loreline.audio.wav import pcm_to_wav
+from loreline.health import HealthReport, probe_endpoint
 from loreline.logging import get_logger
 from loreline.models import Glossary, ProviderConfig, ProviderKind, TranscriptEvent, Word
 from loreline.secrets import SecretStore
@@ -203,14 +204,25 @@ class GeminiSTTBackend:
             )
         return words
 
-    async def health(self) -> bool:
-        # Unlike the Cloud STT connector, this actually exercises the
-        # credential: a bad key fails here rather than at the first utterance.
-        try:
-            response = await self._client.get("/models")
-        except httpx.HTTPError:
-            return False
-        return response.status_code < HTTPStatus.BAD_REQUEST
+    async def health(self) -> HealthReport:
+        """``GET /models`` on the native surface, which exercises the credential.
+
+        Google grades this differently from its own OpenAI-compatible sibling
+        at ``.../v1beta/openai``, so the two connectors cannot assume each
+        other's answers. Verified live against both, same key:
+
+        * bad key: **400** ``API_KEY_INVALID``, "API key not valid. Please pass
+          a valid API key.", with the reason repeated in ``error.details[]`` -
+          the compat surface returns 400 too but with a different sentence and
+          no details array at all.
+        * no key: **403** ``PERMISSION_DENIED``, "Method doesn't allow
+          unregistered callers" - where the compat surface answers **404**.
+
+        A 400 is therefore not evidence of health here, which is exactly what
+        the old ``< 400`` threshold got right and the LLM side's ``< 500`` got
+        wrong. Both now go through the same grading.
+        """
+        return await probe_endpoint(self._client, "/models")
 
     async def aclose(self) -> None:
         if self._owns_client:
