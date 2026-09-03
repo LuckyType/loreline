@@ -3,10 +3,11 @@
 The two AssemblyAI APIs look nothing alike from the outside - one is a
 WebSocket session (``assemblyai.py``), the other an upload, a job and a poll
 (``assemblyai_batch.py``) - but they agree on the parts that would silently rot
-if written twice: the auth header, the per-word payload (``text``/``start``/
-``end``/``confidence``/``speaker``, times in milliseconds on both), and the
-glossary field, whose ceiling is the same ``keyterms_prompt`` capped differently
-per transport (1000 terms async, 100 streaming, for the same model).
+if written twice: the per-word payload (``text``/``start``/``end``/
+``confidence``/``speaker``, times in milliseconds on both), and the glossary
+field, whose ceiling is the same ``keyterms_prompt`` capped differently per
+transport (1000 terms async, 100 streaming, for the same model). The two hosts
+and the bare-key ``Authorization`` header are the surfaces in capabilities.yaml.
 
 Docs: https://www.assemblyai.com/docs/api-reference/overview
 """
@@ -18,11 +19,6 @@ from loreline.stt.backends._ws import as_list, as_obj_dict, get_float, get_str
 from loreline.stt.base import glossary_terms_for
 
 _MS_PER_S = 1000.0
-
-
-def auth_headers(api_key: str | None) -> dict[str, str]:
-    """AssemblyAI's ``Authorization`` header: the bare key, no scheme prefix."""
-    return {"Authorization": api_key} if api_key else {}
 
 
 def glossary_for(model: str | None, terms: list[str], *, realtime: bool) -> list[str]:

@@ -22,19 +22,20 @@ import httpx
 
 from loreline.audio.chunker import Utterance
 from loreline.audio.wav import pcm_to_wav
+from loreline.capabilities import surface_for
 from loreline.health import HealthReport, probe_endpoint
 from loreline.logging import get_logger
-from loreline.models import Glossary, ProviderConfig, ProviderKind, Word
+from loreline.models import Glossary, Interaction, ProviderConfig, ProviderKind, Word
 from loreline.secrets import SecretStore
 from loreline.stt.base import HttpConnector, Transcription, glossary_terms, secret_for
 from loreline.stt.registry import register
 
 log = get_logger(__name__)
 
-_DEFAULT_BASE_URL = "https://api.openai.com/v1"
 # The health probe. Free, implemented by every OpenAI-compatible server, and on
-# OpenAI cloud it 401s a bad key. A kind whose /models is public overrides it
-# (see openrouter.py), because grading a public list says nothing about a key.
+# OpenAI cloud it 401s a bad key. A kind whose /models is public declares a
+# different path on its surface (OpenRouter's /key), because grading a public
+# list says nothing about a key.
 _DEFAULT_HEALTH_PATH = "/models"
 
 
@@ -52,26 +53,29 @@ class OpenAICompatBackend(HttpConnector[str | None]):
         client: httpx.AsyncClient | None = None,
         api_key: str | None = None,
         language: str | None = None,
-        default_base_url: str = _DEFAULT_BASE_URL,
-        extra_headers: dict[str, str] | None = None,
-        health_path: str = _DEFAULT_HEALTH_PATH,
     ) -> None:
-        """``default_base_url``/``extra_headers``/``health_path`` let a kind
-        that speaks this same wire format reuse the backend rather than copy it
-        - see loreline/stt/backends/openrouter.py.
+        """Three kinds share this wire format (OpenAI cloud, OpenRouter, the
+        self-hosted kind), and everything that differs between them - the
+        base, the attribution headers, the probe path - is their batch
+        transcription surface in capabilities.yaml, so nothing here is per
+        kind.
 
         ``model`` may be None, and this is the one connector where that is a
         normal state rather than a missing default: it also serves the
         self-hosted kind, whose catalogue is whatever the operator installed,
         so capabilities.yaml curates no models for it and can vouch for none.
         The field is then left out and the server transcribes with its own."""
-        base_url = config.base_url or default_base_url
-        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-        headers.update(extra_headers or {})
-        super().__init__(config, client=client, base_url=base_url, headers=headers, timeout=60.0)
+        endpoint = surface_for(config, Interaction.TRANSCRIBE, "batch")
+        super().__init__(
+            config,
+            client=client,
+            base_url=endpoint.url,
+            headers=endpoint.request_headers(api_key),
+            timeout=60.0,
+        )
         self._language = language or config.language
         self._model = model
-        self._health_path = health_path
+        self._health_path = endpoint.health or _DEFAULT_HEALTH_PATH
         # None until the first response tells us whether this endpoint honours
         # verbose_json; False pins it to plain json from then on.
         self._verbose_json: bool | None = None
@@ -156,16 +160,12 @@ def _openai_batch_factory(  # pyright: ignore[reportUnusedFunction]
 
     The registry routes an OPENAI config here when its model is not one of the
     Realtime ones, so one stored provider covers both transports. The config's
-    base_url is dropped rather than passed through: for this kind it has always
-    meant the Realtime WebSocket endpoint, which the batch API cannot live at,
-    and an operator who wants a custom batch endpoint has the OPENAI_COMPAT
-    kind for exactly that.
+    base_url never reaches this connector: for this kind it has always meant
+    the Realtime WebSocket endpoint, which the batch API cannot live at, so
+    the batch surface is declared non-overridable and an operator who wants a
+    custom batch endpoint has the OPENAI_COMPAT kind for exactly that.
     """
-    return OpenAICompatBackend(
-        config.model_copy(update={"base_url": None}),
-        model=model,
-        api_key=secret_for(config, secrets),
-    )
+    return OpenAICompatBackend(config, model=model, api_key=secret_for(config, secrets))
 
 
 def _speaker_label(raw: object) -> str | None:

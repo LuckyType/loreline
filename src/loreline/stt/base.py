@@ -43,7 +43,12 @@ which turned "the first word came back unattributed" into "this utterance has
 no speaker" even when every other word was labelled.
 
 Everything below the classes is shared glossary policy read from
-capabilities.yaml, so no connector restates a per-model ceiling in code.
+capabilities.yaml, so no connector restates a per-model ceiling in code. Where
+a connector posts, and how it spells the credential, is read from the same
+file: each connector asks :func:`loreline.capabilities.surface_for` for the
+surface its kind declares for its transport, which is also where a provider
+row's ``base_url`` is applied (a socket address reaches the streaming
+connector and never the batch one, and the reverse).
 """
 
 from __future__ import annotations
@@ -83,7 +88,6 @@ __all__ = [
     "glossary_support",
     "glossary_terms",
     "glossary_terms_for",
-    "http_base_url",
     "secret_for",
     "transcribe_capabilities",
 ]
@@ -374,17 +378,3 @@ def glossary_terms_for(
     if limit is None and fallback_max_terms is not None:
         return terms[:fallback_max_terms]
     return capped_terms(terms, support, realtime=realtime)
-
-
-def http_base_url(base_url: str | None) -> str | None:
-    """A stored ``base_url`` an HTTP connector can actually use.
-
-    For the kinds whose streaming connector shipped first, base_url has always
-    meant that vendor's WebSocket endpoint, and a ``wss://`` URL handed to a
-    REST client fails every request. Dropping it falls back to the vendor's
-    documented HTTP host, which is what such a config meant all along - the
-    same call the OPENAI batch factory makes in stt/backends/openai_compat.py.
-    """
-    if base_url and base_url.lower().startswith(("ws://", "wss://")):
-        return None
-    return base_url
