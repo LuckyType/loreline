@@ -39,8 +39,6 @@ Docs: https://www.assemblyai.com/docs/api-reference/files/upload
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
-from http import HTTPStatus
 
 import httpx
 
@@ -48,11 +46,17 @@ from loreline.audio.chunker import Utterance
 from loreline.audio.wav import pcm_to_wav
 from loreline.health import HealthReport, probe_endpoint
 from loreline.logging import get_logger
-from loreline.models import Glossary, ProviderConfig, ProviderKind, TranscriptEvent, Word
+from loreline.models import Glossary, ProviderConfig, ProviderKind
 from loreline.secrets import SecretStore
 from loreline.stt.backends._assemblyai import auth_headers, glossary_for, parse_words
 from loreline.stt.backends._ws import as_obj_dict, get_str
-from loreline.stt.base import error_detail, glossary_terms, http_base_url
+from loreline.stt.base import (
+    HttpConnector,
+    Transcription,
+    glossary_terms,
+    http_base_url,
+    secret_for,
+)
 from loreline.stt.registry import register
 
 log = get_logger(__name__)
@@ -86,8 +90,12 @@ _JOB_TIMEOUT_S = 300.0
 _PENDING = frozenset({"queued", "processing"})
 
 
-class AssemblyAIBatchBackend:
-    """Pre-recorded transcription with inline diarization via AssemblyAI."""
+class AssemblyAIBatchBackend(HttpConnector[list[str]]):
+    """Pre-recorded transcription with inline diarization via AssemblyAI.
+
+    The prepared value is the glossary as ``keyterms_prompt`` entries, capped
+    for the model.
+    """
 
     def __init__(
         self,
@@ -101,7 +109,13 @@ class AssemblyAIBatchBackend:
         poll_max_s: float = _POLL_MAX_S,
         job_timeout_s: float = _JOB_TIMEOUT_S,
     ) -> None:
-        self.config = config
+        super().__init__(
+            config,
+            client=client,
+            base_url=http_base_url(config.base_url) or _DEFAULT_BASE_URL,
+            headers=auth_headers(api_key),
+            timeout=_TIMEOUT_S,
+        )
         self._language = language or config.language
         # No default model: which one to fall back to is a capability-config
         # question, not a connector constant. Omitted, AssemblyAI applies its
@@ -112,31 +126,14 @@ class AssemblyAIBatchBackend:
         self._poll_initial_s = poll_initial_s
         self._poll_max_s = poll_max_s
         self._job_timeout_s = job_timeout_s
-        base_url = http_base_url(config.base_url) or _DEFAULT_BASE_URL
-        self._owns_client = client is None
-        self._client = client or httpx.AsyncClient(
-            base_url=base_url, headers=auth_headers(api_key), timeout=_TIMEOUT_S
-        )
 
-    async def transcribe(
-        self,
-        audio: AsyncIterator[Utterance],
-        *,
-        session_id: str,
-        glossary: Glossary | None = None,
-    ) -> AsyncIterator[TranscriptEvent]:
-        terms = glossary_for(self._model, glossary_terms(glossary), realtime=False)
-        async for utterance in audio:
-            event = await self._transcribe_one(utterance, session_id=session_id, terms=terms)
-            if event is not None:
-                yield event
+    def prepare(self, glossary: Glossary | None) -> list[str]:
+        return glossary_for(self._model, glossary_terms(glossary), realtime=False)
 
-    async def _transcribe_one(
-        self, utterance: Utterance, *, session_id: str, terms: list[str]
-    ) -> TranscriptEvent | None:
+    async def transcribe_one(self, utterance: Utterance, prepared: list[str]) -> Transcription:
         wav = pcm_to_wav(utterance.pcm, sample_rate=self.config.sample_rate)
         audio_url = await self._upload(wav)
-        transcript_id = await self._create_job(audio_url, terms)
+        transcript_id = await self._create_job(audio_url, prepared)
         try:
             body = await self._await_completion(transcript_id)
         except BaseException:
@@ -145,19 +142,9 @@ class AssemblyAIBatchBackend:
             # running and the uploaded audio sitting at the vendor.
             await self._delete_job(transcript_id)
             raise
-        text = get_str(body, "text").strip()
-        if not text:
-            return None
-        words = parse_words(body.get("words"), offset=utterance.start)
-        return TranscriptEvent(
-            session_id=session_id,
-            source=self.config.id,
-            text=text,
-            words=words,
-            speaker=_speaker(words),
-            start_ts=utterance.start,
-            end_ts=utterance.end,
-            is_final=True,
+        return Transcription(
+            text=get_str(body, "text").strip(),
+            words=parse_words(body.get("words"), offset=utterance.start),
         )
 
     async def _upload(self, wav: bytes) -> str:
@@ -265,18 +252,6 @@ class AssemblyAIBatchBackend:
                 error=str(exc),
             )
 
-    def _raise_for_status(self, response: httpx.Response) -> None:
-        if response.status_code < HTTPStatus.BAD_REQUEST:
-            return
-        # Keep the body: AssemblyAI puts the actionable reason there ("Not
-        # authorized", "invalid speech_models"), and the upload endpoint answers
-        # 422 as plain text, which error_detail also handles.
-        raise httpx.HTTPStatusError(
-            f"{response.status_code} from {response.request.url}: {error_detail(response)}",
-            request=response.request,
-            response=response,
-        )
-
     async def health(self) -> HealthReport:
         """List one transcript, which exercises the credential.
 
@@ -290,16 +265,6 @@ class AssemblyAIBatchBackend:
         """
         return await probe_endpoint(self._client, _TRANSCRIPT_PATH, params={"limit": 1})
 
-    async def aclose(self) -> None:
-        if self._owns_client:
-            await self._client.aclose()
-
-
-def _speaker(words: list[Word]) -> str | None:
-    """The utterance's dominant speaker, from its first labelled word - the
-    convention every other connector here uses."""
-    return next((w.speaker for w in words if w.speaker), None)
-
 
 @register(ProviderKind.ASSEMBLYAI)
 def _factory(  # pyright: ignore[reportUnusedFunction]
@@ -311,5 +276,4 @@ def _factory(  # pyright: ignore[reportUnusedFunction]
     pair) still goes to the WebSocket connector; only a batch-only model lands
     here.
     """
-    api_key = secrets.get(config.auth_ref) if config.auth_ref else None
-    return AssemblyAIBatchBackend(config, model=model, api_key=api_key)
+    return AssemblyAIBatchBackend(config, model=model, api_key=secret_for(config, secrets))

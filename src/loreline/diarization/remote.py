@@ -7,6 +7,7 @@ from typing import cast
 
 import httpx
 
+from loreline.httpclient import ClientHandle
 from loreline.logging import get_logger
 from loreline.models import SpeakerSegment
 
@@ -28,8 +29,8 @@ class RemoteDiarizer:
         client: httpx.AsyncClient | None = None,
     ) -> None:
         self._endpoint = endpoint
-        self._owns_client = client is None
-        self._client = client or httpx.AsyncClient(base_url=endpoint, timeout=120.0)
+        self._http = ClientHandle(client, base_url=endpoint, timeout=120.0)
+        self._client = self._http.client
 
     async def diarize(
         self,
@@ -57,8 +58,7 @@ class RemoteDiarizer:
         return response.status_code < HTTPStatus.INTERNAL_SERVER_ERROR
 
     async def aclose(self) -> None:
-        if self._owns_client:
-            await self._client.aclose()
+        await self._http.aclose()
 
 
 def _parse_segments(payload: object) -> list[SpeakerSegment]:

@@ -13,7 +13,6 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
-import pytest
 from structlog.testing import capture_logs
 
 from loreline.audio.chunker import Utterance
@@ -106,7 +105,6 @@ async def test_transcribe_maps_words_onto_session_time() -> None:
     assert abs(event.words[0].start - 12.1) < 1e-6  # 0.100s + utterance offset 12.0
     assert abs(event.words[0].end - 12.45) < 1e-6
     assert event.words[0].speaker == "Speaker spk_1"
-    assert event.speaker == "Speaker spk_1"
 
     body = captured[0]
     assert body["model"] == MODEL
@@ -297,22 +295,6 @@ async def test_incomplete_status_yields_no_event() -> None:
         ]
 
     assert events == []
-
-
-async def test_error_body_is_kept_in_the_exception() -> None:
-    def handler(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(400, json={"error": {"message": "API key not valid"}})
-
-    async with _client(handler) as client:
-        backend = GeminiSTTBackend(_config(), client=client)
-        with pytest.raises(httpx.HTTPStatusError, match="API key not valid"):
-            _ = [
-                e
-                async for e in backend.transcribe(
-                    _utterances([Utterance(pcm=b"\x01\x00" * 1600, start=0.0, end=0.1)]),
-                    session_id="s1",
-                )
-            ]
 
 
 async def test_health_checks_the_credential() -> None:

@@ -28,6 +28,7 @@ from typing import cast
 import httpx
 
 from loreline.capabilities import default_diarizing_model
+from loreline.httpclient import ClientHandle
 from loreline.logging import get_logger
 from loreline.models import ProviderKind, SpeakerSegment
 
@@ -62,10 +63,10 @@ class OpenAIDiarizer:
             raise ValueError(msg)
         self._model = resolved
         headers = {"Authorization": f"Bearer {self._api_key}"} if self._api_key else {}
-        self._owns_client = client is None
-        self._client = client or httpx.AsyncClient(
-            base_url=base_url or _DEFAULT_BASE_URL, headers=headers, timeout=600.0
+        self._http = ClientHandle(
+            client, base_url=base_url or _DEFAULT_BASE_URL, headers=headers, timeout=600.0
         )
+        self._client = self._http.client
 
     async def diarize(
         self,
@@ -98,8 +99,7 @@ class OpenAIDiarizer:
         return compressed, "audio.ogg", "audio/ogg"
 
     async def aclose(self) -> None:
-        if self._owns_client:
-            await self._client.aclose()
+        await self._http.aclose()
 
 
 async def _compress_opus(wav: bytes) -> bytes:

@@ -23,6 +23,7 @@ from __future__ import annotations
 from loreline.models import ProviderConfig, ProviderKind
 from loreline.secrets import SecretStore
 from loreline.stt.backends.openai_compat import OpenAICompatBackend
+from loreline.stt.base import secret_for
 from loreline.stt.registry import register
 
 _BASE_URL = "https://openrouter.ai/api/v1"
@@ -44,11 +45,10 @@ _HEADERS = {
 def _factory(  # pyright: ignore[reportUnusedFunction]
     config: ProviderConfig, secrets: SecretStore, model: str | None
 ) -> OpenAICompatBackend:
-    api_key = secrets.get(config.auth_ref) if config.auth_ref else None
     return OpenAICompatBackend(
         config,
         model=model,
-        api_key=api_key,
+        api_key=secret_for(config, secrets),
         default_base_url=_BASE_URL,
         extra_headers=_HEADERS,
         health_path=_HEALTH_PATH,

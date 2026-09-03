@@ -45,7 +45,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
-from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from urllib.parse import urlencode
 
@@ -55,7 +54,7 @@ from websockets.exceptions import ConnectionClosedOK, WebSocketException
 from loreline.audio.chunker import Utterance
 from loreline.health import PROBE_TIMEOUT_S, HealthReport, HealthStatus
 from loreline.logging import get_logger
-from loreline.models import Glossary, ProviderConfig, ProviderKind, TranscriptEvent
+from loreline.models import Glossary, ProviderConfig, ProviderKind
 from loreline.secrets import SecretStore
 from loreline.stt.backends._ws import (
     as_dict,
@@ -65,7 +64,13 @@ from loreline.stt.backends._ws import (
     get_str,
     probe_health,
 )
-from loreline.stt.base import glossary_terms, glossary_terms_for
+from loreline.stt.base import (
+    Connector,
+    Transcription,
+    glossary_terms,
+    glossary_terms_for,
+    secret_for,
+)
 from loreline.stt.registry import register
 
 log = get_logger(__name__)
@@ -226,8 +231,11 @@ class _TurnState:
         )
 
 
-class GeminiLiveBackend:
-    """Streaming transcription (no diarization) via the Gemini Live API."""
+class GeminiLiveBackend(Connector[list[str]]):
+    """Streaming transcription (no diarization) via the Gemini Live API.
+
+    The prepared value is the ``customVocabulary`` list, capped for the model.
+    """
 
     def __init__(
         self,
@@ -237,7 +245,7 @@ class GeminiLiveBackend:
         api_key: str | None = None,
         language: str | None = None,
     ) -> None:
-        self.config = config
+        super().__init__(config)
         self._api_key = api_key
         self._language = language or config.language
         self._model = model
@@ -299,28 +307,14 @@ class GeminiLiveBackend:
             }
         }
 
-    async def transcribe(
-        self,
-        audio: AsyncIterator[Utterance],
-        *,
-        session_id: str,
-        glossary: Glossary | None = None,
-    ) -> AsyncIterator[TranscriptEvent]:
-        vocabulary = _vocabulary_for(self._model, glossary_terms(glossary))
-        async for utterance in audio:
-            event = await self._transcribe_one(
-                utterance, session_id=session_id, vocabulary=vocabulary
-            )
-            if event is not None:
-                yield event
+    def prepare(self, glossary: Glossary | None) -> list[str]:
+        return _vocabulary_for(self._model, glossary_terms(glossary))
 
-    async def _transcribe_one(
-        self, utterance: Utterance, *, session_id: str, vocabulary: list[str]
-    ) -> TranscriptEvent | None:
+    async def transcribe_one(self, utterance: Utterance, prepared: list[str]) -> Transcription:
         state = _TurnState()
         loop = asyncio.get_running_loop()
         async with connect(self._session_url()) as ws:
-            await ws.send(json.dumps(self._setup(vocabulary)))
+            await ws.send(json.dumps(self._setup(prepared)))
             await self._await_setup_ack(ws)
             open_socket = True
             # The send is paced at the capture cadence, and the wait between
@@ -337,19 +331,8 @@ class GeminiLiveBackend:
             if open_socket:
                 await ws.send(json.dumps({"realtimeInput": {"audioStreamEnd": True}}))
                 await self._read_last_turn(ws, state)
-        transcript = state.transcript()
-        if not transcript:
-            return None
-        return TranscriptEvent(
-            session_id=session_id,
-            source=self.config.id,
-            text=transcript,
-            words=[],  # the Live API returns no word timings and no speakers
-            speaker=None,
-            start_ts=utterance.start,
-            end_ts=utterance.end,
-            is_final=True,
-        )
+        # No words: the Live API returns no word timings and no speakers.
+        return Transcription(text=state.transcript())
 
     async def _read_until(
         self, ws: ClientConnection, state: _TurnState, *, deadline: float
@@ -434,9 +417,6 @@ class GeminiLiveBackend:
         except (OSError, WebSocketException) as exc:
             return classify_handshake_error(exc)
 
-    async def aclose(self) -> None:
-        """Nothing is held between utterances (one session per utterance)."""
-
 
 def _audio_chunks(pcm: bytes, sample_rate: int) -> list[bytes]:
     """Split s16le PCM into the ~100 ms messages the docs prescribe."""
@@ -448,5 +428,4 @@ def _audio_chunks(pcm: bytes, sample_rate: int) -> list[bytes]:
 def _factory(  # pyright: ignore[reportUnusedFunction]
     config: ProviderConfig, secrets: SecretStore, model: str | None
 ) -> GeminiLiveBackend:
-    api_key = secrets.get(config.auth_ref) if config.auth_ref else None
-    return GeminiLiveBackend(config, model=model, api_key=api_key)
+    return GeminiLiveBackend(config, model=model, api_key=secret_for(config, secrets))

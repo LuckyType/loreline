@@ -23,7 +23,6 @@ import asyncio
 import base64
 import contextlib
 import json
-from collections.abc import AsyncIterator
 
 from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import WebSocketException
@@ -32,7 +31,7 @@ from loreline.audio.chunker import Utterance
 from loreline.audio.resample import resample_pcm16
 from loreline.health import PROBE_TIMEOUT_S, HealthReport, HealthStatus
 from loreline.logging import get_logger
-from loreline.models import Glossary, ProviderConfig, ProviderKind, TranscriptEvent
+from loreline.models import Glossary, ProviderConfig, ProviderKind
 from loreline.secrets import SecretStore
 from loreline.stt.backends._ws import (
     as_dict,
@@ -41,7 +40,7 @@ from loreline.stt.backends._ws import (
     get_str,
     probe_health,
 )
-from loreline.stt.base import glossary_terms
+from loreline.stt.base import Connector, Transcription, glossary_terms, secret_for
 from loreline.stt.registry import register
 
 log = get_logger(__name__)
@@ -75,8 +74,13 @@ def _capped_prompt(terms: list[str]) -> tuple[str | None, int]:
     return ", ".join(kept) or None, len(terms) - len(kept)
 
 
-class OpenAIRealtimeBackend:
-    """Streaming transcription via an OpenAI Realtime transcription session."""
+class OpenAIRealtimeBackend(Connector[None]):
+    """Streaming transcription via an OpenAI Realtime transcription session.
+
+    Nothing is prepared per call: the glossary prompt lives on the instance
+    (``_prompt``) because the reusable socket's ``session.update`` reads it,
+    so :meth:`prepare` sets it as a side effect and returns None.
+    """
 
     def __init__(
         self,
@@ -86,7 +90,7 @@ class OpenAIRealtimeBackend:
         api_key: str | None = None,
         language: str | None = None,
     ) -> None:
-        self.config = config
+        super().__init__(config)
         self._api_key = api_key
         self._language = language or config.language
         self._model = model
@@ -130,15 +134,14 @@ class OpenAIRealtimeBackend:
             }
         )
 
-    async def transcribe(
-        self,
-        audio: AsyncIterator[Utterance],
-        *,
-        session_id: str,
-        glossary: Glossary | None = None,
-    ) -> AsyncIterator[TranscriptEvent]:
+    def prepare(self, glossary: Glossary | None) -> None:
+        """Set the session prompt from the glossary; see the class docstring.
+
+        Truncation is logged once per glossary rather than per utterance,
+        which is what comparing against the prompt already set achieves.
+        """
         prompt, dropped = _capped_prompt(glossary_terms(glossary))
-        if dropped and prompt != self._prompt:  # log once per glossary, not per utterance
+        if dropped and prompt != self._prompt:
             log.warning(
                 "openai.realtime.glossary_truncated",
                 provider=self.config.id,
@@ -146,10 +149,6 @@ class OpenAIRealtimeBackend:
                 max_chars=_PROMPT_MAX_CHARS,
             )
         self._prompt = prompt
-        async for utterance in audio:
-            event = await self._transcribe_one(utterance, session_id=session_id)
-            if event is not None:
-                yield event
 
     async def _ensure_ws(self) -> ClientConnection:
         """Open + configure the transcription session, reusing it across calls.
@@ -212,9 +211,7 @@ class OpenAIRealtimeBackend:
             with contextlib.suppress(Exception):
                 await ws.close()
 
-    async def _transcribe_one(
-        self, utterance: Utterance, *, session_id: str
-    ) -> TranscriptEvent | None:
+    async def transcribe_one(self, utterance: Utterance, prepared: None) -> Transcription:
         pcm = resample_pcm16(utterance.pcm, self.config.sample_rate, self._out_rate)
         transcript = ""
         try:
@@ -246,18 +243,7 @@ class OpenAIRealtimeBackend:
         except (OSError, WebSocketException):
             await self._reset_ws()  # drop the dead session; the next utterance reconnects
             raise
-        if not transcript:
-            return None
-        return TranscriptEvent(
-            session_id=session_id,
-            source=self.config.id,
-            text=transcript,
-            words=[],
-            speaker=None,
-            start_ts=utterance.start,
-            end_ts=utterance.end,
-            is_final=True,
-        )
+        return Transcription(text=transcript)
 
     async def health(self) -> HealthReport:
         """Open the socket and read one frame, without raising.
@@ -284,5 +270,4 @@ class OpenAIRealtimeBackend:
 def _factory(  # pyright: ignore[reportUnusedFunction]
     config: ProviderConfig, secrets: SecretStore, model: str | None
 ) -> OpenAIRealtimeBackend:
-    api_key = secrets.get(config.auth_ref) if config.auth_ref else None
-    return OpenAIRealtimeBackend(config, model=model, api_key=api_key)
+    return OpenAIRealtimeBackend(config, model=model, api_key=secret_for(config, secrets))

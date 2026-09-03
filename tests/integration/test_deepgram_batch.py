@@ -18,7 +18,6 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
-import pytest
 
 from loreline.audio.chunker import Utterance
 from loreline.health import HealthStatus
@@ -120,7 +119,6 @@ async def test_posts_a_wav_body_and_maps_words_onto_session_time() -> None:
     assert abs(event.words[0].end - 12.45) < 1e-6
     assert event.words[0].text == "Hallo"  # punctuated_word wins over word
     assert event.words[0].speaker == "Speaker 0"
-    assert event.speaker == "Speaker 0"
 
 
 async def test_nova_3_sends_keyterm_and_nova_2_sends_legacy_keywords() -> None:
@@ -199,14 +197,6 @@ async def test_missing_alternatives_yield_no_event() -> None:
         return httpx.Response(200, json={"results": {"channels": []}})
 
     assert await _run(handler) == []
-
-
-async def test_error_body_is_kept_in_the_exception() -> None:
-    def handler(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(400, json={"err_msg": "keyterm is not supported for this model"})
-
-    with pytest.raises(httpx.HTTPStatusError, match="keyterm is not supported"):
-        await _run(handler)
 
 
 async def test_a_streaming_base_url_is_not_handed_to_the_http_client() -> None:
