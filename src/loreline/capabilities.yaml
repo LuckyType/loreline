@@ -181,9 +181,9 @@ providers:
       # the three things a mock cannot settle: that the transcript arrives under
       # results.channels[0].alternatives[0], whether words[] carries `speaker`
       # (see the diarization conflict below), and that the request succeeds with
-      # no biasing parameter at all. Then set hidden: false here and add
-      # "whisper-large" to _CURATED in stt/catalog.py, which is the other half
-      # of the gate for a kind whose catalogue is not fetched live.
+      # no biasing parameter at all. Then set hidden: false here, and that is
+      # the whole release step: this file is the only gate, so nothing else
+      # needs editing to put the model in a picker.
       - id: whisper-large
         label: Whisper Large (Deepgram Cloud)
         interactions: [transcribe]
@@ -217,8 +217,12 @@ providers:
     # Task-tuned Nova variants (nova-2-meeting, nova-2-phonecall, nova-3-medical
     # and friends) are annotated but not listed: a picker with ten near-identical
     # rows helps nobody, while a config naming one still needs the right answer
-    # about diarization and which biasing field to send. Ordered most specific
-    # first, since the first match wins.
+    # about diarization and which biasing field to send. That is now the whole
+    # story - stt/catalog.py used to list six of them in a second table of its
+    # own and offer them anyway, which is exactly the disagreement one source of
+    # truth exists to prevent. To offer one, give it a model entry above; a
+    # pattern annotates, it never lists. Ordered most specific first, since the
+    # first match wins.
     # https://developers.deepgram.com/docs/models-languages-overview
     model_patterns:
       - match: "nova-3*"
@@ -315,9 +319,9 @@ providers:
       # accepted on THIS model (the prompting page is written for
       # universal-3-5-pro; only the model overview mentions universal-2's
       # 200-word limit), and that words[] carries `speaker` with speaker_labels
-      # on. Then set hidden: false here and add "universal-2" to _CURATED in
-      # stt/catalog.py, which is the other half of the gate for a kind with no
-      # live catalogue.
+      # on. Then set hidden: false here, and that is the whole release step:
+      # this file is the only gate, so nothing else needs editing to put the
+      # model in a picker.
       # https://www.assemblyai.com/docs/getting-started/models
       - id: universal-2
         label: Universal-2

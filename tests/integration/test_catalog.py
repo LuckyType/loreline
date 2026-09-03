@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import httpx
 
+from loreline import capabilities
 from loreline.models import Interaction, ModelInfo, ProviderKind
+from loreline.stt import catalog
 from loreline.stt.catalog import list_models
 
 
@@ -428,3 +430,118 @@ async def test_openrouter_transcription_never_claims_diarization() -> None:
         client_factory=lambda: _factory(httpx.MockTransport(handle)),
     )
     assert all(m.inline_diarization is False for m in models)
+
+
+# Interactions that fall back to the curated catalogue when no live list is
+# available. Video is not one of them: its catalogue lives on a separate
+# endpoint (see _fetch_video_models), and a failed fetch there yields nothing
+# rather than falling through.
+_FALLBACK_INTERACTIONS = (Interaction.TRANSCRIBE, Interaction.SUMMARIZE)
+
+
+def _dead_client() -> httpx.AsyncClient:
+    """A client whose every request fails, so the curated path is what runs."""
+    return _factory(httpx.MockTransport(lambda _r: httpx.Response(500)))
+
+
+async def _offered(kind: ProviderKind, interaction: Interaction) -> list[str]:
+    models = await list_models(
+        kind=kind,
+        base_url="http://unreachable",
+        api_key="k",
+        interaction=interaction,
+        client_factory=_dead_client,
+    )
+    return _ids(models)
+
+
+async def test_the_curated_catalogue_has_exactly_one_gate() -> None:
+    """capabilities.yaml decides what a picker offers, and nothing else does.
+
+    This module used to hold a second list, ``_CURATED``, and the two had
+    already drifted: it offered six task-tuned Deepgram variants the yaml
+    deliberately does not list, and it kept gemini-3.5-transcribe-live out of
+    every picker for a while after the yaml unhid it, because nobody
+    remembered there was a second gate to edit. Asserting equality for every
+    kind and every interaction is what makes that unreintroducible - any list
+    here that adds or withholds an id fails this.
+    """
+    for kind in ProviderKind:
+        for interaction in _FALLBACK_INTERACTIONS:
+            assert await _offered(kind, interaction) == capabilities.curated_models(
+                kind, interaction
+            ), f"{kind.value}/{interaction.value} disagrees with capabilities.yaml"
+
+
+def test_this_module_keeps_no_model_list_of_its_own() -> None:
+    """The structural half of the guard above.
+
+    A second list only becomes a gate once something reads it, and adding a
+    reader back is a one-line accident. This fails at the list instead: no
+    constant in loreline.stt.catalog may name a model capabilities.yaml
+    curates, whatever it is called.
+    """
+    curated = {
+        model.id for spec in capabilities.config().providers.values() for model in spec.models
+    }
+    offenders = {
+        name: sorted(curated & _strings(value))
+        for name, value in vars(catalog).items()
+        if not name.startswith("__") and curated & _strings(value)
+    }
+    assert not offenders, f"model ids listed outside capabilities.yaml: {offenders}"
+
+
+def _strings(value: object) -> set[str]:
+    """Every string reachable in a module-level constant, containers included."""
+    if isinstance(value, str):
+        return {value}
+    if isinstance(value, dict):
+        items: list[object] = [*value.keys(), *value.values()]  # type: ignore[dict-item]
+        return {s for item in items for s in _strings(item)}
+    if isinstance(value, list | tuple | set | frozenset):
+        return {s for item in value for s in _strings(item)}  # type: ignore[union-attr]
+    return set()
+
+
+async def test_hidden_models_are_never_offered() -> None:
+    """`hidden` means fully described, never in a picker, still routable.
+
+    Two models ship behind it: connectors written against the documented
+    request shapes but never run against the real API, for want of a key. They
+    must stay out of every list a GM can pick from, while a config naming one
+    explicitly still resolves to its connector - which is how the verification
+    run gets switched on without a code change.
+    """
+    for kind, spec in capabilities.config().providers.items():
+        hidden = {model.id for model in spec.models if model.hidden}
+        if not hidden:
+            continue
+        for interaction in _FALLBACK_INTERACTIONS:
+            assert not hidden & set(await _offered(kind, interaction))
+
+    assert capabilities.curated_models(ProviderKind.DEEPGRAM, Interaction.TRANSCRIBE) == [
+        "nova-3",
+        "nova-2",
+        "flux-general-en",
+        "flux-general-multi",
+    ]  # not whisper-large
+    assert "universal-2" not in capabilities.curated_models(
+        ProviderKind.ASSEMBLYAI, Interaction.TRANSCRIBE
+    )
+
+
+async def test_a_curated_list_never_crosses_interactions() -> None:
+    """A transcribe picker must not offer a chat model, or the reverse.
+
+    Both have happened here: an unscoped OpenAI /models dump offered dall-e-3
+    to transcribe with, and a summarize picker falling through to the
+    transcription table offered gemini-3.5-transcribe to write a summary with.
+    """
+    for kind, spec in capabilities.config().providers.items():
+        declared = {model.id: set(model.interactions) for model in spec.models}
+        for interaction in _FALLBACK_INTERACTIONS:
+            for model_id in await _offered(kind, interaction):
+                assert interaction in declared[model_id], (
+                    f"{kind.value} offers {model_id} for {interaction.value}"
+                )
