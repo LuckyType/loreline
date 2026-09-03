@@ -83,6 +83,11 @@ class HealthResponse(BaseModel):
     """Epoch time the active session's live transcription started failing
     (primary and fallback both producing nothing); null when healthy or idle.
     Audio keeps recording either way - this drives the dashboard warning."""
+    stt_error: str | None = None
+    """Why the active session stopped transcribing for good, in the vendor's own
+    words ("OpenAI: You have no credits remaining."); null while any provider
+    still works. Set only for failures that repeat for every utterance, so the
+    dashboard can say what to fix rather than only that something is wrong."""
 
 
 @router.get("/healthz")
@@ -112,6 +117,7 @@ async def healthz(request: Request) -> HealthResponse:
         diarizer_endpoint=endpoint,
         diarizer_reachable=reachable,
         stt_degraded_since=state.manager.stt_degraded_since(),
+        stt_error=state.manager.stt_error(),
     )
 
 

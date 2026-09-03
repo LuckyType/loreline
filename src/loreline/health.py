@@ -41,6 +41,7 @@ from http import HTTPStatus
 from typing import cast
 
 import httpx
+from websockets.exceptions import InvalidStatus
 
 from loreline.capabilities import requires_api_key
 from loreline.logging import get_logger
@@ -276,7 +277,12 @@ _AUTH_REASONS = (
 
 def looks_like_auth_failure(response: httpx.Response) -> bool:
     """True when a 4xx body complains about the credential rather than the request."""
-    return _has_auth_reason(error_body(response)) or looks_like_auth_message(error_detail(response))
+    return looks_like_auth_body(response.text)
+
+
+def looks_like_auth_body(raw: str) -> bool:
+    """:func:`looks_like_auth_failure` for a body read off an exception."""
+    return _has_auth_reason(body_json(raw)) or looks_like_auth_message(error_message(raw))
 
 
 def looks_like_auth_message(text: str) -> bool:
@@ -322,8 +328,17 @@ def error_body(response: httpx.Response) -> dict[str, object] | None:
     costs nothing as long as capabilities.yaml keeps its per-model effort lists
     honest, which is where the retry would otherwise be the safety net.
     """
+    return body_json(response.text)
+
+
+def body_json(raw: str) -> dict[str, object] | None:
+    """:func:`error_body` for a body that never was an ``httpx.Response``.
+
+    A rejected websocket upgrade carries its body as bytes on the exception,
+    and both halves must unwrap Google's array envelope the same way.
+    """
     try:
-        payload: object = response.json()
+        payload: object = json.loads(raw)
     except ValueError:
         return None
     if isinstance(payload, list) and payload:
@@ -368,8 +383,13 @@ def error_message(raw: str) -> str:
 
 
 def _message_from(payload: dict[str, object]) -> str | None:
-    """The message under whichever of the usual keys this vendor chose."""
-    for key in ("detail", "message", "error"):
+    """The message under whichever of the usual keys this vendor chose.
+
+    ``err_msg`` is Deepgram's, whose REST errors are flat
+    ``{"err_code": ..., "err_msg": ..., "request_id": ...}`` objects rather
+    than an ``error`` envelope; without it a 402 reached the GM as raw JSON.
+    """
+    for key in ("detail", "message", "error", "err_msg"):
         value = payload.get(key)
         if isinstance(value, str) and value:
             return value
@@ -384,3 +404,198 @@ def _transport_detail(exc: httpx.HTTPError) -> str:
     """Name the failure without leaking a URL that may carry a key in a query."""
     reason = str(exc).strip() or type(exc).__name__
     return f"could not connect: {reason}"
+
+
+# ---------------------------------------------------------------------------
+# The request path: is another request worth making?
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class RequestFailure:
+    """Why one real request failed, and whether repeating it can ever work.
+
+    A probe asks "can this provider serve a session". A failed transcription
+    asks something else: "will the next utterance fail the same way". The five
+    :class:`HealthStatus` states cannot answer the second question on their
+    own, because one of them covers both answers - a 429 is ``DEGRADED``
+    whether the vendor is throttling us for two seconds or the account has no
+    credits left, and those want opposite handling. So ``terminal`` is a second
+    axis over the same five states rather than a sixth state.
+    """
+
+    terminal: bool
+    """True when every subsequent request to this provider fails identically.
+
+    Retrying then costs two doomed API calls per utterance and yields nothing;
+    the run should move to another provider, and stop when there is none.
+    """
+
+    status: HealthStatus
+    """What the failure says about the provider, in the probe vocabulary."""
+
+    detail: str
+    """The vendor's own sentence, which is what a GM can act on."""
+
+
+# Bodies that say the account rather than the moment is what is wrong. All
+# verbatim, from vendor docs or from the deployment that reported this bug;
+# matched lowercased, and kept to phrases rather than bare words ("credits",
+# "quota") that an ordinary throttle also uses.
+#   OpenAI 429      "You have no credits remaining. Add credits to continue
+#                    using the API at .../settings/organization/billing/."
+#                   error.type "insufficient_quota"
+#   OpenAI 429      "You exceeded your current quota, please check your plan
+#                    and billing details."  (the older wording, same type)
+#   OpenRouter 402  "Your account or API key has insufficient credits. Add
+#                    more credits and retry the request."
+#   Deepgram 402    "Project does not have enough credits for an ASR request
+#                    and does not have an overage agreement."
+#                   err_code "ASR_PAYMENT_REQUIRED"
+#   AssemblyAI 400  "Your current account balance is negative. Please top up
+#                    to continue using the API."
+_BILLING_PHRASES = (
+    "no credits remaining",
+    "add credits",
+    "more credits",
+    "insufficient credits",
+    "insufficient_quota",
+    "enough credits",
+    "exceeded your current quota",
+    "plan and billing",
+    "balance is negative",
+    "top up",
+    "payment_required",
+    "payment required",
+)
+# What a vendor says when it means "come back later", which outranks the
+# phrases above. Google needs this: on the free tier an ordinary per-minute
+# throttle answers 429 with the exact sentence OpenAI spends on an exhausted
+# account - "You exceeded your current quota, please check your plan and
+# billing details." - so the prose alone would abort a healthy job every time a
+# free key hit its RPM ceiling. What separates them is that Google attaches
+#   "details": [{"@type": ".../google.rpc.RetryInfo", "retryDelay": "23s"}]
+# and a vendor that tells you when to come back has not cut you off.
+_RETRY_MARKERS = ("retrydelay", "retry_delay", "retry-after", "try again in")
+
+
+def classify_request_error(exc: BaseException) -> RequestFailure:
+    """Grade an exception raised while transcribing. Never raises.
+
+    Status codes alone cannot decide this, the same way they could not grade a
+    probe, and 429 is the case that matters: a rate limit is transient and
+    aborting a job over one would be worse than the bug this exists to fix,
+    while "no credits remaining" is terminal and retrying it is pure waste.
+    Only the body tells them apart. Observed per vendor:
+
+    ================  ========================================  ==========
+    answer            body                                      verdict
+    ================  ========================================  ==========
+    OpenAI 429        type ``insufficient_quota``               terminal
+    OpenAI 429        code ``rate_limit_exceeded``              transient
+    OpenAI 401        "Incorrect API key provided: sk-..."      terminal
+    OpenRouter 402    "insufficient credits"                    terminal
+    Deepgram 402      ``ASR_PAYMENT_REQUIRED``                  terminal
+    Deepgram 429      "Too many requests. Please try again"     transient
+    AssemblyAI 400    "account balance is negative"             terminal
+    AssemblyAI 401    "Authentication error, API token ..."     terminal
+    Google 400/401    "API key not valid. ..."                  terminal
+    Gemini 429        quota prose + ``retryDelay``              transient
+    any 5xx, timeout, dropped socket                            transient
+    ================  ========================================  ==========
+
+    Two deviations from :func:`classify_status`, which grades the same answers
+    for the settings page:
+
+    * **404 is terminal here.** A probe reads it as a mistyped base URL; a
+      transcription request reads it as a model or route that does not exist
+      (Deepgram spends 404 on "No such model/language/tier combination
+      found."). Both are unfixable from inside a run, so both stop.
+    * **A transport failure is transient here.** The probe calls it
+      ``UNREACHABLE`` and a GM fixes the URL; mid-run it is far more often a
+      dropped socket or a slow upload, and one bad minute must not end a
+      session that would have recovered on the next utterance.
+    """
+    answer = _http_answer(exc)
+    if answer is None:
+        # No status: a timeout, a refused or dropped connection, a protocol
+        # error, or a connector raising on its own (AssemblyAI's job status).
+        # Nothing here distinguishes a blip from a wall, so keep the old
+        # behaviour and fail over per utterance.
+        return RequestFailure(
+            terminal=False, status=HealthStatus.UNREACHABLE, detail=_exception_detail(exc)
+        )
+    status_code, raw = answer
+    message = error_message(raw)
+    if _out_of_credit(status_code, raw):
+        # Graded DEGRADED rather than UNAUTHORIZED even where the sentence
+        # mentions the key ("Your account or API key has insufficient
+        # credits"): the credential was accepted, the vendor simply will not
+        # serve it, which is what DEGRADED already means. Terminal all the
+        # same, because a balance does not refill by being asked again.
+        return RequestFailure(
+            terminal=True, status=HealthStatus.DEGRADED, detail=message or _exception_detail(exc)
+        )
+    report = classify_status(status_code, message, auth_hint=looks_like_auth_body(raw))
+    return RequestFailure(
+        terminal=_is_terminal(status_code, report.status),
+        status=report.status,
+        detail=report.detail or _exception_detail(exc),
+    )
+
+
+def _out_of_credit(status_code: int, raw: str) -> bool:
+    """True when the answer blames the account's balance rather than the moment.
+
+    This is the crux of the bug: the same 429 carries both readings and only
+    the body separates them.
+    """
+    if status_code >= HTTPStatus.INTERNAL_SERVER_ERROR:
+        return False
+    if any(marker in raw.lower() for marker in _RETRY_MARKERS):
+        return False
+    # 402 needs no body: OpenRouter and Deepgram both spend it on exactly this,
+    # and the status means nothing else.
+    return status_code == HTTPStatus.PAYMENT_REQUIRED or looks_like_billing(raw)
+
+
+def _is_terminal(status_code: int, status: HealthStatus) -> bool:
+    """Whether a graded answer means every later request fails the same way."""
+    if status is HealthStatus.UNAUTHORIZED:
+        # A key is not accepted on the fourth utterance having been rejected on
+        # the first three.
+        return True
+    # UNREACHABLE from here is always a 404 (a transport failure never reaches
+    # this function), i.e. a model or a route that does not exist.
+    return status_code == HTTPStatus.NOT_FOUND
+
+
+def looks_like_billing(raw: str) -> bool:
+    """True when an error body blames the account's balance or quota.
+
+    The whole body, not only the sentence: OpenAI states the cause in
+    ``error.type`` ("insufficient_quota") and Deepgram in ``err_code``, and a
+    vendor that adds a third field name should not need this list edited again.
+    """
+    return any(phrase in raw.lower() for phrase in _BILLING_PHRASES)
+
+
+def _http_answer(exc: BaseException) -> tuple[int, str] | None:
+    """The status and raw body of a rejected request, whichever way it arrived.
+
+    A batch connector raises ``httpx.HTTPStatusError``; a streaming one is
+    rejected during the websocket upgrade, which is a plain HTTP response
+    carried on ``InvalidStatus`` - the same pairing
+    :func:`loreline.stt.backends._ws.classify_handshake_error` reads for
+    probes. Anything else answered with no status at all.
+    """
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code, exc.response.text
+    if isinstance(exc, InvalidStatus):
+        return exc.response.status_code, exc.response.body.decode("utf-8", "replace")
+    return None
+
+
+def _exception_detail(exc: BaseException) -> str:
+    """The exception's own words, or its type when it carries none."""
+    return str(exc).strip()[:_MAX_DETAIL_CHARS] or type(exc).__name__

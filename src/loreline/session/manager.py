@@ -31,7 +31,7 @@ from loreline.models import (
 )
 from loreline.monitoring.alerts import AlertLevel
 from loreline.stt.registry import create_backend
-from loreline.stt.router import RouterConfig, SttRouter
+from loreline.stt.router import ProvidersExhaustedError, RouterConfig, SttRouter
 
 if TYPE_CHECKING:
     from loreline.diarization.base import DiarizationProvider
@@ -166,6 +166,17 @@ class SessionManager:
         """Epoch time the active session's transcription started failing, or None."""
         runtime = self._runtime
         return runtime.router.degraded_since if runtime is not None else None
+
+    def stt_error(self) -> str | None:
+        """Why the active session stopped transcribing for good, or None.
+
+        Carries the vendor's own sentence ("OpenAI: You have no credits
+        remaining."), because "transcription stopped" on its own tells a GM
+        nothing they can act on. Null while any provider still works, and while
+        idle.
+        """
+        runtime = self._runtime
+        return runtime.router.terminal_error if runtime is not None else None
 
     def _check_live_capable(self, config: ProviderConfig, role: str) -> None:
         """Reject a provider that can only transcribe stored audio.
@@ -426,8 +437,30 @@ class SessionManager:
         capture_task = asyncio.create_task(
             _capture_utterances(source, detector, chunker, audio_writer, queue)
         )
+        utterances = _dequeue(queue)
         try:
-            await router.run(_dequeue(queue))
+            await router.run(utterances)
+        except ProvidersExhaustedError as exc:
+            # Every STT provider has failed in a way that will not change (no
+            # credits, rejected key, missing model). The capture deliberately
+            # keeps running: the audio is the one artifact that cannot be
+            # produced again, and a stopped microphone loses the rest of the
+            # evening outright, while a transcript can be re-made from the
+            # stored WAV the moment the provider works again. So the session
+            # degrades to a recorder, and the vendor's reason is pushed at the
+            # GM instead - as an alert, and on the dashboard via
+            # ``stt_error``. Draining the queue is part of keeping the
+            # recording clean: without a consumer it fills, and every further
+            # utterance logs a drop it can do nothing about.
+            log.error("session.stt.exhausted", session_id=session_id, error=str(exc))
+            await self._notify(
+                "Transcription stopped",
+                f"Live transcription stopped ({exc}). Audio keeps recording; "
+                "the session can be re-transcribed later.",
+                level=AlertLevel.ERROR,
+            )
+            async for _utterance in utterances:
+                pass
         finally:
             await capture_task
 

@@ -14,6 +14,7 @@ from test_web_session import (  # type: ignore[import-not-found]
     FakeDiarizer,
     FakeSource,
     GlossaryRecordingBackend,
+    OutOfCreditBackend,
     capture_factory,
 )
 
@@ -609,3 +610,44 @@ async def test_running_job_publishes_its_segment_count(tmp_path: Path) -> None:
             final = (await client.get(f"/api/reprocess/{job_id}")).json()
             assert final["status"] == "done"
             assert final["segments_added"] == 2
+
+
+async def test_reprocess_fails_with_the_vendors_reason_when_credit_runs_out(
+    tmp_path: Path,
+) -> None:
+    """A provider that cannot answer any utterance must end the job, not run it.
+
+    Before, every utterance paid for the same doomed request and the job
+    finished "done" with nothing in it. Now the job carries what the vendor
+    said, which is what the session page shows next to the failed run.
+    """
+    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t")
+    live = [FakeBackend]  # the capture itself must still work
+
+    def factory(config: ProviderConfig, secrets: SecretStore, model: str | None) -> FakeBackend:
+        cls = live.pop() if live else OutOfCreditBackend
+        return cls(config, secrets, model)
+
+    app = create_app(
+        settings,
+        capture_factory=capture_factory,  # type: ignore[arg-type]
+        backend_factory=factory,  # type: ignore[arg-type]
+        diarizer_factory=lambda _cfg: FakeDiarizer(),
+    )
+    async with LifespanManager(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            pid = await _provider(client)
+            sid = await _run_session(client, pid)
+
+            enqueue = await client.post(
+                "/api/reprocess", json={"session_id": sid, "provider_id": pid, "model": _MODEL}
+            )
+            job_id = enqueue.json()["id"]
+            ctx = app.state.ctx  # pyright: ignore[reportAny]
+            await ctx.reprocess.wait(job_id)
+
+            job = (await client.get(f"/api/reprocess/{job_id}")).json()
+            assert job["status"] == "error"
+            assert "no credits remaining" in job["error"]
+            assert job["segments_added"] == 0

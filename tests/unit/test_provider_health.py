@@ -16,10 +16,14 @@ from __future__ import annotations
 import anyio
 import httpx
 import pytest
+from websockets.datastructures import Headers
+from websockets.exceptions import InvalidStatus
+from websockets.http11 import Response
 
 from loreline.health import (
     HealthReport,
     HealthStatus,
+    classify_request_error,
     classify_response,
     error_detail,
     missing_credential,
@@ -33,6 +37,18 @@ def _response(status: int, *, json: object = None, text: str = "") -> httpx.Resp
     if json is not None:
         return httpx.Response(status, json=json, request=request)
     return httpx.Response(status, text=text, request=request)
+
+
+def _failed(status: int, body: object) -> httpx.HTTPStatusError:
+    """A connector's own exception for a rejected transcription request.
+
+    Shaped exactly as the batch connectors raise it: the status line alone
+    ("429 Too Many Requests") is what the old handling saw, and it is not
+    enough to decide anything - see loreline.health.classify_request_error.
+    """
+    request = httpx.Request("POST", "https://api.example.test/v1/audio/transcriptions")
+    response = httpx.Response(status, json=body, request=request)
+    return httpx.HTTPStatusError(f"{status}", request=request, response=response)
 
 
 # --- the live vendor answers, and what each one means ----------------------
@@ -297,3 +313,258 @@ def test_error_detail_unwraps_googles_array_envelope() -> None:
 def test_error_detail_falls_back_to_the_raw_body_then_the_status_line() -> None:
     assert error_detail(_response(401, text="Invalid credentials.")) == "Invalid credentials."
     assert error_detail(_response(404, text="")) == "Not Found"
+
+
+# --- the request path: retry, fail over, or stop? --------------------------
+
+# (label, exception, terminal, expected status, detail fragment)
+_REQUEST_FAILURES = [
+    (
+        "openai-no-credits",
+        # The answer that started this: a live deployment's re-process job made
+        # two of these per utterance for a whole session and produced nothing.
+        # A 429, and terminal - which is why the status code cannot decide.
+        _failed(
+            429,
+            {
+                "error": {
+                    "message": (
+                        "You have no credits remaining. Add credits to continue using the "
+                        "API at https://platform.openai.com/settings/organization/billing/."
+                    ),
+                    "type": "insufficient_quota",
+                    "param": None,
+                    "code": "insufficient_quota",
+                }
+            },
+        ),
+        True,
+        HealthStatus.DEGRADED,
+        "no credits remaining",
+    ),
+    (
+        "openai-rate-limited",
+        # The same status, the opposite verdict. Aborting a healthy job over a
+        # momentary throttle would be a worse bug than the one being fixed.
+        _failed(
+            429,
+            {
+                "error": {
+                    "message": (
+                        "Rate limit reached for gpt-4o-transcribe in organization org-x on "
+                        "requests per min (RPM): Limit 500, Used 500, Requested 1. Please "
+                        "try again in 120ms."
+                    ),
+                    "type": "requests",
+                    "code": "rate_limit_exceeded",
+                }
+            },
+        ),
+        False,
+        HealthStatus.DEGRADED,
+        "Rate limit reached",
+    ),
+    (
+        "gemini-free-tier-throttle",
+        # Google spends the sentence OpenAI uses for an empty account on an
+        # ordinary per-minute throttle, so the prose alone would kill a healthy
+        # run. The RetryInfo is what says "come back", and it wins.
+        _failed(
+            429,
+            {
+                "error": {
+                    "code": 429,
+                    "message": (
+                        "You exceeded your current quota, please check your plan and "
+                        "billing details."
+                    ),
+                    "status": "RESOURCE_EXHAUSTED",
+                    "details": [
+                        {
+                            "@type": "type.googleapis.com/google.rpc.QuotaFailure",
+                            "violations": [
+                                {
+                                    "quotaMetric": (
+                                        "generativelanguage.googleapis.com/"
+                                        "generate_content_free_tier_requests"
+                                    )
+                                }
+                            ],
+                        },
+                        {
+                            "@type": "type.googleapis.com/google.rpc.RetryInfo",
+                            "retryDelay": "23s",
+                        },
+                    ],
+                }
+            },
+        ),
+        False,
+        HealthStatus.DEGRADED,
+        "exceeded your current quota",
+    ),
+    (
+        "openai-bad-key",
+        _failed(
+            401,
+            {
+                "error": {
+                    "message": "Incorrect API key provided: sk-proj-****s000.",
+                    "type": "invalid_request_error",
+                    "code": "invalid_api_key",
+                }
+            },
+        ),
+        True,
+        HealthStatus.UNAUTHORIZED,
+        "Incorrect API key provided",
+    ),
+    (
+        "google-bad-key-400",
+        # Google's 400-for-a-bad-key again: terminal, and only the body says so.
+        _failed(
+            400,
+            {
+                "error": {
+                    "code": 400,
+                    "message": "API key not valid. Please pass a valid API key.",
+                    "status": "INVALID_ARGUMENT",
+                    "details": [{"reason": "API_KEY_INVALID"}],
+                }
+            },
+        ),
+        True,
+        HealthStatus.UNAUTHORIZED,
+        "API key not valid",
+    ),
+    (
+        "openrouter-out-of-credits",
+        # 402 needs no body to be terminal, but the sentence names the key,
+        # which must not turn it into "your credential is wrong".
+        _failed(
+            402,
+            {
+                "error": {
+                    "code": 402,
+                    "message": (
+                        "Your account or API key has insufficient credits. Add more "
+                        "credits and retry the request."
+                    ),
+                }
+            },
+        ),
+        True,
+        HealthStatus.DEGRADED,
+        "insufficient credits",
+    ),
+    (
+        "deepgram-out-of-credits",
+        # Deepgram's flat envelope: no "error" key at all, so the message has
+        # to be read out of err_msg or the GM sees raw JSON.
+        _failed(
+            402,
+            {
+                "err_code": "ASR_PAYMENT_REQUIRED",
+                "err_msg": (
+                    "Project does not have enough credits for an ASR request and does "
+                    "not have an overage agreement."
+                ),
+                "request_id": "1e3f-4c2a",
+            },
+        ),
+        True,
+        HealthStatus.DEGRADED,
+        "does not have enough credits",
+    ),
+    (
+        "deepgram-rate-limited",
+        _failed(429, {"err_code": "TOO_MANY_REQUESTS", "err_msg": "Too many requests."}),
+        False,
+        HealthStatus.DEGRADED,
+        "Too many requests.",
+    ),
+    (
+        "assemblyai-negative-balance",
+        # A 400, and terminal: AssemblyAI puts the balance complaint where
+        # everyone else puts a malformed request.
+        _failed(
+            400,
+            {
+                "error": (
+                    "Your current account balance is negative. Please top up to continue "
+                    "using the API."
+                )
+            },
+        ),
+        True,
+        HealthStatus.DEGRADED,
+        "balance is negative",
+    ),
+    (
+        "model-not-found",
+        # Deepgram's 404 for a model that does not exist. A probe reads a 404
+        # as a mistyped base URL; either way no later utterance can fix it.
+        _failed(404, {"err_msg": "Bad Request: No such model/language/tier combination found."}),
+        True,
+        HealthStatus.UNREACHABLE,
+        "No such model",
+    ),
+    (
+        "provider-outage",
+        _failed(503, {"error": {"message": "upstream unavailable"}}),
+        False,
+        HealthStatus.DEGRADED,
+        "upstream unavailable",
+    ),
+    (
+        "a-400-about-the-audio",
+        # Per-utterance, not per-account: the next utterance may well work.
+        _failed(400, {"error": {"message": "Audio file is too short. Minimum is 0.1 seconds."}}),
+        False,
+        HealthStatus.UNKNOWN,
+        "too short",
+    ),
+    (
+        "timeout",
+        httpx.ReadTimeout("timed out"),
+        False,
+        HealthStatus.UNREACHABLE,
+        "timed out",
+    ),
+    (
+        "connector-raised-on-its-own",
+        # No status to read at all (AssemblyAI reports a failed job as an
+        # ordinary API success carrying an error status).
+        RuntimeError("AssemblyAI transcription failed: audio could not be decoded"),
+        False,
+        HealthStatus.UNREACHABLE,
+        "could not be decoded",
+    ),
+]
+
+
+@pytest.mark.parametrize(("label", "exc", "terminal", "expected", "fragment"), _REQUEST_FAILURES)
+def test_classify_request_failures(
+    label: str, exc: BaseException, terminal: bool, expected: HealthStatus, fragment: str
+) -> None:
+    failure = classify_request_error(exc)
+    assert failure.terminal is terminal, label
+    assert failure.status is expected, label
+    assert fragment in failure.detail, label
+
+
+def test_a_rejected_websocket_upgrade_grades_like_any_other_answer() -> None:
+    """The streaming connectors never get an ``httpx.Response``: a bad key is
+    rejected during the upgrade, and websockets hands back the HTTP response on
+    the exception. Same body, same verdict, or a streaming provider would keep
+    being called after being told no."""
+    response = Response(
+        401,
+        "Unauthorized",
+        Headers(),
+        b'{"category":"UNAUTHORIZED","message":"Authentication failed."}',
+    )
+    failure = classify_request_error(InvalidStatus(response))
+    assert failure.terminal is True
+    assert failure.status is HealthStatus.UNAUTHORIZED
+    assert failure.detail == "Authentication failed."

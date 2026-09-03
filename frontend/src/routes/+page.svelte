@@ -214,6 +214,12 @@ const sttDegradedAt = $derived.by(() => {
 	return new Date(since * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 })
 
+// Worse than degraded, and different in kind: every provider has failed in a
+// way that repeats (no credits, rejected key), so nothing more will be
+// transcribed this session. It carries the vendor's own sentence because that
+// is the only part the GM can act on.
+const sttError = $derived(capturing ? ($health?.stt_error ?? null) : null)
+
 // --- live transcript ---
 let txEvents = $state<TranscriptEvent[]>([])
 let txAutoscroll = $state(true)
@@ -393,7 +399,12 @@ onDestroy(() => {
 					</span>
 					<Button variant="destructive" onclick={stop} disabled={busy}>Stop session</Button>
 				</div>
-				{#if sttDegradedAt}
+				{#if sttError}
+					<p class="mt-2 border-t border-dashed pt-2 text-sm font-medium text-destructive">
+						Live transcription stopped: {sttError} Audio is still being recorded, so the session can
+						be re-transcribed once this is fixed.
+					</p>
+				{:else if sttDegradedAt}
 					<p class="mt-2 border-t border-dashed pt-2 text-sm text-amber-500">
 						Live transcription has been failing since {sttDegradedAt} - audio is still being
 						recorded and the session can be re-transcribed later.
