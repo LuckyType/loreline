@@ -1,0 +1,59 @@
+# Loreline STT
+
+Loreline captures a tabletop session's audio, turns it into a transcript
+through a cloud speech-to-text vendor, and re-processes stored audio later.
+This is that domain's language as the code uses it. Detail lives in
+`src/loreline/capabilities.yaml` (what each model can do) and the
+`src/loreline/stt/base.py` docstring (how a connector is built); decisions
+with a why behind them are in `docs/adr/`.
+
+## Providers and models
+
+**ProviderKind**: A vendor the app can talk to (Deepgram, OpenAI, AssemblyAI,
+Gemini, OpenRouter, or any self-hosted OpenAI-compatible server).
+
+**Interaction**: What a provider is being asked to do: transcribe, summarize
+or generate video. Models are never interchangeable across interactions.
+
+**Transport**: How audio reaches a model: realtime (a socket that answers
+while audio is still going out) or batch (one request per utterance). A model
+may serve one or both.
+_Avoid_: protocol (that is `Protocol`, the wire enum on a ProviderConfig)
+
+**ProviderConfig**: One stored provider row a GM configured: a kind, a
+credential reference, an optional base URL and language.
+
+**ModelSpec / TranscribeCapabilities**: One curated model and its transcription
+surface: transports served, speakers, word timings, glossary ceiling.
+
+**Connector**: The adapter for one kind over one transport, built on the
+`Connector` base and satisfying the `STTBackend` contract.
+_Avoid_: backend (kept only in class names and the contract), provider class
+
+**HealthReport**: A probe's graded verdict on a provider: reachable, the
+credential works, or the vendor's own words on why not.
+
+## Audio and transcript
+
+**Utterance**: One voiced stretch of session audio, cut by the VAD chunker,
+with its start and end on the session clock.
+
+**Word**: One recognized word with timing on the session clock and, when the
+vendor attributes it, a speaker label.
+
+**Transcription**: What a connector gets back for one utterance: the text and
+whatever words came with it. Not yet an event.
+
+**TranscriptEvent**: One final transcript segment for one utterance, tagged
+with the source that produced it. Its speaker is the speaker of the first word
+that carries one, else none; this is the one speaker rule for every connector.
+
+**Transcript version**: One full pass over a session's audio, the live capture
+("original") or one re-processing job. Diarization relabels one into a copy.
+
+**Glossary**: A campaign's list of names and terms, in priority order, sent to
+a model to bias recognition. Trimmed to the model's ceiling, head first.
+_Avoid_: prompt, vocabulary, keyterms (each is one vendor's wire name for it)
+
+**SttRouter**: Runs a session's utterances through a primary connector, fails
+over to a fallback, and applies diarization.
