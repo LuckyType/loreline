@@ -1,6 +1,6 @@
 <script lang="ts">
 import { ChevronDown, TriangleAlert } from '@lucide/svelte'
-import { onDestroy, onMount } from 'svelte'
+import { onMount } from 'svelte'
 import { page } from '$app/stores'
 import { ApiError, api } from '$lib/api'
 import {
@@ -50,7 +50,7 @@ import {
 	type TranscriptEvent,
 	type VideoJob,
 } from '$lib/types'
-import { connect, type LiveSocket } from '$lib/ws'
+import { connect } from '$lib/ws'
 
 let detail = $state<SessionDetail | null>(null)
 let providers = $state<ProviderConfig[]>([])
@@ -66,7 +66,6 @@ let rpDiarMax = $state('')
 // provider, and turning it off is the deliberate choice.
 let rpUseGlossary = $state(true)
 let rpBusy = $state(false)
-let poll: ReturnType<typeof setInterval> | undefined
 
 const id = $derived($page.params.id ?? '')
 const formats: ExportFormat[] = ['txt', 'md', 'srt', 'vtt', 'json']
@@ -187,8 +186,6 @@ function selectable(job: ReprocessJob): boolean {
 // fills up here instead of appearing all at once when the job ends. The
 // event's `source` names the version that produced it, which is what keeps a
 // re-transcription's text out of the original and out of the other versions.
-let txSock: LiveSocket | null = null
-
 function onLiveEvent(data: string) {
 	let event: TranscriptEvent
 	try {
@@ -202,6 +199,30 @@ function onLiveEvent(data: string) {
 	if (shown.some((e) => e.start_ts === event.start_ts && e.text === event.text)) return
 	versionEvents = [...shown, event]
 }
+
+/** The socket is owned by an effect, and that is the whole point.
+ *
+ *  It used to be opened at the end of an `async` onMount, after five requests.
+ *  Svelte only registers a teardown returned from a *synchronous* onMount (an
+ *  async one returns a Promise), so the cleanup never existed, and leaving the
+ *  page while those awaits were in flight opened a socket a moment later that
+ *  nothing would ever close. `connect` reconnects forever, so one navigation
+ *  left a socket reconnecting behind a page that was gone, and each repeat
+ *  added another.
+ *
+ *  An effect has no gap to race: the socket is opened synchronously and the
+ *  teardown is registered in the same breath, so unmounting closes it whenever
+ *  it happens. Closing through the handle rather than the raw WebSocket is what
+ *  stops the reconnect loop; `WebSocket.close()` on its own only triggers it.
+ *  Keying on `id` also reconnects if the route's param changes under a reused
+ *  page component, which onMount would have slept through.
+ *
+ *  Filtered to this session, so the socket carries its re-processing runs (and
+ *  its live capture) and nothing else. */
+$effect(() => {
+	const sock = connect(`/ws/transcript?session_id=${encodeURIComponent(id)}`, onLiveEvent)
+	return () => sock.close()
+})
 
 // --- stored logs ---
 let logsOpen = $state(false)
@@ -385,18 +406,24 @@ function initialReprocessProvider(): string {
 const videoProviders = $derived(providersFor(providers, 'video'))
 let videoOpen = $state(false)
 let videoJobs = $state<VideoJob[]>([])
-let videoPoll: ReturnType<typeof setInterval> | undefined
+
+const videoRunning = $derived(
+	videoJobs.some((j) => j.status === 'queued' || j.status === 'running'),
+)
 
 /** A generation takes minutes, so this polls only while something is actually
- *  in flight and stops as soon as the queue drains. */
+ *  in flight and stops as soon as the queue drains. Hanging the interval off an
+ *  effect means the same teardown covers all three ways it should stop: the
+ *  queue draining, the flag flipping, and the page unmounting. There is no
+ *  timer left to clear by hand, and none left running behind a dead page. */
+$effect(() => {
+	if (!videoRunning) return
+	const timer = setInterval(refreshVideoJobs, 5000)
+	return () => clearInterval(timer)
+})
+
 async function refreshVideoJobs() {
 	videoJobs = await api.listVideoJobs(id)
-	const running = videoJobs.some((j) => j.status === 'queued' || j.status === 'running')
-	if (running && !videoPoll) videoPoll = setInterval(refreshVideoJobs, 5000)
-	if (!running && videoPoll) {
-		clearInterval(videoPoll)
-		videoPoll = undefined
-	}
 }
 
 async function deleteVideo(jobId: string) {
@@ -407,16 +434,39 @@ async function deleteVideo(jobId: string) {
 
 async function refreshJobs() {
 	jobs = await api.listReprocess(id)
-	if (!jobs.some((j) => j.status === 'queued' || j.status === 'running') && poll) {
-		clearInterval(poll)
-		poll = undefined
-		detail = await api.getSession(id)
-		// The finished job may have rewritten the selected version's rows.
-		if (selectedVersion !== 'original') {
-			versionEvents = await api.getTranscriptVersion(id, selectedVersion)
-		}
+}
+
+/** A finished run may have rewritten the selected version's rows, so the queue
+ *  draining refetches them. */
+async function reloadAfterJobs() {
+	detail = await api.getSession(id)
+	if (selectedVersion !== 'original') {
+		versionEvents = await api.getTranscriptVersion(id, selectedVersion)
 	}
 }
+
+const jobsRunning = $derived(jobs.some(inFlight))
+
+// Whether the last run of the effect below saw a job in flight, which is what
+// makes the refetch fire on the falling edge only. A plain variable and not
+// $state on purpose: the effect writes it, and reactive state written inside an
+// effect would schedule that effect to run itself again.
+let jobsWereRunning = false
+
+// The reprocess poll, the video poll's twin: keyed on whether anything is in
+// flight, torn down by the effect on the falling edge and on unmount alike.
+$effect(() => {
+	if (!jobsRunning) {
+		if (jobsWereRunning) {
+			jobsWereRunning = false
+			void reloadAfterJobs()
+		}
+		return
+	}
+	jobsWereRunning = true
+	const timer = setInterval(refreshJobs, 1500)
+	return () => clearInterval(timer)
+})
 
 async function reprocess() {
 	if (!rpProvider || !rpModel) return
@@ -430,7 +480,6 @@ async function reprocess() {
 			use_glossary: rpUseGlossary,
 		})
 		await refreshJobs()
-		if (!poll) poll = setInterval(refreshJobs, 1500)
 	} catch (err) {
 		error = err instanceof ApiError ? err.message : 'reprocess failed'
 	} finally {
@@ -457,7 +506,6 @@ async function diarizeSession() {
 			},
 		})
 		await refreshJobs()
-		if (!poll) poll = setInterval(refreshJobs, 1500)
 	} catch (err) {
 		error = err instanceof ApiError ? err.message : 'diarize failed'
 	} finally {
@@ -519,6 +567,10 @@ async function runSummarize() {
 	}
 }
 
+// Nothing here outlives the awaits: it only assigns state, so `async` is safe.
+// Everything that had to be torn down (the socket, the two intervals) belongs
+// to an effect above, exactly because a teardown returned from an async onMount
+// is never registered.
 onMount(async () => {
 	try {
 		detail = await api.getSession(id)
@@ -535,15 +587,6 @@ onMount(async () => {
 	} catch (err) {
 		error = err instanceof ApiError ? err.message : 'failed to load'
 	}
-	// Filtered to this session, so the socket carries its re-processing runs
-	// (and its live capture) and nothing else.
-	txSock = connect(`/ws/transcript?session_id=${encodeURIComponent(id)}`, onLiveEvent)
-})
-
-onDestroy(() => {
-	if (poll) clearInterval(poll)
-	if (videoPoll) clearInterval(videoPoll)
-	txSock?.close()
 })
 </script>
 
