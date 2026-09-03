@@ -21,7 +21,11 @@ its streaming and its batch connector, and so on).
 browser renders its pickers from that file. The facts that would go on a
 vendor object are per surface, not per vendor: the streaming URL, the batch
 URL, the catalogue URL and the auth scheme all differ between one vendor's own
-transports. A provider class would restate `ProviderSpec` in code, and pull
+transports, and the grain is finer still: which endpoint and protocol apply
+follows from what the chosen model supports (its transports, its preferred
+one, the field its glossary travels in), so a vendor object cannot hold the
+fact without restating it per model. A provider class would restate
+`ProviderSpec` in code, and pull
 capability facts out of the yaml into a place the browser cannot see, so the
 two would drift.
 
