@@ -49,6 +49,11 @@ export interface TranscribeCapabilities {
 	/** Streams within an utterance - also what gates a model for live capture. */
 	realtime: boolean
 	batch: boolean
+	/** Which connector runs when a model serves both transports; null on a
+	 *  model that serves one, which has nothing to choose between. The badge
+	 *  reads `realtime`, not this: "can stream" and "does stream" are
+	 *  different questions and only the router asks the second. */
+	prefer: 'realtime' | 'batch' | null
 	inline_diarization: boolean
 	glossary: GlossarySupport
 	word_timestamps: boolean

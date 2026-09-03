@@ -31,7 +31,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from loreline.capability_config import CapabilityConfig, ProviderSpec
+from loreline.capability_config import CapabilityConfig, ModelPattern, ModelSpec, ProviderSpec
 from loreline.capability_config import load as _load_config
 from loreline.models import Interaction, ModelInfo, ProviderKind
 
@@ -168,13 +168,13 @@ def curated_models(kind: ProviderKind, interaction: Interaction) -> list[str]:
     return [m.id for m in spec.models_for(interaction)] if spec else []
 
 
-def _offered_transcribers(kind: ProviderKind) -> list[object]:
+def _offered_transcribers(kind: ProviderKind) -> list[ModelSpec]:
     """Transcription models this kind actually lists in a picker."""
     spec = _provider(kind)
     return list(spec.models_for(Interaction.TRANSCRIBE)) if spec else []
 
 
-def _transcribe_annotations(kind: ProviderKind) -> list[object]:
+def _transcribe_annotations(kind: ProviderKind) -> list[ModelSpec | ModelPattern]:
     """Every transcription capability source, including glob patterns.
 
     Kinds whose catalogue is discovered at runtime (the self-hosted one) list
@@ -185,22 +185,23 @@ def _transcribe_annotations(kind: ProviderKind) -> list[object]:
     return list(spec.annotations_for(Interaction.TRANSCRIBE)) if spec else []
 
 
-def _streams_only(kind: ProviderKind) -> bool:
-    """Whether every transcription model this kind offers is a streaming one.
+def _default_transport(kind: ProviderKind) -> bool:
+    """Whether the model this kind falls back to runs on the streaming connector.
 
-    This is what settles two questions the per-model data alone cannot. For a
-    model that supports *both* transports, it picks which connector runs:
-    Deepgram's Nova streams while OpenAI's gpt-transcribe posts, which is the
-    routing those configs have always had. Deepgram now has a batch connector
-    too, but every model it *offers* streams, so Nova keeps the lower-latency
-    transport and only a batch-only model reaches the other one. And for a model
-    nobody has curated, this beats the name markers: an unrecognised Deepgram
-    model is assumed to stream, because everything Deepgram offers here does.
+    The answer for a request that names no model, or names one nothing here
+    annotates. A kind that curates a catalogue always marks exactly one
+    transcription default (the loader enforces it), and that model's own
+    declared transport is the closest thing to a house style this file has. A
+    kind that curates nothing has no house style, and batch is the transport
+    such a config has always got.
     """
-    offered = _offered_transcribers(kind)
-    if not offered:
+    spec = _provider(kind)
+    if spec is None:
         return False
-    return all(m.transcribe and m.transcribe.realtime for m in offered)  # type: ignore[attr-defined]
+    chosen = spec.default_model(Interaction.TRANSCRIBE)
+    entry = spec.find(chosen) if chosen else None
+    caps = entry.transcribe if entry else None
+    return bool(caps and caps.prefers_realtime)
 
 
 def supports_inline_diarization(kind: ProviderKind, model: str | None) -> bool:
@@ -230,7 +231,7 @@ def kinds_with_inline_diarization() -> frozenset[ProviderKind]:
         kind
         for kind in config().providers
         for m in _offered_transcribers(kind)
-        if m.transcribe and m.transcribe.inline_diarization  # type: ignore[attr-defined]
+        if m.transcribe and m.transcribe.inline_diarization
     )
 
 
@@ -240,45 +241,55 @@ def is_realtime_model(kind: ProviderKind, model: str | None) -> bool:
     This picks the connector for kinds that offer both transports, so it must
     answer for any model string, curated or not. None reaches here only for a
     kind that curates no catalogue, since :func:`default_model` has already
-    answered for every other one; such a kind keeps the transport it has
-    always had.
+    answered for every other one.
+
+    A curated model answers for itself: its single transport, or, when it
+    serves both, the ``prefer`` written beside them. Nothing consults the
+    sibling list, so hiding or unhiding one model never reroutes another - the
+    guard test in tests/unit/test_capabilities.py pins that.
     """
     spec = _provider(kind)
     if spec is None:
         return False
     if model is None:
-        # No model to resolve against: the kind lists none of its own and the
-        # caller named none either. Fall back to the kind's own transport,
-        # which is the connector such a config has always got.
-        return supports_realtime(kind)
+        # No model to resolve against: the caller named none and, in practice,
+        # the kind lists none of its own either, since create_backend resolves
+        # the declared default first for every kind that curates a catalogue.
+        # Answer with the kind's own default transport rather than "can this
+        # kind stream at all", so an unset model and the model that would
+        # actually run cannot disagree.
+        return _default_transport(kind)
     entry = spec.find(model)
     caps = entry.transcribe if entry else None
     if caps is None:
         return _guess_transport(kind, model)
-    if caps.realtime and caps.batch:
-        # Curated for both. The kind decides, which keeps Deepgram's Nova on
-        # the streaming connector and OpenAI's gpt-transcribe on the batch one.
-        return _streams_only(kind)
-    return caps.realtime
+    # Curated: the model's own transport, or, when it serves both, the
+    # preference written beside them. Nothing here consults the sibling list,
+    # so hiding or unhiding another model cannot reroute this one.
+    return caps.prefers_realtime
 
 
 def _guess_transport(kind: ProviderKind, model: str) -> bool:
     """Transport for a model nobody has annotated."""
-    if _streams_only(kind):
-        return True
     if not supports_realtime(kind):
         return False
-    # A kind that splits its catalogue across transports. Both such vendors put
-    # the transport in the name, and misrouting a brand-new streaming model to
-    # the batch endpoint would fail anyway, so the guess costs nothing over the
-    # curated set alone.
+    # A kind that can stream at all. Vendors that split a catalogue across
+    # transports put the transport in the name, and misrouting a brand-new
+    # streaming model to the batch endpoint would fail anyway, so the marker
+    # costs nothing over the curated set alone. Catalogues rot; this is the
+    # mechanism for that, and it is deliberately separate from the curated
+    # answer above.
     lowered = model.lower()
-    return any(marker in lowered for marker in config().realtime_name_markers)
+    if any(marker in lowered for marker in config().realtime_name_markers):
+        return True
+    # No marker either. Follow the model this kind would have picked for
+    # itself: an unrecognised Deepgram id streams because nova-3 does.
+    return _default_transport(kind)
 
 
 def supports_realtime(kind: ProviderKind) -> bool:
     """Whether this kind can transcribe over a streaming transport at all."""
-    return any(m.transcribe and m.transcribe.realtime for m in _transcribe_annotations(kind))  # type: ignore[attr-defined]
+    return any(m.transcribe and m.transcribe.realtime for m in _transcribe_annotations(kind))
 
 
 def supports_batch(kind: ProviderKind) -> bool:
@@ -287,7 +298,7 @@ def supports_batch(kind: ProviderKind) -> bool:
     Not the complement of :func:`supports_realtime`: OpenAI does both, keyed on
     the model (gpt-transcribe posts, gpt-live-transcribe streams).
     """
-    return any(m.transcribe and m.transcribe.batch for m in _transcribe_annotations(kind))  # type: ignore[attr-defined]
+    return any(m.transcribe and m.transcribe.batch for m in _transcribe_annotations(kind))
 
 
 def supports_live_capture(kind: ProviderKind) -> bool:
