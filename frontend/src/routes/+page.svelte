@@ -112,8 +112,12 @@ const startBlocked = $derived(endpointMissing || fallbackModelMissing)
 
 // A stored default (or an earlier pick) of "inline" must not survive a switch
 // to a model that returns no speakers - the backend would reject the start.
+// The condition is "a model is chosen", not "its catalogue entry has arrived":
+// the entry only lands once the picker's list has been opened, and until then
+// the dropdown already refuses to offer inline, so waiting for it would leave
+// the summary line claiming a mode the control below it no longer lists.
 $effect(() => {
-	if (diarMode === 'inline' && primaryModelInfo && !inlineAvailable) diarMode = 'none'
+	if (diarMode === 'inline' && model && !inlineAvailable) diarMode = 'none'
 })
 
 // Switching to a model with no way to receive a glossary at all must not leave
@@ -176,8 +180,16 @@ const capturing = $derived($health?.capture_status === 'capturing')
 let sessionStartedAt = $state<number | null>(null) // epoch seconds
 let nowMs = $state(Date.now())
 
+// Pulled out as its own derived, and the effect below reads only this: the
+// layout replaces the whole $health object on every poll, so an effect that
+// touched the store directly would re-fetch the session (transcript and all)
+// every few seconds for one integer. A session id is a string, and a derived
+// whose value is unchanged does not propagate, so the fetch runs once per
+// session instead of once per poll.
+const activeSessionId = $derived(capturing ? ($health?.active_session_id ?? null) : null)
+
 $effect(() => {
-	const id = capturing ? $health?.active_session_id : null
+	const id = activeSessionId
 	if (!id) {
 		sessionStartedAt = null
 		return
@@ -185,7 +197,9 @@ $effect(() => {
 	api
 		.getSession(id)
 		.then((detail) => {
-			if ($health?.active_session_id === detail.session.id) {
+			// Read the id again rather than closing over it: a slow response
+			// for a session that has since ended must not clobber newer state.
+			if (activeSessionId === detail.session.id) {
 				sessionStartedAt = detail.session.started_at
 			}
 		})
@@ -431,6 +445,8 @@ onDestroy(() => {
 							provider={primaryProvider}
 							bind:value={model}
 							defaultModel={defaults.stt_model}
+							defaultProvider={defaults.stt_provider ?? ''}
+							onselect={(m) => (primaryModelInfo = m)}
 						/>
 					</div>
 					<Button onclick={start} disabled={busy || !primary || !model || startBlocked}>
