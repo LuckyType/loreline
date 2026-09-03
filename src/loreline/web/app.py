@@ -298,11 +298,19 @@ def create_app(
             await state.db.close()
             log.info("loreline.shutdown")
 
+    # `withCredentials` makes Swagger UI's `Try it out` send fetches with
+    # `credentials: include` instead of the default `same-origin`. /docs is
+    # same-origin with the API so the session cookie would ride along either
+    # way, but the explicit setting keeps it working if the docs are ever
+    # served from another origin, and it is the only knob that can help: the
+    # cookie is HttpOnly, so the Authorize dialog's value box cannot set it
+    # (see `session_cookie` in web/auth.py).
     app = FastAPI(
         title="Loreline",
         version=__version__,
         summary="Tabletop session transcriber - capture + STT orchestration.",
         lifespan=lifespan,
+        swagger_ui_parameters={"withCredentials": True},
     )
 
     app.include_router(system.router)
