@@ -24,8 +24,6 @@ Docs: https://ai.google.dev/gemini-api/docs/transcribe
 from __future__ import annotations
 
 import base64
-from collections.abc import AsyncIterator
-from http import HTTPStatus
 from typing import cast
 
 import httpx
@@ -34,13 +32,15 @@ from loreline.audio.chunker import Utterance
 from loreline.audio.wav import pcm_to_wav
 from loreline.health import HealthReport, probe_endpoint
 from loreline.logging import get_logger
-from loreline.models import Glossary, ProviderConfig, ProviderKind, TranscriptEvent, Word
+from loreline.models import Glossary, ProviderConfig, ProviderKind, Word
 from loreline.secrets import SecretStore
 from loreline.stt.base import (
     FeatureConflictGuard,
-    error_detail,
+    HttpConnector,
+    Transcription,
     glossary_terms,
     glossary_terms_for,
+    secret_for,
 )
 from loreline.stt.registry import register
 
@@ -75,8 +75,11 @@ def _seconds(value: object) -> float:
         return 0.0
 
 
-class GeminiSTTBackend:
-    """Batch transcription with inline diarization via the Gemini API."""
+class GeminiSTTBackend(HttpConnector[list[str]]):
+    """Batch transcription with inline diarization via the Gemini API.
+
+    The prepared value is the ``custom_vocabulary`` list, capped for the model.
+    """
 
     def __init__(
         self,
@@ -88,39 +91,29 @@ class GeminiSTTBackend:
         language: str | None = None,
         diarize: bool = True,
     ) -> None:
-        self.config = config
+        super().__init__(
+            config,
+            client=client,
+            base_url=config.base_url or _DEFAULT_BASE_URL,
+            # Gemini authenticates with this header rather than a bearer token.
+            headers={"x-goog-api-key": api_key} if api_key else None,
+            timeout=60.0,
+        )
         self._language = language or config.language
         self._model = model
         self._diarize = diarize
         # capabilities.yaml declares which of the three features below this
         # model refuses to combine; the guard is what keeps them off the wire.
         self._conflicts = FeatureConflictGuard(config, model)
-        base_url = config.base_url or _DEFAULT_BASE_URL
-        # Gemini authenticates with this header rather than a bearer token.
-        headers = {"x-goog-api-key": api_key} if api_key else {}
-        self._owns_client = client is None
-        self._client = client or httpx.AsyncClient(base_url=base_url, headers=headers, timeout=60.0)
 
-    async def transcribe(
-        self,
-        audio: AsyncIterator[Utterance],
-        *,
-        session_id: str,
-        glossary: Glossary | None = None,
-    ) -> AsyncIterator[TranscriptEvent]:
-        vocabulary = glossary_terms_for(
+    def prepare(self, glossary: Glossary | None) -> list[str]:
+        return glossary_terms_for(
             ProviderKind.GEMINI,
             self._model,
             glossary_terms(glossary),
             realtime=False,
             fallback_max_terms=_MAX_VOCABULARY,
         )
-        async for utterance in audio:
-            event = await self._transcribe_one(
-                utterance, session_id=session_id, vocabulary=vocabulary
-            )
-            if event is not None:
-                yield event
 
     def _request_body(self, wav: bytes, vocabulary: list[str]) -> dict[str, object]:
         # Everything this request would turn on, before the model gets a say.
@@ -170,26 +163,17 @@ class GeminiSTTBackend:
             body["model"] = self._model
         return body
 
-    async def _transcribe_one(
-        self, utterance: Utterance, *, session_id: str, vocabulary: list[str]
-    ) -> TranscriptEvent | None:
+    async def transcribe_one(
+        self, utterance: Utterance, prepared: list[str]
+    ) -> Transcription | None:
         wav = pcm_to_wav(utterance.pcm, sample_rate=self.config.sample_rate)
-        response = await self._client.post(
-            "/interactions", json=self._request_body(wav, vocabulary)
-        )
-        if response.status_code >= HTTPStatus.BAD_REQUEST:
-            # Keep the body: Gemini puts the actionable reason there (bad key,
-            # unknown model, audio too long), not in the status line.
-            raise httpx.HTTPStatusError(
-                f"{response.status_code} from {response.request.url}: {error_detail(response)}",
-                request=response.request,
-                response=response,
-            )
-        return self._to_event(response.json(), utterance, session_id)
+        response = await self._client.post("/interactions", json=self._request_body(wav, prepared))
+        # Gemini puts the actionable reason in the body (bad key, unknown
+        # model, audio too long), which is what the raise keeps.
+        self._raise_for_status(response)
+        return self._parse(response.json(), utterance)
 
-    def _to_event(
-        self, payload: object, utterance: Utterance, session_id: str
-    ) -> TranscriptEvent | None:
+    def _parse(self, payload: object, utterance: Utterance) -> Transcription | None:
         body = _as_dict(payload)
         status = _as_str(body.get("status"))
         if status and status != "completed":
@@ -210,18 +194,7 @@ class GeminiSTTBackend:
                 chunks.append(_as_str(item.get("text")))
                 words.extend(self._words(item.get("annotations"), utterance.start))
         text = " ".join(chunk for chunk in chunks if chunk).strip()
-        if not text:
-            return None
-        return TranscriptEvent(
-            session_id=session_id,
-            source=self.config.id,
-            text=text,
-            words=words,
-            speaker=words[0].speaker if words else None,
-            start_ts=utterance.start,
-            end_ts=utterance.end,
-            is_final=True,
-        )
+        return Transcription(text=text, words=words)
 
     def _words(self, annotations: object, offset: float) -> list[Word]:
         """Map ``word_info`` annotations to words, rebased onto session time."""
@@ -263,14 +236,9 @@ class GeminiSTTBackend:
         """
         return await probe_endpoint(self._client, "/models")
 
-    async def aclose(self) -> None:
-        if self._owns_client:
-            await self._client.aclose()
-
 
 @register(ProviderKind.GEMINI)
 def _factory(  # pyright: ignore[reportUnusedFunction]
     config: ProviderConfig, secrets: SecretStore, model: str | None
 ) -> GeminiSTTBackend:
-    api_key = secrets.get(config.auth_ref) if config.auth_ref else None
-    return GeminiSTTBackend(config, model=model, api_key=api_key)
+    return GeminiSTTBackend(config, model=model, api_key=secret_for(config, secrets))
