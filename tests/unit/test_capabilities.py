@@ -12,17 +12,15 @@ from pydantic import ValidationError
 
 from loreline import capabilities
 from loreline.capabilities import (
-    INTERACTIONS_BY_KIND,
     config,
+    curated_models,
     default_diarizing_model,
     default_model,
     filter_models,
     interactions_for,
     is_realtime_model,
     kinds_for,
-    kinds_with_inline_diarization,
     supports,
-    supports_batch,
     supports_inline_diarization,
     supports_live_capture,
     supports_realtime,
@@ -35,8 +33,8 @@ class TestCapabilityTable:
     def test_every_provider_kind_declares_its_interactions(self) -> None:
         """A kind missing from the table is offered for nothing at all, which
         would silently remove it from the UI - so the table must be total."""
-        assert set(INTERACTIONS_BY_KIND) == set(ProviderKind)
-        assert all(INTERACTIONS_BY_KIND[k] for k in ProviderKind), "a kind declares no interaction"
+        assert set(config().providers) == set(ProviderKind)
+        assert all(interactions_for(k) for k in ProviderKind), "a kind declares no interaction"
 
     def test_a_kind_may_serve_several_interactions(self) -> None:
         """One provider entry per vendor, not one per role: OpenAI and
@@ -166,22 +164,21 @@ class TestLiveCapture:
     def test_every_other_stt_kind_still_drives_live_capture(self, kind: ProviderKind) -> None:
         assert supports_live_capture(kind)
 
-    def test_realtime_and_batch_are_reported_per_kind(self) -> None:
+    def test_realtime_is_reported_per_kind(self) -> None:
         """What the UI badges read. Realtime means the connector streams within
-        an utterance; batch means one round trip per utterance. Both drive a
-        live session - only OpenRouter is barred from that."""
+        an utterance; a kind without it makes one round trip per utterance.
+        Both drive a live session - only OpenRouter is barred from that."""
         assert supports_realtime(ProviderKind.DEEPGRAM)
         assert supports_realtime(ProviderKind.OPENAI)
-        assert supports_batch(ProviderKind.OPENAI_COMPAT)
-        assert supports_batch(ProviderKind.OPENROUTER)
         assert not supports_realtime(ProviderKind.OPENROUTER)
 
     def test_a_kind_may_offer_both_transports(self) -> None:
-        """These are not complements: OpenAI streams gpt-live-transcribe and
-        posts whisper-1 from the same kind, and which connector runs is decided
-        per model (see is_realtime_model)."""
+        """Realtime and batch are not complements: OpenAI streams
+        gpt-live-transcribe and posts whisper-1 from the same kind, and which
+        connector runs is decided per model, not per kind."""
         assert supports_realtime(ProviderKind.OPENAI)
-        assert supports_batch(ProviderKind.OPENAI)
+        assert is_realtime_model(ProviderKind.OPENAI, "gpt-live-transcribe")
+        assert not is_realtime_model(ProviderKind.OPENAI, "whisper-1")
 
 
 class TestRealtimeModelResolution:
@@ -463,7 +460,10 @@ class TestInlineDiarization:
         "Inline (from STT)" here produced an unlabelled transcript and no
         warning."""
         assert not supports_inline_diarization(ProviderKind.OPENROUTER, "x-ai/grok-stt-1.0")
-        assert ProviderKind.OPENROUTER not in kinds_with_inline_diarization()
+        assert not any(
+            supports_inline_diarization(ProviderKind.OPENROUTER, model_id)
+            for model_id in curated_models(ProviderKind.OPENROUTER, Interaction.TRANSCRIBE)
+        )
 
     def test_models_that_return_no_speakers_report_false(self) -> None:
         """Parsing speakers does not conjure them: Whisper produces none, and

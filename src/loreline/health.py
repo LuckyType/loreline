@@ -118,11 +118,6 @@ class HealthReport:
     status: HealthStatus
     detail: str | None = None
 
-    @property
-    def healthy(self) -> bool:
-        """The one-bit summary, for call sites that genuinely only need it."""
-        return self.status is HealthStatus.HEALTHY
-
 
 def missing_credential(kind: ProviderKind, api_key: str | None) -> HealthReport | None:
     """Verdict for a cloud kind with no stored key, without touching the network.

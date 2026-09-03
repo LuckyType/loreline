@@ -21,7 +21,6 @@ from websockets.exceptions import InvalidStatus
 from websockets.http11 import Response
 
 from loreline.health import (
-    HealthReport,
     HealthStatus,
     classify_request_error,
     classify_response,
@@ -199,19 +198,6 @@ def test_classify_live_vendor_answers(
     assert report.status is expected, label
     if fragment is not None:
         assert report.detail is not None and fragment in report.detail, label
-
-
-def test_healthy_is_the_only_status_that_reads_as_healthy() -> None:
-    """Nothing but HEALTHY may satisfy a caller that only wants the bit.
-
-    DEGRADED in particular: the credential is fine, but the provider cannot
-    serve a session, and letting it pass as healthy would be the old bug in a
-    new place.
-    """
-    assert HealthReport(HealthStatus.HEALTHY).healthy is True
-    for status in HealthStatus:
-        if status is not HealthStatus.HEALTHY:
-            assert HealthReport(status).healthy is False
 
 
 # --- probing, and the promise that a broken probe is never a verdict -------

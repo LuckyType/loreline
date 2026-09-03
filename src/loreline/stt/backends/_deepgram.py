@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from loreline.models import ProviderKind, Word
 from loreline.stt.backends._ws import as_list, as_obj_dict, get_float, get_str
-from loreline.stt.base import capped_terms, glossary_support
+from loreline.stt.base import glossary_support, glossary_terms_for
 
 # Deepgram authenticates with its own scheme, not Bearer.
 # https://developers.deepgram.com/docs/authenticating
@@ -78,10 +78,9 @@ def glossary_params(
     https://developers.deepgram.com/docs/deepgram-whisper-cloud
     """
     support = glossary_support(ProviderKind.DEEPGRAM, model)
-    if support is not None and not support.supported:
-        return []
     field = support.field if support and support.field else _DEFAULT_GLOSSARY_FIELD
-    return [(field, term) for term in capped_terms(terms, support, realtime=realtime)]
+    allowed = glossary_terms_for(ProviderKind.DEEPGRAM, model, terms, realtime=realtime)
+    return [(field, term) for term in allowed]
 
 
 def parse_alternative(alternative: dict[str, object], *, offset: float) -> tuple[str, list[Word]]:

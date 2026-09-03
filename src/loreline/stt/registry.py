@@ -27,7 +27,15 @@ from loreline.secrets import SecretStore
 from loreline.stt.base import STTBackend
 
 # The third argument is the resolved model, or None for a kind whose catalogue
-# this repo does not curate (the self-hosted one) - see ``create_backend``.
+# this repo does not curate (the self-hosted one) - see ``create_backend``. It
+# is passed alongside the config rather than stamped onto a copy of it: a
+# provider row has no model field to stamp, and the connector and the transport
+# lookup must agree on which one is running.
+#
+# Defined here, once. The session manager and the reprocess manager take an
+# injectable factory of this shape and import the alias from here rather than
+# restating it, which they used to: three copies meant a change to what a
+# factory receives could land in one of them and not the others.
 BackendFactory = Callable[[ProviderConfig, SecretStore, str | None], STTBackend]
 
 _REGISTRY: dict[tuple[ProviderKind, bool], BackendFactory] = {}

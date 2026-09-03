@@ -35,7 +35,7 @@ from loreline.models import (
     TranscriptEvent,
     rebase_transcript,
 )
-from loreline.stt.registry import create_backend
+from loreline.stt.registry import BackendFactory, create_backend
 from loreline.stt.router import RouterConfig, SttRouter
 
 if TYPE_CHECKING:
@@ -51,14 +51,10 @@ if TYPE_CHECKING:
         TranscriptRepository,
     )
     from loreline.secrets import SecretStore
-    from loreline.stt.base import STTBackend
     from loreline.web.schemas import ReprocessRequest
 
 log = get_logger(__name__)
 
-# (config, secrets, model) - the job's model, which for a transcribe job is
-# always set. See loreline.stt.registry.create_backend.
-BackendFactory = Callable[["ProviderConfig", "SecretStore", str | None], "STTBackend"]
 DiarizerFactory = Callable[["DiarizationConfig"], "DiarizationProvider"]
 
 
@@ -345,12 +341,14 @@ class ReprocessManager:
         OpenAI batch diarization needs an OpenAI API key. Rather than only reading
         the ``OPENAI_API_KEY`` env var, reuse the key the user already stored on a
         configured OpenAI provider (secret store); the env var stays the fallback.
+
+        Deliberately does not route that mode through ``self._diarizer_factory``:
+        an injected factory takes the config alone and has nowhere to receive the
+        resolved key, so it is ``create_diarizer`` that gets it.
         """
         if config.mode == DiarizationMode.OPENAI:
-            from loreline.diarization.openai_diarizer import OpenAIDiarizer  # noqa: PLC0415
-
             key = _resolve_openai_key(await self._providers.list(), self._secrets)
-            return OpenAIDiarizer(api_key=key)
+            return create_diarizer(config, openai_api_key=key)
         return self._diarizer_factory(config)
 
     async def _diarize_session(self, job: ReprocessJob) -> int:

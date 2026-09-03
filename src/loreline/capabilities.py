@@ -168,12 +168,6 @@ def curated_models(kind: ProviderKind, interaction: Interaction) -> list[str]:
     return [m.id for m in spec.models_for(interaction)] if spec else []
 
 
-def _offered_transcribers(kind: ProviderKind) -> list[ModelSpec]:
-    """Transcription models this kind actually lists in a picker."""
-    spec = _provider(kind)
-    return list(spec.models_for(Interaction.TRANSCRIBE)) if spec else []
-
-
 def _transcribe_annotations(kind: ProviderKind) -> list[ModelSpec | ModelPattern]:
     """Every transcription capability source, including glob patterns.
 
@@ -223,16 +217,6 @@ def supports_inline_diarization(kind: ProviderKind, model: str | None) -> bool:
         return False
     entry = spec.find(model)
     return bool(entry and entry.transcribe and entry.transcribe.inline_diarization)
-
-
-def kinds_with_inline_diarization() -> frozenset[ProviderKind]:
-    """Provider kinds with at least one inline-diarization-capable model."""
-    return frozenset(
-        kind
-        for kind in config().providers
-        for m in _offered_transcribers(kind)
-        if m.transcribe and m.transcribe.inline_diarization
-    )
 
 
 def is_realtime_model(kind: ProviderKind, model: str | None) -> bool:
@@ -292,15 +276,6 @@ def supports_realtime(kind: ProviderKind) -> bool:
     return any(m.transcribe and m.transcribe.realtime for m in _transcribe_annotations(kind))
 
 
-def supports_batch(kind: ProviderKind) -> bool:
-    """Whether this kind can transcribe by posting a complete utterance.
-
-    Not the complement of :func:`supports_realtime`: OpenAI does both, keyed on
-    the model (gpt-transcribe posts, gpt-live-transcribe streams).
-    """
-    return any(m.transcribe and m.transcribe.batch for m in _transcribe_annotations(kind))
-
-
 def supports_live_capture(kind: ProviderKind) -> bool:
     """Whether a kind may drive a live capture session, not just re-processing.
 
@@ -356,27 +331,3 @@ def filter_models(
         return models
     matching = [m for m in models if _looks_like_transcription(m.id)]
     return matching or models
-
-
-def _interactions_by_kind() -> dict[ProviderKind, frozenset[Interaction]]:
-    return {kind: interactions_for(kind) for kind in config().providers}
-
-
-# Backwards-compatible view of the table that used to be defined here by hand.
-# Derived from the yaml so there is still exactly one source of truth.
-INTERACTIONS_BY_KIND: dict[ProviderKind, frozenset[Interaction]] = _interactions_by_kind()
-
-# Kinds that can transcribe stored audio but must never drive a live capture.
-LIVE_CAPTURE_EXCLUDED: frozenset[ProviderKind] = frozenset(
-    kind
-    for kind, spec in config().providers.items()
-    if Interaction.TRANSCRIBE in spec.interactions and not spec.live_capture
-)
-
-# Kinds with at least one streaming transcription model. Not the same question
-# as "can it drive a live session": loreline feeds every connector VAD-chunked
-# utterances, so a batch connector works live too. Realtime is about latency
-# within an utterance, and it is what the UI badges report.
-REALTIME_KINDS: frozenset[ProviderKind] = frozenset(
-    kind for kind in config().providers if supports_realtime(kind)
-)

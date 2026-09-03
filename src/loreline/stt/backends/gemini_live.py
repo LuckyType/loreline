@@ -65,7 +65,7 @@ from loreline.stt.backends._ws import (
     get_str,
     probe_health,
 )
-from loreline.stt.base import capped_terms, glossary_support, glossary_terms
+from loreline.stt.base import glossary_terms, glossary_terms_for
 from loreline.stt.registry import register
 
 log = get_logger(__name__)
@@ -117,10 +117,7 @@ def _vocabulary_for(model: str | None, terms: list[str]) -> list[str]:
     ack, 1001 close. The number lives in capabilities.yaml, which is also what
     the UI renders the glossary toggle from.
     """
-    support = glossary_support(ProviderKind.GEMINI, model)
-    if support is not None and not support.supported:
-        return []
-    return capped_terms(terms, support, realtime=True)
+    return glossary_terms_for(ProviderKind.GEMINI, model, terms, realtime=True)
 
 
 def _wire(mapping: dict[str, object], name: str, alt: str) -> object:

@@ -32,6 +32,7 @@ __all__ = [
     "error_detail",
     "glossary_support",
     "glossary_terms",
+    "glossary_terms_for",
     "http_base_url",
     "transcribe_capabilities",
 ]
@@ -164,6 +165,36 @@ def capped_terms(terms: list[str], support: GlossarySupport | None, *, realtime:
         return terms
     log.warning("stt.glossary.truncated", limit=limit, dropped=len(terms) - limit)
     return terms[:limit]
+
+
+def glossary_terms_for(
+    kind: ProviderKind,
+    model: str | None,
+    terms: list[str],
+    *,
+    realtime: bool,
+    fallback_max_terms: int | None = None,
+) -> list[str]:
+    """The glossary terms this model will actually accept on this transport.
+
+    Two rules, both read from capabilities.yaml so no connector restates them:
+    a model annotated ``glossary.supported: false`` is sent nothing at all
+    rather than a parameter its endpoint ignores or rejects, and anything over
+    the model's documented ceiling for this transport is trimmed here (see
+    :func:`capped_terms` for why trimming beats letting the vendor decide).
+
+    ``fallback_max_terms`` covers a model the yaml does not annotate, where
+    there is no ceiling to read. Only the Gemini batch connector passes one:
+    that service rejects the request outright over 1000 entries, so an
+    uncurated Gemini id still has to be trimmed somewhere.
+    """
+    support = glossary_support(kind, model)
+    if support is not None and not support.supported:
+        return []
+    limit = support.max_terms_for(realtime=realtime) if support else None
+    if limit is None and fallback_max_terms is not None:
+        return terms[:fallback_max_terms]
+    return capped_terms(terms, support, realtime=realtime)
 
 
 def http_base_url(base_url: str | None) -> str | None:

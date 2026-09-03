@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from loreline.models import ProviderKind, Word
 from loreline.stt.backends._ws import as_list, as_obj_dict, get_float, get_str
-from loreline.stt.base import capped_terms, glossary_support
+from loreline.stt.base import glossary_terms_for
 
 _MS_PER_S = 1000.0
 
@@ -35,10 +35,7 @@ def glossary_for(model: str | None, terms: list[str], *, realtime: bool) -> list
     https://www.assemblyai.com/docs/streaming/prompting-and-keyterms
     https://www.assemblyai.com/docs/pre-recorded-audio/universal-3-5-pro/prompting
     """
-    support = glossary_support(ProviderKind.ASSEMBLYAI, model)
-    if support is not None and not support.supported:
-        return []
-    return capped_terms(terms, support, realtime=realtime)
+    return glossary_terms_for(ProviderKind.ASSEMBLYAI, model, terms, realtime=realtime)
 
 
 def parse_words(raw_words: object, *, offset: float) -> list[Word]:

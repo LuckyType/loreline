@@ -257,7 +257,7 @@ async def test_reprocess_accepts_a_kind_barred_from_live_capture(client: AsyncCl
     """Re-processing replays stored audio, so the live-capture exclusion must
     not reach it: OpenRouter transcription has no streaming mode and is
     rejected for a live session, but re-processing a recording is exactly what
-    it is for (see loreline.capabilities.LIVE_CAPTURE_EXCLUDED). The provider
+    it is for (see loreline.capabilities.supports_live_capture). The provider
     pickers mirror this split, so a regression here would silently strand every
     batch provider on the session page."""
     live_pid = await _provider(client)
