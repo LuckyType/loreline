@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator
 
 from loreline.audio.chunker import Utterance
 from loreline.bus import EventBus
+from loreline.health import HealthReport, HealthStatus
 from loreline.models import (
     DiarizationConfig,
     DiarizationMode,
@@ -56,8 +57,8 @@ class FakeBackend:
                 is_final=True,
             )
 
-    async def health(self) -> bool:
-        return True
+    async def health(self) -> HealthReport:
+        return HealthReport(HealthStatus.HEALTHY)
 
     async def aclose(self) -> None:
         return None

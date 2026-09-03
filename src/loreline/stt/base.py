@@ -10,17 +10,29 @@ multiple interim events before a final.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from typing import Protocol, cast, runtime_checkable
-
-import httpx
+from typing import Protocol, runtime_checkable
 
 from loreline.audio.chunker import Utterance
 from loreline.capabilities import config as capability_config
 from loreline.capability_config import GlossarySupport
+from loreline.health import HealthReport, error_detail
 from loreline.logging import get_logger
 from loreline.models import Glossary, ProviderConfig, ProviderKind, TranscriptEvent
 
 log = get_logger(__name__)
+
+# Re-exported: ``error_detail`` moved to loreline.health so that grading a
+# health probe and reporting a failed utterance read the same vendor body the
+# same way, including Google's array-wrapped envelope. The connectors keep
+# importing it from here, where they always have.
+__all__ = [
+    "STTBackend",
+    "capped_terms",
+    "error_detail",
+    "glossary_support",
+    "glossary_terms",
+    "http_base_url",
+]
 
 
 @runtime_checkable
@@ -39,8 +51,14 @@ class STTBackend(Protocol):
         """Transcribe a stream of utterances into transcript events."""
         ...
 
-    async def health(self) -> bool:
-        """Return True if the backend endpoint is reachable."""
+    async def health(self) -> HealthReport:
+        """Probe the endpoint and the credential, without raising.
+
+        Returns a graded :class:`~loreline.health.HealthReport` rather than a
+        bool: "reachable" and "the key works" are separate facts and used to be
+        collapsed into one, inconsistently, per connector. See
+        :mod:`loreline.health`.
+        """
         ...
 
     async def aclose(self) -> None:
@@ -101,27 +119,3 @@ def http_base_url(base_url: str | None) -> str | None:
     if base_url and base_url.lower().startswith(("ws://", "wss://")):
         return None
     return base_url
-
-
-def error_detail(response: httpx.Response) -> str:
-    """Best-effort human-readable reason from an HTTP error response body.
-
-    Status lines alone ("404 Not Found") throw away the part that actually
-    says what to fix - "Model 'X' is not installed locally", "API key not
-    valid". Providers bury that under varying keys, so try the common ones.
-    """
-    try:
-        payload: object = response.json()
-    except ValueError:
-        return response.text[:300].strip() or response.reason_phrase
-    if isinstance(payload, dict):
-        mapping = cast("dict[str, object]", payload)
-        for key in ("detail", "message", "error"):
-            value = mapping.get(key)
-            if isinstance(value, str) and value:
-                return value
-            if isinstance(value, dict):
-                nested = cast("dict[str, object]", value).get("message")
-                if isinstance(nested, str) and nested:
-                    return nested
-    return response.text[:300].strip() or response.reason_phrase

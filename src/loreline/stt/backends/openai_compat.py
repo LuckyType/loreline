@@ -23,6 +23,7 @@ import httpx
 
 from loreline.audio.chunker import Utterance
 from loreline.audio.wav import pcm_to_wav
+from loreline.health import HealthReport, probe_endpoint
 from loreline.logging import get_logger
 from loreline.models import Glossary, ProviderConfig, ProviderKind, TranscriptEvent, Word
 from loreline.secrets import SecretStore
@@ -32,6 +33,10 @@ from loreline.stt.registry import register
 log = get_logger(__name__)
 
 _DEFAULT_BASE_URL = "https://api.openai.com/v1"
+# The health probe. Free, implemented by every OpenAI-compatible server, and on
+# OpenAI cloud it 401s a bad key. A kind whose /models is public overrides it
+# (see openrouter.py), because grading a public list says nothing about a key.
+_DEFAULT_HEALTH_PATH = "/models"
 
 
 class _Transcription(NamedTuple):
@@ -60,10 +65,11 @@ class OpenAICompatBackend:
         language: str | None = None,
         default_base_url: str = _DEFAULT_BASE_URL,
         extra_headers: dict[str, str] | None = None,
+        health_path: str = _DEFAULT_HEALTH_PATH,
     ) -> None:
-        """``default_base_url``/``extra_headers`` let a kind that speaks this
-        same wire format reuse the backend rather than copy it - see
-        loreline/stt/backends/openrouter.py.
+        """``default_base_url``/``extra_headers``/``health_path`` let a kind
+        that speaks this same wire format reuse the backend rather than copy it
+        - see loreline/stt/backends/openrouter.py.
 
         ``model`` may be None, and this is the one connector where that is a
         normal state rather than a missing default: it also serves the
@@ -76,6 +82,7 @@ class OpenAICompatBackend:
         base_url = config.base_url or default_base_url
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
         headers.update(extra_headers or {})
+        self._health_path = health_path
         self._owns_client = client is None
         self._client = client or httpx.AsyncClient(base_url=base_url, headers=headers, timeout=60.0)
         # None until the first response tells us whether this endpoint honours
@@ -163,12 +170,16 @@ class OpenAICompatBackend:
         files = {"file": ("utterance.wav", wav, "audio/wav")}
         return await self._client.post("/audio/transcriptions", data=data, files=files)
 
-    async def health(self) -> bool:
-        try:
-            response = await self._client.get("/models")
-        except httpx.HTTPError:
-            return False
-        return response.status_code < HTTPStatus.INTERNAL_SERVER_ERROR
+    async def health(self) -> HealthReport:
+        """Probe whichever cheap read this kind's endpoint answers honestly.
+
+        ``/models`` by default, which is free and implemented everywhere. This
+        class serves three kinds at once, so the grading also has to cope with
+        a self-hosted server that checks no key and answers 200 - which is the
+        honest verdict there, since ``auth: optional`` in capabilities.yaml
+        means there may be no credential to get wrong in the first place.
+        """
+        return await probe_endpoint(self._client, self._health_path)
 
     async def aclose(self) -> None:
         if self._owns_client:

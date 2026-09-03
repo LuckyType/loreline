@@ -15,6 +15,7 @@ from typing import cast
 from websockets.asyncio.server import ServerConnection, serve
 
 from loreline.audio.chunker import Utterance
+from loreline.health import HealthStatus
 from loreline.models import Glossary, Protocol, ProviderConfig, ProviderKind, TranscriptEvent
 from loreline.stt.backends.gemini_live import (
     _RECV_TIMEOUT_S,  # pyright: ignore[reportPrivateUsage]
@@ -165,11 +166,12 @@ async def test_gemini_live_one_session_per_utterance() -> None:
 async def test_gemini_live_health_ok() -> None:
     async with serve(gemini_live_handler, "127.0.0.1", 0) as server:
         port = server.sockets[0].getsockname()[1]
-        assert (
-            await GeminiLiveBackend(_config(port), model=MODEL, api_key="secret").health() is True
-        )
+        report = await GeminiLiveBackend(_config(port), model=MODEL, api_key="secret").health()
+        assert report.status is HealthStatus.HEALTHY
 
 
-async def test_gemini_live_health_false_when_unreachable() -> None:
-    # Nothing is listening on port 1 -> connect refused -> unhealthy.
-    assert await GeminiLiveBackend(_config(1), model=MODEL, api_key="x").health() is False
+async def test_gemini_live_health_unreachable_when_nothing_listens() -> None:
+    # Nothing is listening on port 1 -> connect refused. Reported as the base
+    # URL problem it is, not as a rejected credential.
+    report = await GeminiLiveBackend(_config(1), model=MODEL, api_key="x").health()
+    assert report.status is HealthStatus.UNREACHABLE

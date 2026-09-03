@@ -49,10 +49,18 @@ from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import ConnectionClosedOK, WebSocketException
 
 from loreline.audio.chunker import Utterance
+from loreline.health import PROBE_TIMEOUT_S, HealthReport, HealthStatus
 from loreline.logging import get_logger
 from loreline.models import Glossary, ProviderConfig, ProviderKind, TranscriptEvent
 from loreline.secrets import SecretStore
-from loreline.stt.backends._ws import as_dict, as_obj_dict, get_bool, get_str, probe_health
+from loreline.stt.backends._ws import (
+    as_dict,
+    as_obj_dict,
+    classify_handshake_error,
+    get_bool,
+    get_str,
+    probe_health,
+)
 from loreline.stt.base import glossary_terms
 from loreline.stt.registry import register
 
@@ -370,15 +378,25 @@ class GeminiLiveBackend:
                 if _wire(message, "setupComplete", "setup_complete") is not None:
                     return
 
-    async def health(self) -> bool:
-        # A bad key fails the HTTP handshake before the socket upgrades, which
-        # connect() raises; a session that accepts the setup (or just stays
-        # quiet) counts as reachable.
+    async def health(self) -> HealthReport:
+        """Open the Live session and send the setup frame, without raising.
+
+        A bad key fails the HTTP handshake before the socket upgrades, so the
+        rejection arrives as a status code on the upgrade response and is
+        graded like any other probe answer; a session that accepts the setup,
+        or that simply stays quiet, is healthy.
+
+        Note the key rides in the query string of the session URL here, which
+        is why nothing in this path echoes the URL into a detail message.
+        """
         try:
-            async with connect(self._session_url()) as ws:
-                return await probe_health(ws, json.dumps(self._setup()))
-        except (OSError, WebSocketException):
-            return False
+            async with asyncio.timeout(PROBE_TIMEOUT_S):
+                async with connect(self._session_url()) as ws:
+                    return await probe_health(ws, json.dumps(self._setup()))
+        except TimeoutError:
+            return HealthReport(HealthStatus.UNREACHABLE, "the socket did not open in time")
+        except (OSError, WebSocketException) as exc:
+            return classify_handshake_error(exc)
 
     async def aclose(self) -> None:
         """Nothing is held between utterances (one session per utterance)."""

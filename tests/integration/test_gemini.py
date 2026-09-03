@@ -16,6 +16,7 @@ import httpx
 import pytest
 
 from loreline.audio.chunker import Utterance
+from loreline.health import HealthStatus
 from loreline.models import Glossary, Protocol, ProviderConfig, ProviderKind, TranscriptEvent
 from loreline.stt.backends.gemini import GeminiSTTBackend
 
@@ -223,10 +224,71 @@ async def test_health_checks_the_credential() -> None:
         return httpx.Response(200, json={"models": []})
 
     async with _client(ok) as client:
-        assert await GeminiSTTBackend(_config(), client=client).health() is True
+        report = await GeminiSTTBackend(_config(), client=client).health()
+    assert report.status is HealthStatus.HEALTHY
 
     def unauthorized(_: httpx.Request) -> httpx.Response:
         return httpx.Response(401, json={"error": {"message": "API key not valid"}})
 
     async with _client(unauthorized) as client:
-        assert await GeminiSTTBackend(_config(), client=client).health() is False
+        report = await GeminiSTTBackend(_config(), client=client).health()
+    assert report.status is HealthStatus.UNAUTHORIZED
+    assert report.detail == "API key not valid"
+
+
+async def test_health_reads_googles_400_as_a_bad_key() -> None:
+    """The native surface answers a bad key with 400, not 401.
+
+    Pinned from a live call: this is the shape that made a threshold of
+    ``< 500`` (and, on this connector, ``< 400``) the wrong test. The status is
+    a bad-request status; only the body says it is really about the credential,
+    and ``error.details[].reason`` says so in a machine-readable way that the
+    OpenAI-compatible sibling surface omits entirely.
+    """
+    body = {
+        "error": {
+            "code": 400,
+            "message": "API key not valid. Please pass a valid API key.",
+            "status": "INVALID_ARGUMENT",
+            "details": [
+                {
+                    "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+                    "reason": "API_KEY_INVALID",
+                    "domain": "googleapis.com",
+                    "metadata": {"service": "generativelanguage.googleapis.com"},
+                }
+            ],
+        }
+    }
+
+    def bad_key(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json=body)
+
+    async with _client(bad_key) as client:
+        report = await GeminiSTTBackend(_config(), client=client).health()
+
+    assert report.status is HealthStatus.UNAUTHORIZED
+    assert report.detail == "API key not valid. Please pass a valid API key."
+
+
+async def test_health_reads_googles_403_as_a_missing_key() -> None:
+    """No key at all on the native surface is 403 PERMISSION_DENIED, live."""
+    body = {
+        "error": {
+            "code": 403,
+            "message": (
+                "Method doesn't allow unregistered callers (callers without established "
+                "identity). Please use API Key or other form of API consumer identity to "
+                "call this API."
+            ),
+            "status": "PERMISSION_DENIED",
+        }
+    }
+
+    def no_key(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, json=body)
+
+    async with _client(no_key) as client:
+        report = await GeminiSTTBackend(_config(), client=client).health()
+
+    assert report.status is HealthStatus.UNAUTHORIZED

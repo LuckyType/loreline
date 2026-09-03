@@ -21,6 +21,7 @@ import httpx
 import pytest
 
 from loreline.audio.chunker import Utterance
+from loreline.health import HealthStatus
 from loreline.models import Glossary, Protocol, ProviderConfig, ProviderKind, TranscriptEvent
 from loreline.stt.backends.deepgram_batch import DeepgramBatchBackend
 
@@ -220,16 +221,28 @@ async def test_a_streaming_base_url_is_not_handed_to_the_http_client() -> None:
         await backend.aclose()
 
 
-async def test_health_asks_for_the_model_list() -> None:
+async def test_health_asks_what_the_key_is_not_what_the_models_are() -> None:
+    """The probe must exercise the credential, and /v1/models does not.
+
+    Verified against the live API: Deepgram serves its model list to anonymous
+    callers, 200 and the full catalogue with no Authorization header at all, so
+    the connector's original probe called every key healthy including no key.
+    """
+
     def ok(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == "/v1/models"
-        return httpx.Response(200, json={"stt": []})
+        assert request.url.path == "/v1/auth/token"
+        return httpx.Response(200, json={"api_key_id": "abc"})
 
     async with _client(ok) as client:
-        assert await DeepgramBatchBackend(_config(), client=client).health()
+        report = await DeepgramBatchBackend(_config(), client=client).health()
+    assert report.status is HealthStatus.HEALTHY
 
+    # Live answer for a bogus token, and it is plain text rather than JSON -
+    # which the detail extractor has to fall back to reading.
     def unauthorized(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(401, json={"err_msg": "invalid credentials"})
+        return httpx.Response(401, text="Invalid credentials.")
 
     async with _client(unauthorized) as client:
-        assert not await DeepgramBatchBackend(_config(), client=client).health()
+        report = await DeepgramBatchBackend(_config(), client=client).health()
+    assert report.status is HealthStatus.UNAUTHORIZED
+    assert report.detail == "Invalid credentials."

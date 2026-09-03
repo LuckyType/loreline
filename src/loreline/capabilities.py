@@ -67,6 +67,20 @@ def supports(kind: ProviderKind, interaction: Interaction) -> bool:
     return interaction in interactions_for(kind)
 
 
+def requires_api_key(kind: ProviderKind) -> bool:
+    """Whether a probe or a request without a key is certain to be refused.
+
+    False for the self-hosted kind (``auth: optional``: the operator's server
+    may or may not check one) and for anything this file does not know, which
+    keeps the caller on the "ask the endpoint" path rather than pre-judging it.
+    Used by the health probe to answer "no key stored" without a network call -
+    see :func:`loreline.health.missing_credential` for why that matters beyond
+    saving a round trip.
+    """
+    spec = _provider(kind)
+    return spec is not None and spec.auth == "api_key"
+
+
 def default_model(kind: ProviderKind, interaction: Interaction) -> str | None:
     """The model to use for this pair when the caller named none.
 

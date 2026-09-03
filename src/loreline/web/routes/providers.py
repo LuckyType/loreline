@@ -7,8 +7,9 @@ import uuid
 from fastapi import APIRouter, Depends, Request
 from fastapi.exceptions import HTTPException
 from pydantic import BaseModel
-from starlette.status import HTTP_400_BAD_REQUEST, HTTP_404_NOT_FOUND
+from starlette.status import HTTP_404_NOT_FOUND
 
+from loreline.health import HealthReport, HealthStatus, missing_credential
 from loreline.llm import LLM_KINDS, chat_health
 from loreline.models import Interaction, ModelInfo, ProviderConfig, ProviderKind
 from loreline.secrets import SecretStore
@@ -37,9 +38,19 @@ def _view(provider: ProviderConfig, secrets: SecretStore) -> ProviderView:
 
 
 class TestResult(BaseModel):
-    """Connection-test outcome for a provider."""
+    """Connection-test outcome for a provider.
 
-    healthy: bool
+    Deliberately not a bool. "Healthy" is at least three separate facts - the
+    endpoint answers, the credential is accepted, the vendor is not currently
+    refusing - and collapsing them meant a provider with a completely invalid
+    key rendered exactly like one whose base URL was a typo. The settings page
+    switches on ``status`` and shows ``detail`` as the badge's tooltip, so the
+    vendor's own "API key not valid" reaches the GM instead of the word "down".
+    See :mod:`loreline.health`.
+    """
+
+    status: HealthStatus
+    detail: str | None = None
 
 
 class ProviderModelsRequest(BaseModel):
@@ -130,23 +141,50 @@ async def set_secret(request: Request, provider_id: str, body: SecretWrite) -> O
 
 @router.post("/{provider_id}/test")
 async def test_provider(request: Request, provider_id: str) -> TestResult:
-    """Instantiate the backend and probe endpoint reachability."""
+    """Probe the provider's endpoint and credential, and grade the answer.
+
+    Only a missing *provider* is an HTTP error here. Everything the probe can
+    run into - a rejected key, a dead host, a config this app cannot build a
+    connector for - comes back as a graded :class:`TestResult`, because the
+    button's job is to report a state, and an error status just makes the page
+    render "down" with no explanation attached.
+    """
     state = get_state(request)
     provider = await state.providers.get(provider_id)
     if provider is None:
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="provider not found")
+    api_key = state.secrets.get(provider.auth_ref) if provider.auth_ref else None
+    # Answered without a network call, and not merely as an optimisation: see
+    # missing_credential on the keyless 404 that would otherwise read as a bad
+    # base URL.
+    report = missing_credential(provider.kind, api_key)
+    if report is not None:
+        return _result(report)
     if provider.kind in LLM_KINDS:
-        api_key = state.secrets.get(provider.auth_ref) if provider.auth_ref else None
-        return TestResult(healthy=await chat_health(config=provider, api_key=api_key))
+        # One probe per row, and for a kind that both summarizes and
+        # transcribes (Gemini, OpenAI, OpenRouter) the chat surface is the one
+        # asked. The key is the same credential either way, so a second probe
+        # against the STT surface would cost a round trip to learn nothing -
+        # and for Gemini the two surfaces are sibling URLs with different auth
+        # headers, so it would have to build a second client to ask.
+        return _result(await chat_health(config=provider, api_key=api_key))
     try:
         backend = create_backend(provider, state.secrets)
     except ValueError as exc:
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        # capabilities.yaml offers this kind no transcription model, or the
+        # resolved model needs a transport we have no connector for. Nothing
+        # was probed, so nothing is known about the provider itself - but the
+        # message says exactly what to change, so it goes to the GM rather
+        # than into a 400 the page turns into a bare red badge.
+        return TestResult(status=HealthStatus.UNKNOWN, detail=str(exc))
     try:
-        healthy = await backend.health()
+        return _result(await backend.health())
     finally:
         await backend.aclose()
-    return TestResult(healthy=healthy)
+
+
+def _result(report: HealthReport) -> TestResult:
+    return TestResult(status=report.status, detail=report.detail)
 
 
 @router.post("/models")

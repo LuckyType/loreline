@@ -30,10 +30,17 @@ from websockets.exceptions import WebSocketException
 
 from loreline.audio.chunker import Utterance
 from loreline.audio.resample import resample_pcm16
+from loreline.health import PROBE_TIMEOUT_S, HealthReport, HealthStatus
 from loreline.logging import get_logger
 from loreline.models import Glossary, ProviderConfig, ProviderKind, TranscriptEvent
 from loreline.secrets import SecretStore
-from loreline.stt.backends._ws import as_dict, as_obj_dict, get_str, probe_health
+from loreline.stt.backends._ws import (
+    as_dict,
+    as_obj_dict,
+    classify_handshake_error,
+    get_str,
+    probe_health,
+)
 from loreline.stt.base import glossary_terms
 from loreline.stt.registry import register
 
@@ -252,12 +259,22 @@ class OpenAIRealtimeBackend:
             is_final=True,
         )
 
-    async def health(self) -> bool:
+    async def health(self) -> HealthReport:
+        """Open the socket and read one frame, without raising.
+
+        A rejected upgrade is a plain HTTP response, so a bad key surfaces as a
+        status code on the handshake and grades exactly like an HTTP probe -
+        which is what makes "wrong key" distinguishable from "wrong host" here
+        at all. Before, both were a bare False.
+        """
         try:
-            async with connect(self._url, additional_headers=self._headers) as ws:
-                return await probe_health(ws, self._session_update())
-        except (OSError, WebSocketException):
-            return False
+            async with asyncio.timeout(PROBE_TIMEOUT_S):
+                async with connect(self._url, additional_headers=self._headers) as ws:
+                    return await probe_health(ws, self._session_update())
+        except TimeoutError:
+            return HealthReport(HealthStatus.UNREACHABLE, "the socket did not open in time")
+        except (OSError, WebSocketException) as exc:
+            return classify_handshake_error(exc)
 
     async def aclose(self) -> None:
         await self._reset_ws()

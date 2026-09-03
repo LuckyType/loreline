@@ -547,6 +547,29 @@ export interface AlertTestResult {
 	ok: boolean
 }
 
+/**
+ * How far a provider got when the Test button asked it a cheap question.
+ *
+ * Mirrors loreline.health.HealthStatus. Not a boolean, because "healthy" is at
+ * least three separate facts: the endpoint answers, the credential is
+ * accepted, and the vendor is not currently refusing. This page used to render
+ * a provider with a completely invalid key exactly like one whose base URL was
+ * a typo, which are opposite fixes.
+ *
+ * - `healthy`      answered and accepted the credential
+ * - `degraded`     answered but is rate limiting or erroring; the key is fine
+ * - `unauthorized` reached it; the key is missing, wrong, or lacks access
+ * - `unreachable`  no answer, or nothing that API lives at this URL
+ * - `unknown`      the probe ran and decided nothing; explicitly not a failure
+ */
+export type HealthStatus = 'healthy' | 'degraded' | 'unauthorized' | 'unreachable' | 'unknown'
+
+export interface ProviderTestResult {
+	status: HealthStatus
+	/** The vendor's own words, where it gave any. Shown as the badge tooltip. */
+	detail: string | null
+}
+
 export interface UpdateResult {
 	ok: boolean
 	previous_commit: string | null
