@@ -92,6 +92,12 @@ providers:
           # https://developers.deepgram.com/docs/model (Nova-3 listed for Pre-recorded + Streaming)
           realtime: true
           batch: true
+          # Both transports, so this file has to say which connector runs.
+          # Live capture is what Nova is for and the streaming endpoint is the
+          # verified one; the batch connector here has never been run against
+          # api.deepgram.com. Required whenever both are true, so a future
+          # dual-transport model cannot be added without answering this.
+          prefer: realtime
           # "Diarization is compatible with all Nova batch models (Nova-1, Nova-2, Nova-3) as well as
           #  enhanced and base. Whisper is not supported."  Param is `diarize_model` (`diarize` deprecated).
           # Streaming accepts diarize_model=v1|latest only; v2 is batch-only.
@@ -117,6 +123,7 @@ providers:
           # https://developers.deepgram.com/docs/model (Nova-2 listed for Pre-recorded + Streaming)
           realtime: true
           batch: true
+          prefer: realtime
           # https://developers.deepgram.com/docs/diarization
           inline_diarization: true
           # "Keywords is only available for use with Nova-2, Nova-1, Enhanced, and Base speech to text models.
@@ -184,6 +191,13 @@ providers:
       # no biasing parameter at all. Then set hidden: false here, and that is
       # the whole release step: this file is the only gate, so nothing else
       # needs editing to put the model in a picker.
+      #
+      # It really is only this entry now. It was not always: the transport for
+      # a dual-transport model used to be derived from "does every offered
+      # model of this kind stream", so unhiding this one silently moved nova-3
+      # and nova-2 onto the batch connector. Nova now carries prefer: realtime
+      # and answers for itself, and a guard test asserts that unhiding a
+      # batch-only model changes no other model's transport.
       - id: whisper-large
         label: Whisper Large (Deepgram Cloud)
         interactions: [transcribe]
@@ -230,6 +244,7 @@ providers:
         transcribe:
           realtime: true
           batch: true
+          prefer: realtime
           inline_diarization: true
           word_timestamps: true
           languages: codeswitch
@@ -239,6 +254,7 @@ providers:
         transcribe:
           realtime: true
           batch: true
+          prefer: realtime
           inline_diarization: true
           word_timestamps: true
           languages: codeswitch
@@ -290,6 +306,11 @@ providers:
           # https://www.assemblyai.com/docs/streaming/select-the-speech-model
           realtime: true
           batch: true
+          # Both transports, so the connector is named here rather than
+          # inferred. Streaming: a live session wants the streaming glossary
+          # ceiling (max_terms_realtime, 100) and the lower latency, and the
+          # async connector has never been run against api.assemblyai.com.
+          prefer: realtime
           # async: "Supported models: universal-3-5-pro, universal-2" on the diarization page;
           # streaming: "Diarization is supported on all streaming models". Param is `speaker_labels: true`.
           # https://www.assemblyai.com/docs/pre-recorded-audio/label-speakers
@@ -322,6 +343,12 @@ providers:
       # on. Then set hidden: false here, and that is the whole release step:
       # this file is the only gate, so nothing else needs editing to put the
       # model in a picker.
+      #
+      # As with Deepgram's whisper-large, this used to be untrue: unhiding a
+      # batch-only model rerouted universal-3-5-pro onto the async connector,
+      # which also raised its glossary ceiling from 100 terms to 1000. That
+      # model now states prefer: realtime and is unaffected by what else is
+      # offered here.
       # https://www.assemblyai.com/docs/getting-started/models
       - id: universal-2
         label: Universal-2
@@ -421,6 +448,10 @@ providers:
         transcribe:
           realtime: true
           batch: true
+          # Both transports, and the batch one is what this model is for: the
+          # health probe then hits /models rather than opening a Realtime
+          # session. gpt-live-transcribe is the streaming sibling.
+          prefer: batch
           inline_diarization: false
           # Two mutually exclusive biasing fields: `keywords` (term list -- the real glossary)
           # and `prompt` (free-text context). Guide: "Don't send both fields. Keep each keyword
@@ -503,6 +534,9 @@ providers:
         transcribe:
           realtime: true
           batch: true
+          # v1/audio/transcriptions is the surface this repo drives for the
+          # 4o family; the realtime flag is the v1/realtime session path.
+          prefer: batch
           inline_diarization: false
           glossary: {supported: true, field: prompt, max_terms: null}
           word_timestamps: false
@@ -519,6 +553,7 @@ providers:
         transcribe:
           realtime: true
           batch: true
+          prefer: batch
           inline_diarization: false
           glossary: {supported: true, field: prompt, max_terms: null}
           word_timestamps: false

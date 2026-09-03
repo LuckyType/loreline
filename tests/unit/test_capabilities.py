@@ -8,7 +8,9 @@ with and only discover the mistake when the job failed.
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
+from loreline import capabilities
 from loreline.capabilities import (
     INTERACTIONS_BY_KIND,
     config,
@@ -25,7 +27,7 @@ from loreline.capabilities import (
     supports_live_capture,
     supports_realtime,
 )
-from loreline.capability_config import ModelSpec
+from loreline.capability_config import CapabilityConfig, ModelSpec, TranscribeCapabilities
 from loreline.models import Interaction, ModelInfo, ProviderKind
 
 
@@ -197,25 +199,38 @@ class TestRealtimeModelResolution:
         assert is_realtime_model(ProviderKind.GEMINI, "gemini-3.5-transcribe-live")
         assert not is_realtime_model(ProviderKind.GEMINI, "gemini-3.5-transcribe")
 
-    def test_streaming_only_kinds_stream_whatever_the_model(self) -> None:
-        """Deepgram and AssemblyAI offer nothing but streaming models here (the
-        curated lists exclude Deepgram's batch-only hosted Whisper), so an
-        uncurated model still rides the streaming connector."""
+    def test_a_dual_transport_model_follows_its_declared_preference(self) -> None:
+        """Nova and universal-3-5-pro serve both transports and stream;
+        gpt-transcribe serves both and posts. The difference is written on each
+        model as `prefer`, not derived from which siblings happen to be
+        offered, which is what makes the guard below possible."""
         assert is_realtime_model(ProviderKind.DEEPGRAM, "nova-3")
-        assert is_realtime_model(ProviderKind.DEEPGRAM, "some-future-model")
-        assert is_realtime_model(ProviderKind.ASSEMBLYAI, None)
+        assert is_realtime_model(ProviderKind.DEEPGRAM, "nova-2")
+        assert is_realtime_model(ProviderKind.ASSEMBLYAI, "universal-3-5-pro")
+        assert not is_realtime_model(ProviderKind.OPENAI, "gpt-transcribe")
 
-    def test_an_unset_model_keeps_the_kinds_historical_connector(self) -> None:
-        """None is answered against the kind alone. In practice only a kind
-        that curates no catalogue reaches this, since create_backend resolves
-        the declared default first, but the answer must stay defined: a lookup
-        that raised here would break the health probe rather than the pick."""
-        assert is_realtime_model(ProviderKind.OPENAI, None)
-        # Gemini has a streaming model now, so the kind alone answers "yes".
-        # That a stored Gemini config is still not switched onto it is a
-        # property of create_backend resolving the declared batch default
-        # first, and is asserted there rather than here.
-        assert is_realtime_model(ProviderKind.GEMINI, None)
+    def test_an_uncurated_model_follows_the_kinds_default(self) -> None:
+        """No annotation and no transport marker in the name leaves the model
+        this kind would have picked for itself: an unrecognised Deepgram id
+        streams because nova-3 does, and an unrecognised Gemini one posts
+        because gemini-3.5-transcribe does."""
+        assert is_realtime_model(ProviderKind.DEEPGRAM, "some-future-model")
+        assert is_realtime_model(ProviderKind.ASSEMBLYAI, "some-future-model")
+        assert not is_realtime_model(ProviderKind.GEMINI, "some-future-model")
+
+    def test_an_unset_model_answers_with_the_kinds_default_transport(self) -> None:
+        """None is answered by the model this kind would resolve to. In
+        practice only a kind that curates no catalogue reaches this, since
+        create_backend resolves the declared default first, but the answer must
+        stay defined: a lookup that raised here would break the health probe
+        rather than the pick.
+
+        It has to agree with the model that would actually run, which is why
+        this is the default's transport rather than "can this kind stream at
+        all": OpenAI and Gemini can, and both default to a batch model."""
+        assert is_realtime_model(ProviderKind.ASSEMBLYAI, None)
+        assert not is_realtime_model(ProviderKind.OPENAI, None)
+        assert not is_realtime_model(ProviderKind.GEMINI, None)
 
     def test_a_new_model_naming_its_transport_is_recognised(self) -> None:
         """The curated sets rot; both vendors put the transport in the name, so
@@ -228,6 +243,89 @@ class TestRealtimeModelResolution:
         route to: a self-hosted model with "live" in its name still posts."""
         assert not is_realtime_model(ProviderKind.OPENAI_COMPAT, "whisper-live-v3")
         assert not is_realtime_model(ProviderKind.OPENROUTER, "x-ai/grok-stt-1.0")
+
+
+class TestUnhidingIsSafe:
+    """Unhiding a model must not reroute a different one.
+
+    This is the guard the old rule lacked. The transport for a dual-transport
+    model used to be "does every offered model of this kind stream", so setting
+    hidden: false on Deepgram's whisper-large or AssemblyAI's universal-2 - the
+    one-line release step both yaml comments still describe - silently moved
+    nova-3, nova-2 and universal-3-5-pro onto batch connectors that have never
+    run against the real API. Nothing failed until a maintainer with a key
+    tried it.
+
+    The probe is read only: it copies the loaded config, flips the flag in
+    memory, and answers is_realtime_model against the copy. Nothing is written
+    and the process-wide cache is restored by monkeypatch.
+    """
+
+    @staticmethod
+    def _with_unhidden(
+        cfg: CapabilityConfig, kind: ProviderKind, model_id: str
+    ) -> CapabilityConfig:
+        """The same config with one model's `hidden` cleared."""
+        spec = cfg.providers[kind]
+        models = [
+            m.model_copy(update={"hidden": False}) if m.id == model_id else m for m in spec.models
+        ]
+        providers = dict(cfg.providers)
+        providers[kind] = spec.model_copy(update={"models": models})
+        return cfg.model_copy(update={"providers": providers})
+
+    @staticmethod
+    def _transports(cfg: CapabilityConfig) -> dict[tuple[ProviderKind, str | None], bool]:
+        """Every transport answer this file can give, curated and guessed.
+
+        ``cfg`` supplies the model ids to ask about; the answers come from
+        :func:`capabilities.is_realtime_model`, which reads the module-level
+        config, so the caller patches that first when asking about a variant.
+        """
+        probes: list[str | None] = [None, "some-future-model", "a-live-one", "nova-9"]
+        answers: dict[tuple[ProviderKind, str | None], bool] = {}
+        for kind, spec in cfg.providers.items():
+            ids: list[str | None] = [m.id for m in spec.models if m.transcribe]
+            for model in ids + probes:
+                answers[(kind, model)] = capabilities.is_realtime_model(kind, model)
+        return answers
+
+    @pytest.mark.parametrize(
+        ("kind", "model_id"),
+        [(ProviderKind.DEEPGRAM, "whisper-large"), (ProviderKind.ASSEMBLYAI, "universal-2")],
+    )
+    def test_unhiding_a_batch_only_model_reroutes_nothing_else(
+        self, kind: ProviderKind, model_id: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        shipped = capabilities.config()
+        entry = next(m for m in shipped.providers[kind].models if m.id == model_id)
+        assert entry.hidden, f"{model_id} is no longer hidden; this guard needs rewriting"
+        assert entry.transcribe is not None
+        assert entry.transcribe.batch and not entry.transcribe.realtime
+
+        before = self._transports(shipped)
+        unhidden = self._with_unhidden(shipped, kind, model_id)
+        monkeypatch.setattr(capabilities, "config", lambda: unhidden)
+        after = self._transports(unhidden)
+
+        changed = {key: (before[key], after[key]) for key in before if before[key] != after[key]}
+        assert changed == {}, f"unhiding {model_id} rerouted: {changed}"
+        # And the newly offered model itself posts, which is the whole point of
+        # unhiding it.
+        assert not after[(kind, model_id)]
+
+    def test_a_new_dual_transport_model_must_state_its_preference(self) -> None:
+        """The loader is what keeps the rule from rotting: someone adding a
+        model that serves both transports cannot leave the routing to be
+        inferred from somewhere else, because there is nowhere else."""
+        with pytest.raises(ValidationError, match="both transports"):
+            TranscribeCapabilities(realtime=True, batch=True)
+
+    def test_stating_a_preference_a_model_cannot_act_on_is_refused(self) -> None:
+        """A single-transport model already has its answer, so `prefer` on one
+        is either a copy-paste or a misunderstanding of what the field does."""
+        with pytest.raises(ValidationError, match="only meaningful"):
+            TranscribeCapabilities(realtime=True, batch=False, prefer="batch")
 
 
 def _models(*ids: str) -> list[ModelInfo]:

@@ -120,12 +120,26 @@ class TranscribeCapabilities(_Strict):
     """Per-model transcription surface.
 
     ``realtime`` and ``batch`` are transports, not a single either/or: OpenAI
-    serves both and the pair decides which connector runs. ``realtime`` is also
-    what the Realtime badge reports and what gates a model for live capture.
+    serves both and ``prefer`` then says which connector runs. ``realtime`` is
+    also what the Realtime badge reports and what gates a model for live
+    capture.
     """
 
     realtime: bool = False
     batch: bool = True
+    # Which connector runs when this model serves both transports. Required
+    # exactly then, and meaningless otherwise, because a single-transport model
+    # has nothing to choose between.
+    #
+    # This used to be derived instead: "do all non-hidden models of this kind
+    # stream". That made a model's routing a property of its siblings, so
+    # unhiding a batch-only model moved every dual-transport model of the same
+    # vendor onto the batch connector - and the yaml told maintainers that
+    # unhiding was the whole release step, which it demonstrably was not. The
+    # preference is a fact about the model, so it is written on the model, and
+    # the validator below means a new dual-transport entry cannot be added
+    # without stating it.
+    prefer: Literal["realtime", "batch"] | None = None
     inline_diarization: bool = False
     glossary: GlossarySupport = GlossarySupport()
     word_timestamps: bool = False
@@ -156,6 +170,25 @@ class TranscribeCapabilities(_Strict):
         return self
 
     @model_validator(mode="after")
+    def _dual_transport_states_its_preference(self) -> Self:
+        """Both transports means the file has to say which one runs.
+
+        Failing here is the point: routing that nobody wrote down gets derived
+        from something else, and the something else was the sibling list.
+        """
+        both = self.realtime and self.batch
+        if both and self.prefer is None:
+            raise ValueError(
+                "a model serving both transports must set prefer: realtime or prefer: batch"
+            )
+        if not both and self.prefer is not None:
+            raise ValueError(
+                "prefer is only meaningful when both realtime and batch are true; "
+                "a single-transport model already has its answer"
+            )
+        return self
+
+    @model_validator(mode="after")
     def _conflicts_name_real_features(self) -> Self:
         for group in self.conflicts:
             if len(group) < self._MIN_CONFLICT_GROUP:
@@ -167,6 +200,19 @@ class TranscribeCapabilities(_Strict):
                     f"unknown feature(s) in conflicts: {', '.join(unknown)} (known: {known})"
                 )
         return self
+
+    @property
+    def prefers_realtime(self) -> bool:
+        """Whether this model's chosen connector is the streaming one.
+
+        The single transport for a model that serves one, the declared
+        preference for a model that serves both. This is what the router asks;
+        ``realtime`` alone answers "can it stream", which is the badge's
+        question and not the connector's.
+        """
+        if self.realtime and self.batch:
+            return self.prefer == "realtime"
+        return self.realtime
 
     def conflicts_with(self, feature: str) -> frozenset[str]:
         """Features that cannot be enabled alongside ``feature``.
