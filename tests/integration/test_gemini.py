@@ -14,6 +14,7 @@ from typing import Any
 
 import httpx
 import pytest
+from structlog.testing import capture_logs
 
 from loreline.audio.chunker import Utterance
 from loreline.health import HealthStatus
@@ -142,6 +143,102 @@ async def test_glossary_becomes_custom_vocabulary() -> None:
 
     config = captured[0]["generation_config"]["transcription_config"]
     assert config["custom_vocabulary"] == ["Drakonia", "Thalric"]
+
+
+async def test_glossary_and_timestamps_never_reach_the_wire_together() -> None:
+    """The live 400, pinned.
+
+    Every utterance of every Gemini re-process for a campaign with any glossary
+    terms came back ``400 ... custom_vocabulary is incompatible with
+    timestamps``, because the connector sent timestamp_granularities
+    unconditionally and added custom_vocabulary whenever a glossary existed.
+    capabilities.yaml had declared both conflicts all along; nothing read them.
+
+    The model matters here: the guard resolves against the entry for
+    ``gemini-3.5-transcribe``, so this asserts the config is what decides, not
+    a rule hard-coded into the connector.
+    """
+    captured: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json  # noqa: PLC0415
+
+        captured.append(json.loads(request.content))
+        return httpx.Response(200, json=_reply([]))
+
+    async with _client(handler) as client:
+        backend = GeminiSTTBackend(_config(), model=MODEL, client=client, diarize=True)
+        _ = [
+            e
+            async for e in backend.transcribe(
+                _utterances([Utterance(pcm=b"\x01\x00" * 1600, start=0.0, end=0.1)]),
+                session_id="s1",
+                glossary=Glossary(campaign_id="c1", terms=["Drakonia"]),
+            )
+        ]
+
+    config = captured[0]["generation_config"]["transcription_config"]
+    # The glossary wins: it is what the GM switched the toggle on for.
+    assert config["custom_vocabulary"] == ["Drakonia"]
+    # Both conflicting features are simply absent, not sent empty.
+    assert "timestamp_granularities" not in config["mode"]
+    assert "diarization_mode" not in config["mode"]
+    assert config["mode"]["type"] == "verbatim"
+
+
+async def test_without_a_glossary_nothing_is_dropped() -> None:
+    """The conflict is about a combination, so it must not cost anything alone."""
+    captured: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json  # noqa: PLC0415
+
+        captured.append(json.loads(request.content))
+        return httpx.Response(200, json=_reply([]))
+
+    async with _client(handler) as client:
+        backend = GeminiSTTBackend(_config(), model=MODEL, client=client, diarize=True)
+        _ = [
+            e
+            async for e in backend.transcribe(
+                _utterances([Utterance(pcm=b"\x01\x00" * 1600, start=0.0, end=0.1)]),
+                session_id="s1",
+            )
+        ]
+
+    mode = captured[0]["generation_config"]["transcription_config"]["mode"]
+    assert mode["timestamp_granularities"] == ["word"]
+    assert mode["diarization_mode"] == "speaker"
+
+
+async def test_the_dropped_features_are_reported_once_not_per_utterance() -> None:
+    """``transcribe`` is called per utterance; the log line must not be.
+
+    The failure this replaces flooded the log with one 400 per utterance for
+    the length of the recording. Replacing that with one warning per utterance
+    would be the same defect wearing a different level.
+    """
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_reply([]))
+
+    glossary = Glossary(campaign_id="c1", terms=["Drakonia"])
+    async with _client(handler) as client:
+        backend = GeminiSTTBackend(_config(), model=MODEL, client=client)
+        with capture_logs() as logs:
+            for start in (0.0, 1.0, 2.0):
+                utterance = Utterance(pcm=b"\x01\x00" * 1600, start=start, end=start + 0.1)
+                _ = [
+                    e
+                    async for e in backend.transcribe(
+                        _utterances([utterance]), session_id="s1", glossary=glossary
+                    )
+                ]
+
+    dropped = [line for line in logs if line["event"] == "stt.features.dropped"]
+    assert len(dropped) == 1
+    assert dropped[0]["dropped"] == ["inline_diarization", "word_timestamps"]
+    assert dropped[0]["kept"] == ["glossary"]
 
 
 async def test_blank_language_omits_codes_for_auto_detection() -> None:

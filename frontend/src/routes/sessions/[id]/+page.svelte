@@ -1,9 +1,13 @@
 <script lang="ts">
-import { ChevronDown } from '@lucide/svelte'
+import { ChevronDown, TriangleAlert } from '@lucide/svelte'
 import { onDestroy, onMount } from 'svelte'
 import { page } from '$app/stores'
 import { ApiError, api } from '$lib/api'
-import { featureBlockedReason, reasoningEffortsFor } from '$lib/capabilities.svelte'
+import {
+	featureBlockedReason,
+	glossaryDropsWarning,
+	reasoningEffortsFor,
+} from '$lib/capabilities.svelte'
 import { Badge } from '$lib/components/ui/badge'
 import { Button } from '$lib/components/ui/button'
 import { Card, CardContent } from '$lib/components/ui/card'
@@ -81,6 +85,13 @@ const rpSelectedProvider = $derived(providers.find((p) => p.id === rpProvider))
 const rpGlossaryBlocked = $derived(
 	featureBlockedReason(rpSelectedProvider?.kind, rpModel, 'glossary'),
 )
+// A model that takes a glossary but refuses to combine it with word
+// timestamps is a different case: usable, and the backend keeps the terms and
+// drops the timestamps. It costs speaker attribution quality, so the toggle
+// carries a warning instead of being greyed out. This is the panel the
+// original report came from: every utterance of a Gemini re-process failed
+// with a 400 and the GM had no way to see why beforehand.
+const rpGlossaryWarning = $derived(glossaryDropsWarning(rpSelectedProvider?.kind, rpModel))
 
 $effect(() => {
 	if (rpUseGlossary && rpGlossaryBlocked) rpUseGlossary = false
@@ -741,6 +752,7 @@ onDestroy(() => {
 						<label
 							class="flex items-center gap-2"
 							title={rpGlossaryBlocked ||
+								rpGlossaryWarning ||
 								"Sends the campaign's terms to the provider as keyterms or a prompt."}
 						>
 							<Checkbox
@@ -749,6 +761,12 @@ onDestroy(() => {
 								onCheckedChange={(v) => (rpUseGlossary = v === true)}
 							/>
 							<span class={rpGlossaryBlocked ? 'text-muted-foreground' : ''}>Use glossary</span>
+							{#if rpGlossaryWarning && !rpGlossaryBlocked}
+								<TriangleAlert
+									class="size-3.5 shrink-0 text-amber-500"
+									aria-label="Diarization quality warning"
+								/>
+							{/if}
 						</label>
 						<!-- A model is required: the provider row carries none, so
 						     there is nothing for the server to fall back to. -->
@@ -761,6 +779,12 @@ onDestroy(() => {
 							{rpBusy ? 'Queuing…' : 'Re-process audio'}
 						</Button>
 					</div>
+					<!-- The icon alone is a tooltip, and the row is too narrow for the
+					     sentence: spelled out here so the trade is readable before the
+					     job is queued, not after the version comes back unlabelled. -->
+					{#if rpUseGlossary && rpGlossaryWarning}
+						<p class="text-right text-xs text-amber-500">{rpGlossaryWarning}</p>
+					{/if}
 				{:else}
 					<p class="text-muted-foreground">
 						No stored audio for this session - re-processing and diarization are unavailable.

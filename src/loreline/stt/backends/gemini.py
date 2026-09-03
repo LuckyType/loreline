@@ -7,7 +7,11 @@ OAuth2 principal, so a bare key fails at ``StreamingRecognize`` with
 is a different service that *does* authenticate with a plain API key, via the
 ``x-goog-api-key`` header, and ``gemini-3.5-transcribe`` covers what this app
 needs from a provider in a single call: speaker diarization, word-level
-timestamps, custom vocabulary, and explicit language codes.
+timestamps, custom vocabulary, and explicit language codes. Individually, that
+is: the service rejects a custom vocabulary sent alongside either of the other
+two ("custom_vocabulary is incompatible with timestamps"), which is why
+capabilities.yaml records the pairs as conflicts and ``_request_body`` resolves
+them before building the request.
 
 Unlike the gRPC streaming v2 connector, this is a batch endpoint: each voiced
 utterance is wrapped in a WAV container, base64'd inline, and POSTed on its
@@ -32,7 +36,7 @@ from loreline.health import HealthReport, probe_endpoint
 from loreline.logging import get_logger
 from loreline.models import Glossary, ProviderConfig, ProviderKind, TranscriptEvent, Word
 from loreline.secrets import SecretStore
-from loreline.stt.base import error_detail, glossary_terms
+from loreline.stt.base import FeatureConflictGuard, error_detail, glossary_terms
 from loreline.stt.registry import register
 
 log = get_logger(__name__)
@@ -80,6 +84,9 @@ class GeminiSTTBackend:
         self._language = language or config.language
         self._model = model
         self._diarize = diarize
+        # capabilities.yaml declares which of the three features below this
+        # model refuses to combine; the guard is what keeps them off the wire.
+        self._conflicts = FeatureConflictGuard(config, model)
         base_url = config.base_url or _DEFAULT_BASE_URL
         # Gemini authenticates with this header rather than a bearer token.
         headers = {"x-goog-api-key": api_key} if api_key else {}
@@ -102,15 +109,33 @@ class GeminiSTTBackend:
                 yield event
 
     def _request_body(self, wav: bytes, vocabulary: list[str]) -> dict[str, object]:
-        mode: dict[str, object] = {"type": "verbatim", "timestamp_granularities": ["word"]}
+        # Everything this request would turn on, before the model gets a say.
+        # Word timestamps are not a GM-facing toggle: this connector has always
+        # asked for them, because they are what a diarizer aligns speaker spans
+        # onto (loreline.diarization.merge).
+        requested = {"word_timestamps"}
         if self._diarize:
+            requested.add("inline_diarization")
+        if vocabulary:
+            requested.add("glossary")
+        # Google refuses either of the other two paired with the glossary:
+        # "custom_vocabulary is incompatible with timestamps." Sending such a
+        # pair fails the whole utterance with a 400, so the glossary wins and
+        # the other feature is left off (see CONFLICT_PRECEDENCE).
+        allowed = self._conflicts.allowed(requested)
+        mode: dict[str, object] = {"type": "verbatim"}
+        # Omitted rather than sent empty: an unasked-for key is a shape the API
+        # documents, an empty timestamp_granularities is not.
+        if "word_timestamps" in allowed:
+            mode["timestamp_granularities"] = ["word"]
+        if "inline_diarization" in allowed:
             mode["diarization_mode"] = "speaker"
         transcription: dict[str, object] = {"mode": mode}
         # An empty language_codes list means "auto-detect", which is what a
         # provider configured with no language should get.
         if self._language:
             transcription["language_codes"] = [self._language]
-        if vocabulary:
+        if "glossary" in allowed:
             transcription["custom_vocabulary"] = vocabulary
         body: dict[str, object] = {
             "input": [

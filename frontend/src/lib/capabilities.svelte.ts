@@ -273,6 +273,54 @@ export function featureBlockedReason(
 	return ''
 }
 
+/** What each feature's absence costs, in the order the warning names them. */
+const DROPPED_LABELS: [ConflictFeature, string][] = [
+	['word_timestamps', 'word timestamps'],
+	['inline_diarization', 'speaker labels'],
+	['glossary', 'the glossary'],
+]
+
+/**
+ * What switching the glossary on costs on this model, or '' when it costs nothing.
+ *
+ * Distinct from `featureBlockedReason`, which answers "can this be used at
+ * all" and disables the control. Here the glossary can be used, and wins: the
+ * backend resolves a declared conflict in its favour and leaves the other
+ * feature off the request (loreline.capability_config.CONFLICT_PRECEDENCE),
+ * because the terms are what the GM turned the toggle on for. That is a real
+ * cost to pay knowingly, not an error, so it is a warning beside the toggle
+ * rather than a reason it is greyed out.
+ *
+ * Only models that declare the conflict say anything. A warning every model
+ * carries is a warning nobody reads.
+ */
+export function glossaryDropsWarning(
+	kind: ProviderKind | undefined,
+	modelId: string | null | undefined,
+): string {
+	const caps = transcribeCapsFor(kind, modelId)
+	if (!caps?.glossary.supported) return ''
+	// Only features this model would otherwise have delivered: a conflict with
+	// a feature the model does not have anyway costs nothing.
+	const has: Record<ConflictFeature, boolean> = {
+		glossary: true,
+		inline_diarization: caps.inline_diarization,
+		word_timestamps: caps.word_timestamps,
+	}
+	const clash = conflictsWith(caps, 'glossary')
+	const dropped = DROPPED_LABELS.filter(([f]) => clash.includes(f) && has[f])
+	if (!dropped.length) return ''
+	const names = dropped.map(([, label]) => label).join(' and ')
+	// Word timestamps are what a diarizer aligns its speaker spans onto, so
+	// without them a whole utterance takes one speaker label rather than a
+	// label per word - and that is true of all three modes, since every one of
+	// them merges onto the same words.
+	const cost = dropped.some(([f]) => f === 'word_timestamps')
+		? ' Speakers can then only be placed per utterance instead of per word, so diarization quality suffers in every mode: inline, remote and re-processing.'
+		: ''
+	return `This model rejects a glossary sent alongside ${names}, so turning it on drops ${dropped.length > 1 ? 'them' : 'it'}.${cost}`
+}
+
 /**
  * Whether "Inline (from STT)" yields real speakers for this model.
  *

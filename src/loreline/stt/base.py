@@ -9,12 +9,12 @@ multiple interim events before a final.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterable
 from typing import Protocol, runtime_checkable
 
 from loreline.audio.chunker import Utterance
 from loreline.capabilities import config as capability_config
-from loreline.capability_config import GlossarySupport
+from loreline.capability_config import GlossarySupport, TranscribeCapabilities
 from loreline.health import HealthReport, error_detail
 from loreline.logging import get_logger
 from loreline.models import Glossary, ProviderConfig, ProviderKind, TranscriptEvent
@@ -26,12 +26,14 @@ log = get_logger(__name__)
 # same way, including Google's array-wrapped envelope. The connectors keep
 # importing it from here, where they always have.
 __all__ = [
+    "FeatureConflictGuard",
     "STTBackend",
     "capped_terms",
     "error_detail",
     "glossary_support",
     "glossary_terms",
     "http_base_url",
+    "transcribe_capabilities",
 ]
 
 
@@ -71,8 +73,11 @@ def glossary_terms(glossary: Glossary | None) -> list[str]:
     return list(glossary.terms) if glossary else []
 
 
-def glossary_support(kind: ProviderKind, model: str | None) -> GlossarySupport | None:
-    """Curated keyword-biasing surface for a provider+model pair.
+def transcribe_capabilities(
+    kind: ProviderKind,
+    model: str | None,
+) -> TranscribeCapabilities | None:
+    """Curated transcription surface for a provider+model pair.
 
     None means "not annotated", which is not the same as "unsupported": the
     caller keeps whatever it would have sent anyway. capabilities.yaml is where
@@ -86,8 +91,62 @@ def glossary_support(kind: ProviderKind, model: str | None) -> GlossarySupport |
         return None
     spec = capability_config().provider(kind)
     entry = spec.find(model) if spec else None
-    caps = entry.transcribe if entry else None
+    return entry.transcribe if entry else None
+
+
+def glossary_support(kind: ProviderKind, model: str | None) -> GlossarySupport | None:
+    """Curated keyword-biasing surface for a provider+model pair, or None."""
+    caps = transcribe_capabilities(kind, model)
     return caps.glossary if caps else None
+
+
+class FeatureConflictGuard:
+    """Drops the features a model refuses to combine, once per backend instance.
+
+    capabilities.yaml has always been able to say that two transcription
+    features cannot be sent together, and nothing enforced it: Gemini's batch
+    transcriber declares ``[glossary, word_timestamps]`` and
+    ``[glossary, inline_diarization]``, sent all three anyway, and every
+    utterance of every re-process for a campaign with a glossary came back
+    ``400 ... custom_vocabulary is incompatible with timestamps``. A declared
+    rule that request time ignores is worse than no rule, because the picker
+    greys a control out on the strength of it.
+
+    Resolution is ``TranscribeCapabilities.resolve_conflicts``, so the policy
+    (see ``CONFLICT_PRECEDENCE``) lives with the data rather than in each
+    connector, and a model that declares no conflicts is unaffected.
+
+    Why an object and not a function: a connector's ``transcribe`` is called
+    once per *utterance*, so a log line emitted where the decision is made
+    would reproduce the flood it replaces, one line per utterance for hours.
+    The guard is built once with the backend, which lives for the session or
+    the job, and reports the first time it drops anything.
+    """
+
+    def __init__(self, config: ProviderConfig, model: str | None) -> None:
+        self._config = config
+        self._model = model
+        self._reported = False
+
+    def allowed(self, requested: Iterable[str]) -> frozenset[str]:
+        """Which of ``requested`` may be sent, reporting a drop once."""
+        wanted = frozenset(requested)
+        caps = transcribe_capabilities(self._config.kind, self._model)
+        if caps is None:
+            return wanted
+        kept = caps.resolve_conflicts(wanted)
+        dropped = wanted - kept
+        if dropped and not self._reported:
+            self._reported = True
+            log.warning(
+                "stt.features.dropped",
+                provider=self._config.name,
+                provider_id=self._config.id,
+                model=self._model,
+                dropped=sorted(dropped),
+                kept=sorted(kept),
+            )
+        return kept
 
 
 def capped_terms(terms: list[str], support: GlossarySupport | None, *, realtime: bool) -> list[str]:

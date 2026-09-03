@@ -1,8 +1,19 @@
 <script lang="ts">
-import { ArrowDownToLine, ChevronDown, Filter, Trash2, WrapText } from '@lucide/svelte'
+import {
+	ArrowDownToLine,
+	ChevronDown,
+	Filter,
+	Trash2,
+	TriangleAlert,
+	WrapText,
+} from '@lucide/svelte'
 import { onDestroy, onMount } from 'svelte'
 import { ApiError, api } from '$lib/api'
-import { featureBlockedReason, inlineDiarizationFor } from '$lib/capabilities.svelte'
+import {
+	featureBlockedReason,
+	glossaryDropsWarning,
+	inlineDiarizationFor,
+} from '$lib/capabilities.svelte'
 import { Button } from '$lib/components/ui/button'
 import { Card, CardContent } from '$lib/components/ui/card'
 import { Checkbox } from '$lib/components/ui/checkbox'
@@ -56,18 +67,16 @@ let diarEndpoint = $state('')
 // On by default: capture always fed the campaign glossary to the provider, and
 // turning it off is the deliberate choice (hear the audio unbiased).
 let useGlossary = $state(true)
-// Some models cannot take a glossary at all (the field is simply ignored), and
-// some reject it in combination with another feature - Gemini's batch model
-// refuses a custom vocabulary sent alongside diarization. Either way the
-// checkbox is disabled and says why, rather than being a silent no-op.
-const glossaryBlocked = $derived(
-	featureBlockedReason(
-		primaryKind,
-		model,
-		'glossary',
-		diarMode === 'inline' ? ['inline_diarization'] : [],
-	),
-)
+// Some models cannot take a glossary at all (the field is simply ignored), in
+// which case the checkbox is disabled and says why rather than being a silent
+// no-op. No `active` features are passed: a model that refuses to combine the
+// glossary with something else does not block it, it costs something, and the
+// backend resolves that in the glossary's favour - see glossaryWarning.
+const glossaryBlocked = $derived(featureBlockedReason(primaryKind, model, 'glossary'))
+// The price of that resolution, stated where the GM decides: on a model that
+// declares the conflict, switching the glossary on gives up word timestamps
+// and so degrades speaker attribution in every diarization mode.
+const glossaryWarning = $derived(glossaryDropsWarning(primaryKind, model))
 // The mirror image: with the glossary on, a model that cannot combine the two
 // keeps the inline option visible but greyed, so the reason is discoverable.
 const inlineConflict = $derived(
@@ -107,10 +116,11 @@ $effect(() => {
 	if (diarMode === 'inline' && primaryModelInfo && !inlineAvailable) diarMode = 'none'
 })
 
-// The glossary is the default-on convenience and diarization the deliberate
-// pick, so when the two cannot be combined it is the glossary that gives way -
-// silently sending a request the vendor rejects is the one option that helps
-// nobody.
+// Switching to a model with no way to receive a glossary at all must not leave
+// the toggle on: the terms would be dropped on the floor with the checkbox
+// still ticked. This is only about that case now, not about a conflict - a
+// model that refuses a combination still gets the glossary, and gives up the
+// other feature instead.
 $effect(() => {
 	if (useGlossary && glossaryBlocked) useGlossary = false
 })
@@ -440,6 +450,11 @@ onDestroy(() => {
 					<span class="text-foreground"
 						>{useGlossary ? 'On' : glossaryBlocked ? 'Unsupported' : 'Off'}</span
 					>
+					<!-- The panel below is collapsed by default and the glossary is on by
+					     default, so the folded summary is where most GMs will meet this. -->
+					{#if useGlossary && glossaryWarning}
+						<TriangleAlert class="size-3 shrink-0 text-amber-500" aria-label={glossaryWarning} />
+					{/if}
 					<Button
 						variant="ghost"
 						size="sm"
@@ -520,9 +535,21 @@ onDestroy(() => {
 								<span class={cn('text-sm', glossaryBlocked && 'text-muted-foreground')}>
 									Use glossary
 								</span>
+								{#if glossaryWarning && !glossaryBlocked}
+									<TriangleAlert
+										class="size-3.5 shrink-0 text-amber-500"
+										aria-label="Diarization quality warning"
+									/>
+								{/if}
 							</label>
-							<span class="text-xs text-muted-foreground">
+							<span
+								class={cn(
+									'text-xs',
+									glossaryWarning && !glossaryBlocked ? 'text-amber-500' : 'text-muted-foreground',
+								)}
+							>
 								{glossaryBlocked ||
+									glossaryWarning ||
 									"Sends the campaign's terms to the provider as keyterms or a prompt."}
 							</span>
 						</div>
