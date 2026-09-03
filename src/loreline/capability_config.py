@@ -30,6 +30,7 @@ Three levels, matching the three questions the UI asks:
 from __future__ import annotations
 
 import fnmatch
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Literal, Self
 
@@ -39,6 +40,25 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from loreline.models import Interaction, ProviderKind
 
 CONFIG_PATH = Path(__file__).with_name("capabilities.yaml")
+
+# The transcription toggles a conflict group may name, in the order a request
+# gives them up. A conflict says a model refuses a combination; it does not say
+# which half to keep, and somebody has to decide, once, for every provider,
+# rather than per connector.
+#
+# The glossary comes first because it is the only one of the three the GM
+# switches on for a specific job, and because on a tabletop transcript the
+# invented character and place names are the payload: a run that spells
+# "Drakonia" right and labels the speaker "Speaker 1" is worth more than the
+# reverse. Inline diarization comes next, being visible in the transcript, and
+# word timestamps last, being an internal alignment aid (see
+# loreline.diarization.merge, which falls back to labelling a whole utterance
+# when they are absent).
+#
+# Honouring a toggle in name only is the failure this ordering exists to avoid:
+# the UI offered "Use glossary", the connector sent the terms alongside a
+# feature the vendor refuses, and every utterance died with a 400.
+CONFLICT_PRECEDENCE = ("glossary", "inline_diarization", "word_timestamps")
 
 
 class _Strict(BaseModel):
@@ -122,8 +142,10 @@ class TranscribeCapabilities(_Strict):
     conflicts: list[list[str]] = Field(default_factory=list[list[str]])
 
     # The toggles a conflict group may name. Anything else is a typo, and a
-    # typo here would silently stop guarding a combination that errors.
-    _CONFLICTABLE = frozenset({"glossary", "inline_diarization", "word_timestamps"})
+    # typo here would silently stop guarding a combination that errors. Derived
+    # from the precedence order so the two cannot drift: a feature that can
+    # conflict is a feature the resolver has to know how to rank.
+    _CONFLICTABLE = frozenset(CONFLICT_PRECEDENCE)
     # A conflict is a statement about a pair, so a group of one says nothing.
     _MIN_CONFLICT_GROUP = 2
 
@@ -157,6 +179,31 @@ class TranscribeCapabilities(_Strict):
             if feature in group:
                 blocked.update(group)
         return frozenset(blocked - {feature})
+
+    def resolve_conflicts(self, requested: Iterable[str]) -> frozenset[str]:
+        """The subset of ``requested`` this model will accept in one request.
+
+        Answers the question the connectors actually have, which
+        ``conflicts_with`` alone cannot: given everything a request would turn
+        on, what may still be sent. Features are taken in
+        ``CONFLICT_PRECEDENCE`` order and one is kept unless something already
+        kept conflicts with it, so the answer does not depend on the order the
+        caller happened to build its set in.
+
+        A model that declares no conflicts gets everything it asked for back,
+        which is every model but Gemini's batch transcriber today. That is the
+        point of resolving through the config rather than in a connector: the
+        rule is enforced wherever it is declared, and nowhere else.
+        """
+        wanted = set(requested)
+        kept: set[str] = set()
+        for feature in CONFLICT_PRECEDENCE:
+            if feature in wanted and not (self.conflicts_with(feature) & kept):
+                kept.add(feature)
+        # Anything the precedence list does not name cannot appear in a
+        # conflict group (the validator above sees to that), so it passes
+        # through untouched rather than being silently dropped.
+        return frozenset(kept | (wanted - self._CONFLICTABLE))
 
 
 class ReasoningSupport(_Strict):

@@ -7,13 +7,20 @@ up as a silently missing UI control rather than an error.
 
 from __future__ import annotations
 
+import itertools
 import textwrap
 from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
-from loreline.capability_config import CapabilityConfig, ModelSpec, ProviderSpec, load
+from loreline.capability_config import (
+    CapabilityConfig,
+    ModelSpec,
+    ProviderSpec,
+    TranscribeCapabilities,
+    load,
+)
 from loreline.llm import default_base_url
 from loreline.models import Interaction, ProviderKind
 from loreline.stt import registry
@@ -189,6 +196,95 @@ def test_conflicts_reports_the_features_blocked_by_one_toggle() -> None:
     assert caps.conflicts_with("glossary") == frozenset({"inline_diarization", "word_timestamps"})
     assert caps.conflicts_with("inline_diarization") == frozenset({"glossary"})
     assert caps.conflicts_with("word_timestamps") == frozenset({"glossary"})
+
+
+def _gemini_shaped() -> TranscribeCapabilities:
+    """A model with both of Gemini's declared conflicts, and all three features."""
+    spec = ProviderSpec.model_validate(
+        _provider(
+            models=[
+                _transcriber(
+                    transcribe={
+                        "inline_diarization": True,
+                        "word_timestamps": True,
+                        "glossary": {"supported": True, "field": "custom_vocabulary"},
+                        "conflicts": [
+                            ["glossary", "inline_diarization"],
+                            ["glossary", "word_timestamps"],
+                        ],
+                    }
+                )
+            ]
+        )
+    )
+    caps = spec.models[0].transcribe
+    assert caps is not None
+    return caps
+
+
+def test_resolve_conflicts_keeps_the_glossary_and_drops_the_rest() -> None:
+    """The decided policy: the terms are what the GM switched the toggle on for."""
+    caps = _gemini_shaped()
+    kept = caps.resolve_conflicts({"glossary", "inline_diarization", "word_timestamps"})
+    assert kept == frozenset({"glossary"})
+
+
+def test_resolve_conflicts_does_not_depend_on_the_callers_order() -> None:
+    """Precedence, not set iteration order, decides which half survives."""
+    caps = _gemini_shaped()
+    for order in itertools.permutations(["glossary", "inline_diarization", "word_timestamps"]):
+        assert caps.resolve_conflicts(order) == frozenset({"glossary"})
+
+
+def test_resolve_conflicts_keeps_everything_without_the_glossary() -> None:
+    """Nothing is dropped for its own sake: the two only clash with the glossary."""
+    caps = _gemini_shaped()
+    requested = {"inline_diarization", "word_timestamps"}
+    assert caps.resolve_conflicts(requested) == frozenset(requested)
+
+
+def test_resolve_conflicts_is_a_no_op_for_a_model_declaring_none() -> None:
+    """Every model but Gemini's batch transcriber, today."""
+    spec = ProviderSpec.model_validate(
+        _provider(
+            models=[
+                _transcriber(
+                    transcribe={
+                        "inline_diarization": True,
+                        "word_timestamps": True,
+                        "glossary": {"supported": True, "field": "keyterm"},
+                    }
+                )
+            ]
+        )
+    )
+    caps = spec.models[0].transcribe
+    assert caps is not None
+    requested = {"glossary", "inline_diarization", "word_timestamps"}
+    assert caps.resolve_conflicts(requested) == frozenset(requested)
+
+
+# Kinds whose connector runs every request through a FeatureConflictGuard. A
+# conflict declared for a kind that is not on this list is a rule nobody
+# enforces, which is exactly the bug this list exists to stop coming back: the
+# yaml said the pair was illegal for months while the connector kept sending
+# it, and every Gemini re-process with a glossary died on a 400.
+_CONFLICT_ENFORCING_KINDS = {ProviderKind.GEMINI}
+
+
+def test_every_declared_conflict_has_a_connector_that_enforces_it() -> None:
+    config = load()
+    declaring = {
+        kind
+        for kind, spec in config.providers.items()
+        for model in spec.models
+        if model.transcribe and model.transcribe.conflicts
+    }
+    unenforced = sorted(k.value for k in declaring - _CONFLICT_ENFORCING_KINDS)
+    assert not unenforced, (
+        f"capabilities.yaml declares conflicts for {', '.join(unenforced)}, whose connector "
+        "does not apply a FeatureConflictGuard: wire it up, then add the kind here"
+    )
 
 
 def test_declared_interaction_without_its_block_is_rejected() -> None:
