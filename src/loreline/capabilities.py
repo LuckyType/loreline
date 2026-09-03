@@ -157,6 +157,12 @@ def curated_models(kind: ProviderKind, interaction: Interaction) -> list[str]:
     Gemini publishes no list this app fetches, so its chat models exist only
     here. Empty for a kind that lists none, which is not the same as "offer
     everything": see :mod:`loreline.stt.catalog` for what that falls back to.
+
+    This is the *only* gate on what a picker offers. A model listed here and
+    not hidden is offered; anything else is not. The second gate that used to
+    stand beside it (``_CURATED`` in :mod:`loreline.stt.catalog`) is gone: two
+    lists meant a model could be curated in one and withheld by the other, and
+    which one won depended on the code path.
     """
     spec = _provider(kind)
     return [m.id for m in spec.models_for(interaction)] if spec else []

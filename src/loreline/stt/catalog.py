@@ -1,9 +1,17 @@
 """List the models a provider offers, for the on-demand model pickers.
 
 OpenAI-compatible endpoints (OpenAI cloud, OpenRouter, Speaches, Ollama, LM Studio,
-…) expose ``GET /v1/models``; the others (Deepgram, AssemblyAI, Gemini) don't, so a
-small curated catalog per kind is the fallback. Best-effort: a failed live fetch
+…) expose ``GET /v1/models``; the others (Deepgram, AssemblyAI, Gemini) don't, so
+capabilities.yaml is the fallback catalogue. Best-effort: a failed live fetch
 falls back to the curated list (or an empty list).
+
+This module decides *where* a list comes from, never *which models are in it*.
+That second question has exactly one answer, capabilities.yaml, read here through
+:func:`loreline.capabilities.curated_models`. It used to have two: a ``_CURATED``
+table lived here as well, and the pair had already drifted - it offered six
+task-tuned Deepgram variants the yaml deliberately does not list, and it kept
+gemini-3.5-transcribe-live out of every picker for a while after the yaml unhid
+it, because nobody remembered the second gate.
 """
 
 from __future__ import annotations
@@ -42,77 +50,6 @@ _OPENROUTER_TRANSCRIBE_QUERY = "?output_modalities=transcription"
 # Kinds whose base URL is user-supplied (self-hostable), falling back to the kind's own cloud.
 _CUSTOM_BASE_KINDS = {ProviderKind.OPENAI_COMPAT}
 
-# Curated model lists for providers with no ``/v1/models`` endpoint to ask.
-#
-# Each entry is scoped to what *this app's connectors for that kind* can
-# actually use *and* have been verified against, which is narrower than the
-# provider's full catalogue. Realtime and batch are not interchangeable:
-# Deepgram serves Whisper batch-only while its own models stream, and Gemini's
-# live transcription needs the Live API. Listing a model no connector can drive
-# just moves the failure to run time. Deepgram, AssemblyAI and OpenAI now each
-# have a connector per transport, so a list here may mix the two; the registry
-# resolves each model to the right one.
-#
-# Checked against each provider's own documentation on 2026-08-31 - see the
-# per-kind notes. Re-check when a provider ships a generation; nothing here is
-# derived automatically.
-_CURATED: dict[ProviderKind, list[str]] = {
-    # Deepgram's hosted Whisper models (whisper-tiny…whisper-large) are
-    # deliberately absent, and THIS LIST IS THE GATE that hides them: they are
-    # pre-recorded only, and their batch connector
-    # (stt/backends/deepgram_batch.py) has never been run against the real API,
-    # so they must not appear in a picker until someone verifies it with a real
-    # key. Deepgram is not fetched live, so this curated list is the only path
-    # into the transcribe catalogue. A config that names one still resolves to
-    # the batch connector (see loreline.stt.registry), which is how the
-    # verification run is switched on without a code change. Once verified,
-    # unhide whisper-large in capabilities.yaml and add it here.
-    # https://developers.deepgram.com/docs/models-languages-overview
-    # https://developers.deepgram.com/docs/deepgram-whisper-cloud
-    ProviderKind.DEEPGRAM: [
-        "flux-general-en",
-        "flux-general-multi",
-        "nova-3",
-        "nova-3-general",
-        "nova-3-medical",
-        "nova-2",
-        "nova-2-meeting",
-        "nova-2-phonecall",
-        "nova-2-conversationalai",
-        "nova-2-video",
-    ],
-    # Universal-Streaming v3 `speech_model` values, verbatim from the streaming
-    # docs' code samples. universal-3-5-pro is the endpoint's own default.
-    # universal-2 is deliberately absent for the same reason as the Deepgram
-    # Whisper models above: it is async only, and its batch connector
-    # (stt/backends/assemblyai_batch.py) is unverified against the real API.
-    # Once verified, unhide it in capabilities.yaml and add it here.
-    # https://www.assemblyai.com/docs/streaming/universal-streaming
-    # https://www.assemblyai.com/docs/getting-started/models
-    ProviderKind.ASSEMBLYAI: [
-        "universal-3-5-pro",
-        "universal-streaming-english",
-        "universal-streaming-multilingual",
-    ],
-    # Batch transcription via the Interactions API, plus the Live API model,
-    # which is here because it has now been verified against the real service
-    # (see the note on gemini-3.5-transcribe-live in capabilities.yaml).
-    # Gemini is not fetched live, so this curated list is the only path into
-    # the transcribe catalogue, and hidden: false in the yaml alone would not
-    # put the model in a picker.
-    # https://ai.google.dev/gemini-api/docs/transcribe
-    # https://ai.google.dev/gemini-api/docs/live-api/live-transcribe
-    ProviderKind.GEMINI: ["gemini-3.5-transcribe", "gemini-3.5-transcribe-live"],
-    # Fallback only, for when the live /models fetch fails: this kind normally
-    # lists its transcription models live, now that the registry can route the
-    # realtime ones to the Realtime WebSocket and the batch ones to
-    # /audio/transcriptions from a single stored provider. whisper-1 and the
-    # gpt-4o-*-transcribe family are omitted: deprecated 2026-08-26 (removal
-    # 2027-02-26), so a fallback should not seed them into new configs.
-    # https://developers.openai.com/api/docs/guides/realtime-transcription
-    ProviderKind.OPENAI: ["gpt-live-transcribe", "gpt-realtime-whisper", "gpt-transcribe"],
-}
-
 ClientFactory = Callable[[], httpx.AsyncClient]
 
 
@@ -150,23 +87,11 @@ async def list_models(
                 live, kind=kind, interaction=interaction, strict=strict_filtering
             )
             return _annotate(narrowed, kind=kind, interaction=interaction)
-    curated = [ModelInfo(id=model_id) for model_id in _curated_ids(kind, interaction)]
+    # The curated fallback, scoped to this interaction: Gemini's catalogue is
+    # never fetched live, so an unscoped list here would offer a transcription
+    # model to summarize with.
+    curated = [ModelInfo(id=model_id) for model_id in curated_models(kind, interaction)]
     return _annotate(curated, kind=kind, interaction=interaction)
-
-
-def _curated_ids(kind: ProviderKind, interaction: Interaction) -> list[str]:
-    """The fallback catalogue for a kind with no live list for this interaction.
-
-    Transcription keeps the hand-written table above, which is deliberately
-    narrower than capabilities.yaml - see the gemini-3.5-transcribe-live gate
-    in it. Everything else reads the curated ids straight out of the yaml,
-    because the transcription table is the wrong answer to a different
-    question: Gemini's catalogue is never fetched live, so a summarize picker
-    falling through to it would offer a transcription model to summarize with.
-    """
-    if interaction is Interaction.TRANSCRIBE:
-        return _CURATED.get(kind, [])
-    return curated_models(kind, interaction)
 
 
 def _annotate(
