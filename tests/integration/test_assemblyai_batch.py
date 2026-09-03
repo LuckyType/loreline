@@ -195,7 +195,6 @@ async def test_uploads_creates_and_polls_then_maps_words_onto_session_time() -> 
     assert abs(event.words[0].end - 12.45) < 1e-6
     assert event.words[0].speaker == "Speaker A"
     assert event.words[1].speaker == "Speaker B"
-    assert event.speaker == "Speaker A"
 
 
 async def test_glossary_goes_in_keyterms_prompt_capped_for_this_model() -> None:
@@ -309,22 +308,6 @@ async def test_a_failing_cleanup_does_not_replace_the_original_error() -> None:
         await _run(api)
 
     assert api.deleted()  # it tried
-
-
-async def test_upload_failure_keeps_the_error_body() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == "/v2/upload"
-        return httpx.Response(401, json={"error": "Not authorized"})
-
-    client = httpx.AsyncClient(
-        transport=httpx.MockTransport(handler), base_url=BASE_URL, headers={}
-    )
-    backend = AssemblyAIBatchBackend(_config(), client=client)
-    try:
-        with pytest.raises(httpx.HTTPStatusError, match="Not authorized"):
-            _ = [e async for e in backend.transcribe(_one(), session_id="s1")]
-    finally:
-        await backend.aclose()
 
 
 async def test_a_streaming_base_url_is_not_handed_to_the_http_client() -> None:

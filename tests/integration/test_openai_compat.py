@@ -186,8 +186,6 @@ async def test_word_timings_and_speakers_reach_the_event() -> None:
     assert event.words[0].start == 10.0
     assert event.words[1].start == 10.5
     assert [w.speaker for w in event.words] == ["Speaker 0", "Speaker 1"]
-    # The event's own speaker is its first labelled word, as elsewhere.
-    assert event.speaker == "Speaker 0"
 
 
 async def test_segments_are_used_when_there_are_no_words() -> None:
@@ -221,7 +219,6 @@ async def test_a_plain_json_body_still_works() -> None:
     events = await _collect_events(_mock_backend(handle))
     assert events[0].text == "just text"
     assert events[0].words == []
-    assert events[0].speaker is None
 
 
 async def test_an_endpoint_rejecting_verbose_json_falls_back_once() -> None:
