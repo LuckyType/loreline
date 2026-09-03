@@ -9,7 +9,7 @@ OpenAI model name is not a valid id here.
 **Re-processing only.** OpenRouter offers no streaming, realtime or websocket
 transcription - a single request/response file upload is the entire API. It is
 therefore excluded from live capture (see
-``loreline.capabilities.LIVE_CAPTURE_EXCLUDED``, which explains the reasoning)
+``loreline.capabilities.supports_live_capture``, which explains the reasoning)
 and reachable only through post-session re-processing, where stored audio is
 replayed utterance by utterance with no deadline.
 

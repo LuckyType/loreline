@@ -30,7 +30,7 @@ from loreline.models import (
     rebase_transcript,
 )
 from loreline.monitoring.alerts import AlertLevel
-from loreline.stt.registry import create_backend
+from loreline.stt.registry import BackendFactory, create_backend
 from loreline.stt.router import ProvidersExhaustedError, RouterConfig, SttRouter
 
 if TYPE_CHECKING:
@@ -65,11 +65,6 @@ class CaptureSource(Protocol):
 
 
 CaptureFactory = Callable[["StartSessionRequest", int], tuple[CaptureSource, SpeechDetector]]
-# (config, secrets, model). The model is the request's, passed alongside the
-# config rather than stamped onto a copy of it: a provider row has no model
-# field to stamp, and the connector and the transport lookup must agree on
-# which one is running.
-BackendFactory = Callable[["ProviderConfig", "SecretStore", str | None], "STTBackend"]
 DiarizerFactory = Callable[["DiarizationConfig"], "DiarizationProvider"]
 
 
@@ -182,7 +177,7 @@ class SessionManager:
         """Reject a provider that can only transcribe stored audio.
 
         OpenRouter's transcription API has no streaming mode at all (see
-        loreline.capabilities.LIVE_CAPTURE_EXCLUDED). Caught here rather than
+        loreline.capabilities.supports_live_capture). Caught here rather than
         left to fail mid-session: the UI already hides these from the live
         pickers, so reaching this is an API caller or a stale default.
         """

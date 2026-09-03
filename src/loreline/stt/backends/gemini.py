@@ -36,14 +36,22 @@ from loreline.health import HealthReport, probe_endpoint
 from loreline.logging import get_logger
 from loreline.models import Glossary, ProviderConfig, ProviderKind, TranscriptEvent, Word
 from loreline.secrets import SecretStore
-from loreline.stt.base import FeatureConflictGuard, error_detail, glossary_terms
+from loreline.stt.base import (
+    FeatureConflictGuard,
+    error_detail,
+    glossary_terms,
+    glossary_terms_for,
+)
 from loreline.stt.registry import register
 
 log = get_logger(__name__)
 
 _DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 # The API caps custom_vocabulary at 1000 terms; a longer glossary is truncated
-# rather than rejected outright mid-session.
+# rather than rejected outright mid-session. The curated models record that
+# ceiling in capabilities.yaml, which is what the request actually reads; this
+# is the fallback for a Gemini id nobody has annotated, where there is no
+# per-model number to read.
 _MAX_VOCABULARY = 1000
 
 
@@ -100,7 +108,13 @@ class GeminiSTTBackend:
         session_id: str,
         glossary: Glossary | None = None,
     ) -> AsyncIterator[TranscriptEvent]:
-        vocabulary = glossary_terms(glossary)[:_MAX_VOCABULARY]
+        vocabulary = glossary_terms_for(
+            ProviderKind.GEMINI,
+            self._model,
+            glossary_terms(glossary),
+            realtime=False,
+            fallback_max_terms=_MAX_VOCABULARY,
+        )
         async for utterance in audio:
             event = await self._transcribe_one(
                 utterance, session_id=session_id, vocabulary=vocabulary

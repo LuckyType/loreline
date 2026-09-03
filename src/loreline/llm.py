@@ -50,7 +50,7 @@ _OPENROUTER_HEALTH_PATH = "/key"
 
 # Provider kinds that summarize, i.e. speak chat-completions rather than STT.
 # Derived from the one capability table rather than re-listed here - see
-# loreline.capabilities.INTERACTIONS_BY_KIND.
+# loreline.capabilities.kinds_for.
 LLM_KINDS = kinds_for(Interaction.SUMMARIZE)
 
 # OpenRouter credits the calling app on its public leaderboards through these
