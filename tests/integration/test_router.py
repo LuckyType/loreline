@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
+
+import httpx
+import pytest
 
 from loreline.audio.chunker import Utterance
 from loreline.bus import EventBus
@@ -18,7 +21,7 @@ from loreline.models import (
     TranscriptEvent,
     Word,
 )
-from loreline.stt.router import RouterConfig, SttRouter
+from loreline.stt.router import ProvidersExhaustedError, RouterConfig, SttRouter
 
 
 def _config(provider_id: str) -> ProviderConfig:
@@ -352,3 +355,135 @@ async def test_compare_fan_out() -> None:
     assert result["p1"][0].text == "one"
     assert result["p2"][0].text == "two"
     assert result["bad"] == []
+
+
+# --- terminal provider failures --------------------------------------------
+
+# The two 429s a provider can answer with, verbatim. Same status, opposite
+# handling: the first can only be fixed on the billing page, the second fixes
+# itself in a moment. See loreline.health.classify_request_error.
+_NO_CREDITS = {
+    "error": {
+        "message": (
+            "You have no credits remaining. Add credits to continue using the API at "
+            "https://platform.openai.com/settings/organization/billing/."
+        ),
+        "type": "insufficient_quota",
+        "code": "insufficient_quota",
+    }
+}
+_RATE_LIMITED = {
+    "error": {
+        "message": (
+            "Rate limit reached for gpt-4o-transcribe in organization org-x on requests "
+            "per min (RPM): Limit 500, Used 500, Requested 1. Please try again in 120ms."
+        ),
+        "type": "requests",
+        "code": "rate_limit_exceeded",
+    }
+}
+
+
+class RejectingBackend(FakeBackend):
+    """Answers every request with one fixed HTTP error, and counts the calls.
+
+    Raised the way the batch connectors do, body and all: the router has to
+    read that body, because the status code alone cannot tell an exhausted
+    account from a busy minute.
+    """
+
+    def __init__(self, provider_id: str, *, status: int, body: Mapping[str, object]) -> None:
+        super().__init__(provider_id)
+        self._status = status
+        self._body = body
+        self.calls = 0
+
+    async def transcribe(
+        self,
+        audio: AsyncIterator[Utterance],
+        *,
+        session_id: str,
+        glossary: object = None,
+    ) -> AsyncIterator[TranscriptEvent]:
+        _ = glossary
+        async for _utt in audio:
+            self.calls += 1
+            request = httpx.Request("POST", "https://api.example.test/v1/audio/transcriptions")
+            response = httpx.Response(self._status, json=self._body, request=request)
+            raise httpx.HTTPStatusError(
+                f"{self._status} from {request.url}", request=request, response=response
+            )
+        if False:  # pragma: no cover - marks this as an async generator
+            yield TranscriptEvent(
+                session_id=session_id, source=self.config.id, text="", start_ts=0.0, end_ts=0.0
+            )
+
+
+async def test_router_stops_when_the_only_provider_is_out_of_credit() -> None:
+    """The reported bug: a terminal 429 used to be retried for every utterance,
+    so the run finished "successfully" with an empty transcript after two doomed
+    API calls per utterance. It must stop instead, once, with the vendor's own
+    sentence for the GM."""
+    bus: EventBus[TranscriptEvent] = EventBus()
+    primary = RejectingBackend("primary", status=429, body=_NO_CREDITS)
+    router = SttRouter(primary, bus, RouterConfig(session_id="s1"))
+
+    with pytest.raises(ProvidersExhaustedError) as caught:
+        await router.run(_n_utterances(5))
+
+    assert "no credits remaining" in str(caught.value)
+    assert str(caught.value).startswith("primary: ")  # the provider is named
+    assert primary.calls == 1  # not once per utterance
+    assert router.terminal_error is not None
+
+
+async def test_router_keeps_going_when_the_provider_is_merely_rate_limited() -> None:
+    """The same status, and it must not stop the run: a throttle passes, and
+    aborting a healthy session over one would be worse than the bug above."""
+    bus: EventBus[TranscriptEvent] = EventBus()
+    primary = RejectingBackend("primary", status=429, body=_RATE_LIMITED)
+    router = SttRouter(primary, bus, RouterConfig(session_id="s1"))
+
+    await router.run(_n_utterances(5))  # no exception
+
+    assert primary.calls == 5  # still tried every utterance
+    assert router.terminal_error is None
+    assert router.degraded_since is not None  # nothing transcribed, so still degraded
+
+
+async def test_router_fails_over_to_a_fallback_before_giving_up() -> None:
+    """A dead primary is exactly when the fallback earns its keep: it is usually
+    a different vendor, with a different bill. The primary is asked once and
+    then left alone, and the session keeps transcribing."""
+    bus: EventBus[TranscriptEvent] = EventBus()
+    primary = RejectingBackend("primary", status=401, body={"error": {"message": "Invalid key"}})
+    router = SttRouter(
+        primary,
+        bus,
+        RouterConfig(session_id="s1"),
+        fallback=FakeBackend("fallback"),
+    )
+    collector = asyncio.create_task(_collect(bus, 3))
+    await asyncio.sleep(0.01)
+    await router.run(_n_utterances(3))
+    events = await collector
+
+    assert [e.source for e in events] == ["fallback"] * 3
+    assert primary.calls == 1
+    assert router.terminal_error is None  # a working provider remains
+    assert router.degraded_since is None
+
+
+async def test_router_reports_every_dead_provider_when_both_are_gone() -> None:
+    bus: EventBus[TranscriptEvent] = EventBus()
+    primary = RejectingBackend("primary", status=429, body=_NO_CREDITS)
+    fallback = RejectingBackend("fallback", status=401, body={"error": {"message": "Invalid key"}})
+    router = SttRouter(primary, bus, RouterConfig(session_id="s1"), fallback=fallback)
+
+    with pytest.raises(ProvidersExhaustedError) as caught:
+        await router.run(_n_utterances(4))
+
+    message = str(caught.value)
+    assert "primary: You have no credits remaining." in message
+    assert "fallback: Invalid key" in message
+    assert (primary.calls, fallback.calls) == (1, 1)

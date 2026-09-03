@@ -7,6 +7,7 @@ import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 
+import httpx
 import pytest
 import pytest_asyncio
 from asgi_lifespan import LifespanManager
@@ -532,3 +533,81 @@ async def test_merge_and_delete_sessions(tmp_path: Path) -> None:
             ids = {s["id"] for s in (await client.get("/api/session")).json()}
             assert "a" not in ids and "b" not in ids  # originals deleted
             assert merged["id"] in ids  # merged session kept
+
+
+class OutOfCreditBackend(FakeBackend):
+    """Answers every utterance with OpenAI's real "no credits remaining" 429."""
+
+    async def transcribe(
+        self,
+        audio: AsyncIterator[Utterance],
+        *,
+        session_id: str,
+        glossary: object = None,
+    ) -> AsyncIterator[TranscriptEvent]:
+        _ = (session_id, glossary)
+        async for _utt in audio:
+            request = httpx.Request("POST", "https://api.openai.com/v1/audio/transcriptions")
+            response = httpx.Response(
+                429,
+                json={
+                    "error": {
+                        "message": (
+                            "You have no credits remaining. Add credits to continue using "
+                            "the API at https://platform.openai.com/settings/organization/"
+                            "billing/."
+                        ),
+                        "type": "insufficient_quota",
+                        "code": "insufficient_quota",
+                    }
+                },
+                request=request,
+            )
+            raise httpx.HTTPStatusError("429", request=request, response=response)
+        if False:  # pragma: no cover - marks this as an async generator
+            yield TranscriptEvent(
+                session_id=session_id, source=self.config.id, text="", start_ts=0.0, end_ts=0.0
+            )
+
+
+async def test_capture_keeps_recording_when_transcription_dies(
+    session_settings: Settings,
+) -> None:
+    """A provider that will never answer again stops transcription, not capture.
+
+    The audio is the artifact that cannot be produced a second time, so the
+    session degrades to a recorder and stays re-transcribable; what the GM gets
+    instead of a silently empty transcript is the vendor's own sentence, on
+    /healthz and therefore on the dashboard.
+    """
+    app = create_app(
+        session_settings,
+        capture_factory=capture_factory,  # type: ignore[arg-type]
+        backend_factory=OutOfCreditBackend,  # type: ignore[arg-type]
+        diarizer_factory=lambda _cfg: FakeDiarizer(),
+    )
+    async with LifespanManager(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            pid = await _create_provider(client)
+            start = await client.post(
+                "/api/session/start", json={"primary_provider": pid, "model": _MODEL}
+            )
+            session_id = start.json()["id"]
+
+            reason = None
+            for _ in range(50):
+                reason = (await client.get("/api/system/healthz")).json()["stt_error"]
+                if reason:
+                    break
+                await asyncio.sleep(0.02)
+            assert reason is not None
+            assert "no credits remaining" in reason
+
+            stop = await client.post("/api/session/stop")
+            # Still a completed capture: the recording is intact and the whole
+            # session can be re-transcribed once the account is topped up.
+            assert stop.json()["status"] == "completed"
+            ctx = app.state.ctx  # pyright: ignore[reportAny]
+            assert ctx.audio_store.exists(session_id)
+            assert (await client.get("/api/system/healthz")).json()["stt_error"] is None

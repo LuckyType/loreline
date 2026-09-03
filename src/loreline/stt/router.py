@@ -5,7 +5,11 @@ backends, publishing ``TranscriptEvent`` objects to an ``EventBus``:
 
 - **Live mode** (``run``): a single primary backend per utterance; on error or
   timeout, an optional fallback backend is tried. Diarization (inline or remote)
-  is merged onto each event before publishing.
+  is merged onto each event before publishing. A failure that will repeat for
+  every remaining utterance (a rejected key, an exhausted balance, a model that
+  does not exist) retires that provider instead of being paid for again, and
+  once every provider is retired the run raises ``ProvidersExhaustedError``
+  rather than looking busy while transcribing nothing.
 - **Compare mode** (``transcribe_compare``): fan out the same utterance to every
   configured backend and return their outputs side by side (web-UI testing).
 """
@@ -23,11 +27,31 @@ from loreline.audio.wav import pcm_to_wav
 from loreline.bus import EventBus
 from loreline.diarization.base import DiarizationProvider
 from loreline.diarization.merge import assign_speakers, segments_from_words
+from loreline.health import classify_request_error
 from loreline.logging import get_logger
 from loreline.models import DiarizationConfig, DiarizationMode, Glossary, TranscriptEvent
 from loreline.stt.base import STTBackend
 
 log = get_logger(__name__)
+
+
+class ProvidersExhaustedError(RuntimeError):
+    """Every provider this router can use has failed terminally.
+
+    Raised out of :meth:`SttRouter.run`, carrying each dead provider's own
+    words ("OpenAI: You have no credits remaining."). Nothing below this point
+    can produce a transcript, so continuing would only spend two doomed API
+    calls per utterance and fill the log with the same line - which is exactly
+    what a live deployment reported.
+
+    What to do about it is the caller's, because the two callers differ:
+
+    * a re-process job has nothing left to do and ends failed, with this
+      message on the job row (see ``loreline.reprocess.jobs``);
+    * a live capture keeps recording and only stops transcribing, because the
+      audio is the part that cannot be recreated (see
+      ``loreline.session.manager``).
+    """
 
 
 @dataclass(slots=True)
@@ -67,6 +91,20 @@ class SttRouter:
         self._on_failover = on_failover
         self._consecutive_failures = 0
         self._degraded_since: float | None = None
+        # provider id -> "<name>: <the vendor's own sentence>", for a provider
+        # whose failure will repeat for every remaining utterance. Retiring it
+        # is what stops the doomed calls and the per-utterance log line.
+        self._retired: dict[str, str] = {}
+
+    @property
+    def terminal_error(self) -> str | None:
+        """Why transcription stopped for good, or None while any provider works.
+
+        Set together with the :class:`ProvidersExhaustedError` that ends
+        :meth:`run`, so a live capture that swallows the error can still show
+        the GM what the vendor said.
+        """
+        return self._exhausted_message() if self._retired and not self._viable() else None
 
     @property
     def degraded_since(self) -> float | None:
@@ -79,7 +117,12 @@ class SttRouter:
         return self._degraded_since
 
     async def run(self, utterances: AsyncIterator[Utterance]) -> None:
-        """Drive the live transcription loop until the stream ends."""
+        """Drive the live transcription loop until the stream ends.
+
+        Raises :class:`ProvidersExhaustedError` if every provider fails
+        terminally before the stream does; the caller decides what that means
+        for its kind of run.
+        """
         async for utterance in utterances:
             events = await self._transcribe_with_failover(utterance)
             for event in events:
@@ -109,40 +152,80 @@ class SttRouter:
         return output
 
     async def _transcribe_with_failover(self, utterance: Utterance) -> list[TranscriptEvent]:
+        """Try each provider still worth trying; [] when none produced a transcript.
+
+        Failover runs before any of the terminal handling below, and that order
+        is deliberate: a primary with no credits left is precisely when the
+        fallback should be asked, since it is usually a different vendor with a
+        different bill. Only when nothing is left to ask does the run stop.
+        """
         last_error = ""
-        try:
-            events = await asyncio.wait_for(
-                self._collect(self._primary, utterance), timeout=self._config.timeout_s
-            )
-        except Exception as exc:  # resilience: any backend error triggers fallback
-            last_error = f"{self._primary.config.name}: {exc}"
-            log.warning(
-                "stt.primary.failed",
-                provider=self._primary.config.name,
-                provider_id=self._primary.config.id,
-                error=str(exc),
-            )
-        else:
-            self._note_transcribed()
-            return events
-        if self._fallback is not None:
+        for backend, role in self._viable():
             try:
                 events = await asyncio.wait_for(
-                    self._collect(self._fallback, utterance), timeout=self._config.timeout_s
+                    self._collect(backend, utterance), timeout=self._config.timeout_s
                 )
-            except Exception as exc:  # both backends failed; emit nothing for this utterance
-                last_error = f"{self._fallback.config.name}: {exc}"
-                log.error(
-                    "stt.fallback.failed",
-                    provider=self._fallback.config.name,
-                    provider_id=self._fallback.config.id,
-                    error=str(exc),
-                )
+            except Exception as exc:  # resilience: any backend error triggers fallback
+                last_error = self._note_backend_failed(backend, role, exc)
             else:
                 self._note_transcribed()
                 return events
+        if not self._viable():
+            # Every provider has answered in a way that will not change. Stop
+            # rather than repeat it for every remaining utterance.
+            if self._degraded_since is None:
+                self._degraded_since = time.time()
+            raise ProvidersExhaustedError(self._exhausted_message())
         await self._note_dropped(last_error)
         return []
+
+    def _viable(self) -> list[tuple[STTBackend, str]]:
+        """The backends still worth a request, primary first, with their role.
+
+        The role is only there to keep the two long-standing log events
+        distinct: an unavailable primary is routine and a warning, while a
+        fallback failing on top of it means nothing got transcribed at all.
+        """
+        candidates = [(self._primary, "primary")]
+        if self._fallback is not None:
+            candidates.append((self._fallback, "fallback"))
+        return [(b, role) for b, role in candidates if b.config.id not in self._retired]
+
+    def _note_backend_failed(self, backend: STTBackend, role: str, exc: Exception) -> str:
+        """Log one backend's failure and return it as a one-line reason.
+
+        A terminal failure is logged once, here, and then never again for this
+        provider: it is retired, so the next utterance does not call it, does
+        not wait out its timeout, and does not repeat this line. That flood is
+        half of what made the reported outage look like a working run.
+        """
+        failure = classify_request_error(exc)
+        reason = f"{backend.config.name}: {failure.detail}"
+        if failure.terminal:
+            self._retired[backend.config.id] = reason
+            log.error(
+                "stt.provider.terminal",
+                provider=backend.config.name,
+                provider_id=backend.config.id,
+                role=role,
+                status=failure.status.value,
+                error=failure.detail,
+            )
+            return reason
+        # An unavailable primary still has a fallback behind it; a fallback
+        # failing on top of it means this utterance is lost, so it is louder.
+        emit = log.error if role == "fallback" else log.warning
+        emit(
+            f"stt.{role}.failed",
+            provider=backend.config.name,
+            provider_id=backend.config.id,
+            error=str(exc),
+        )
+        return reason
+
+    def _exhausted_message(self) -> str:
+        """Every retired provider's own words, in the order they were tried."""
+        return "; ".join(self._retired.values())
 
     def _note_transcribed(self) -> None:
         """An utterance produced a transcript; end any failing streak."""

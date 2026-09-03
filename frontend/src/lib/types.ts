@@ -392,6 +392,8 @@ export interface Health {
 	diarizer_reachable?: boolean | null
 	/** Epoch seconds live transcription started failing; null when healthy/idle. */
 	stt_degraded_since?: number | null
+	/** Vendor's own reason live transcription stopped for good; null while any provider works. */
+	stt_error?: string | null
 }
 
 export interface InputDevice {
