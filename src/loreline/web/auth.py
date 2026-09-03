@@ -16,8 +16,9 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import jwt
-from fastapi import Request
+from fastapi import Request, Security
 from fastapi.exceptions import HTTPException
+from fastapi.security import APIKeyCookie
 from starlette.status import HTTP_401_UNAUTHORIZED
 
 from loreline.logging import get_logger
@@ -142,11 +143,33 @@ class LoginRateLimiter:
         self._attempts.pop(key, None)
 
 
-def require_auth(request: Request) -> None:
+#: Declares the session cookie to OpenAPI so every route behind ``require_auth``
+#: says so in the schema, instead of the schema claiming the whole API is open.
+#: ``auto_error=False`` keeps the scheme purely descriptive: a missing cookie
+#: returns ``None`` and ``require_auth`` decides, so the 401 body and the
+#: auth-disabled no-op stay exactly as they were.
+session_cookie = APIKeyCookie(
+    name=COOKIE_NAME,
+    scheme_name="sessionCookie",
+    auto_error=False,
+    description=(
+        "Session JWT set by `POST /api/auth/login`. The cookie is HttpOnly, so "
+        "pasting a value into this dialog does nothing: browsers drop the "
+        "`Cookie` header Swagger UI would set from it. To use `Try it out`, run "
+        "`POST /api/auth/login` from this page first (or log into the app in the "
+        "same browser); the cookie is then sent automatically. Outside a browser, "
+        "send the cookie yourself, e.g. `curl -c jar -X POST .../api/auth/login "
+        "-d '{\"password\":\"...\"}' -H 'content-type: application/json'` then "
+        "`curl -b jar .../api/session`. When no password is configured auth is "
+        "off entirely and the cookie is not required."
+    ),
+)
+
+
+def require_auth(request: Request, token: str | None = Security(session_cookie)) -> None:
     """FastAPI dependency enforcing a valid auth cookie when auth is enabled."""
     settings: Settings = request.app.state.ctx.settings
     if not auth_enabled(settings):
         return
-    token = request.cookies.get(COOKIE_NAME)
     if not token or not verify_token(token, settings):
         raise HTTPException(status_code=HTTP_401_UNAUTHORIZED, detail="authentication required")
