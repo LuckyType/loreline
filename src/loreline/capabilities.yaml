@@ -19,6 +19,15 @@
 # interaction and refuses a hidden or retiring model, which is what makes the
 # stale connector constants this replaced impossible to reintroduce.
 #
+# Each provider's `surfaces` block is the one place its endpoints and auth
+# schemes are written down: one surface per interaction, and per transport for
+# transcription, because a vendor's streaming and batch addresses differ in
+# host, scheme and sometimes auth. Which surface a request uses follows from
+# the model's chosen transport, never from the vendor as a whole; the
+# connectors read it through loreline.capabilities.surface_for, and
+# `overridable: true` marks the surfaces a provider row's own base_url may
+# replace. See docs/adr/0002-vendor-surfaces-in-the-yaml.md.
+#
 # Researched against official vendor documentation on 2026-09-02. Per-claim doc
 # URLs are kept inline as comments. Schema and validation rules live in
 # loreline/capability_config.py; every rule there exists because getting a leaf
@@ -69,16 +78,23 @@ providers:
     # "You must create your first API key using the Deepgram Console."
     # https://developers.deepgram.com/docs/create-additional-api-keys
     key_url: https://console.deepgram.com/signup?jump=keys
-    # POST https://api.deepgram.com/v1/listen (batch), wss://api.deepgram.com/v1/listen (Nova streaming),
-    # wss://api.deepgram.com/v2/listen (Flux streaming)
-    # https://developers.deepgram.com/reference/speech-to-text/listen-pre-recorded.md
-    # https://developers.deepgram.com/reference/speech-to-text-api/listen-streaming
-    # https://developers.deepgram.com/docs/flux/quickstart
-    base_url: https://api.deepgram.com
-    # GET https://api.deepgram.com/v1/models -- returns STT models with name/canonical_name/uuid/
-    # architecture/languages/version. Requires "Authorization: Token <key>".
-    # https://developers.deepgram.com/reference/manage/models/list
-    catalog_endpoint: https://api.deepgram.com/v1/models
+    key_env: [DEEPGRAM_API_KEY]
+    # Every surface authenticates with "Authorization: Token <key>", not Bearer.
+    # https://developers.deepgram.com/docs/authenticating
+    surfaces:
+      transcribe:
+        # wss://api.deepgram.com/v1/listen (Nova streaming); Flux streams on /v2/listen.
+        # https://developers.deepgram.com/reference/speech-to-text-api/listen-streaming
+        # https://developers.deepgram.com/docs/flux/quickstart
+        realtime: {url: "wss://api.deepgram.com/v1/listen", auth: token_header, overridable: true}
+        # POST https://api.deepgram.com/v1/listen (pre-recorded): same host and path as the
+        # socket, so the surface is the host and the connector adds the path.
+        # https://developers.deepgram.com/reference/speech-to-text/listen-pre-recorded.md
+        batch: {url: "https://api.deepgram.com", auth: token_header, overridable: true}
+      # GET https://api.deepgram.com/v1/models -- returns STT models with name/canonical_name/uuid/
+      # architecture/languages/version.
+      # https://developers.deepgram.com/reference/manage/models/list
+      catalog: {url: "https://api.deepgram.com/v1/models", auth: token_header}
     interactions: [transcribe]
     models:
       - id: nova-3
@@ -283,13 +299,20 @@ providers:
     # "grab one from your dashboard" / "Your API tokens can be found on the API Keys page of your account dashboard."
     # https://www.assemblyai.com/docs/pre-recorded-audio/getting-started/transcribe-an-audio-file
     key_url: https://www.assemblyai.com/dashboard/api-keys
-    # REST base URL (US) https://api.assemblyai.com (EU: https://api.eu.assemblyai.com);
-    # streaming is a separate host: wss://streaming.assemblyai.com/v3/ws
-    # https://www.assemblyai.com/docs/api-reference/overview  (OpenAPI server: https://api.assemblyai.com)
-    base_url: https://api.assemblyai.com
-    # No STT model-list endpoint exists. The only /models endpoint in AssemblyAI's OpenAPI specs is
-    # GET https://llm-gateway.assemblyai.com/v1/models, which lists LLM Gateway chat models, not STT models.
-    catalog_endpoint: null
+    key_env: [ASSEMBLYAI_API_KEY]
+    # Both surfaces take the bare key in the Authorization header, no scheme prefix.
+    surfaces:
+      transcribe:
+        # Streaming is a separate host from the REST API.
+        # https://www.assemblyai.com/docs/speech-to-text/universal-streaming
+        realtime: {url: "wss://streaming.assemblyai.com/v3/ws", auth: raw_header, overridable: true}
+        # REST base URL (US). EU accounts use https://api.eu.assemblyai.com, which an
+        # operator sets as the provider row's base_url.
+        # https://www.assemblyai.com/docs/api-reference/overview  (OpenAPI server: https://api.assemblyai.com)
+        batch: {url: "https://api.assemblyai.com", auth: raw_header, overridable: true}
+      # No catalog: no STT model-list endpoint exists. The only /models endpoint in AssemblyAI's
+      # OpenAPI specs is GET https://llm-gateway.assemblyai.com/v1/models, which lists LLM Gateway
+      # chat models, not STT models.
     interactions: [transcribe]
     models:
       - id: universal-3-5-pro
@@ -418,15 +441,25 @@ providers:
     auth: api_key
     # https://developers.openai.com/api/docs/api-reference/authentication
     key_url: https://platform.openai.com/settings/organization/api-keys
-    base_url: https://api.openai.com/v1
-    # GET /v1/models: "Lists the currently available models, and provides basic information
-    # about each one such as the owner and availability." No query parameters of any kind --
-    # no capability/endpoint/type filter. Each object carries only:
-    #   id, object, created, owned_by, shutdown_date (nullable).
-    # So it is usable ONLY as (a) an existence check for an id and (b) a deprecation signal via
-    # shutdown_date. It cannot tell transcribe vs summarize vs video apart -- this file must.
-    # https://developers.openai.com/api/reference/resources/models/methods/list
-    catalog_endpoint: https://api.openai.com/v1/models
+    key_env: [OPENAI_API_KEY]
+    surfaces:
+      transcribe:
+        # https://developers.openai.com/api/docs/guides/realtime-transcription
+        realtime: {url: "wss://api.openai.com/v1/realtime?intent=transcription", auth: bearer, overridable: true}
+        # POST /audio/transcriptions. Not overridable on purpose: a base_url on an
+        # OpenAI row has only ever meant its Realtime socket, and an operator who wants
+        # a custom batch endpoint has the openai_compat kind for exactly that.
+        batch: {url: "https://api.openai.com/v1", auth: bearer}
+      # POST /chat/completions on the same base.
+      summarize: {url: "https://api.openai.com/v1", auth: bearer, overridable: true}
+      # GET /v1/models: "Lists the currently available models, and provides basic information
+      # about each one such as the owner and availability." No query parameters of any kind --
+      # no capability/endpoint/type filter. Each object carries only:
+      #   id, object, created, owned_by, shutdown_date (nullable).
+      # So it is usable ONLY as (a) an existence check for an id and (b) a deprecation signal via
+      # shutdown_date. It cannot tell transcribe vs summarize vs video apart -- this file must.
+      # https://developers.openai.com/api/reference/resources/models/methods/list
+      catalog: {url: "https://api.openai.com/v1/models", auth: bearer}
     # No video: see the note where the sora models would otherwise be listed.
     interactions: [transcribe, summarize]
     models:
@@ -673,11 +706,30 @@ providers:
     hosting: cloud
     auth: api_key
     key_url: https://openrouter.ai/settings/keys
-    base_url: https://openrouter.ai/api/v1
-    catalog_endpoint:
-      summarize: https://openrouter.ai/api/v1/models
-      transcribe: https://openrouter.ai/api/v1/models?output_modalities=transcription
-      video: https://openrouter.ai/api/v1/videos/models
+    key_env: [OPENROUTER_API_KEY]
+    # One gateway base serves all three interactions. Every request carries the
+    # two optional attribution headers OpenRouter credits apps with on its public
+    # leaderboards (declared once, referenced by anchor). /models is public
+    # (verified 2026-09-02: HTTP 200, 425 models, no Authorization header), so the
+    # health probe asks /key, which describes the calling key and 401s without one.
+    surfaces:
+      transcribe:
+        batch:
+          url: "https://openrouter.ai/api/v1"
+          auth: bearer
+          overridable: true
+          health: /key
+          headers: &openrouter_attribution
+            HTTP-Referer: "https://github.com/LuckyType/loreline"
+            X-Title: Loreline
+      summarize: {url: "https://openrouter.ai/api/v1", auth: bearer, overridable: true, health: /key, headers: *openrouter_attribution}
+      video: {url: "https://openrouter.ai/api/v1", auth: bearer, overridable: true, headers: *openrouter_attribution}
+      # Three disjoint catalogues: the unfiltered /models is the chat list, the
+      # transcription list only comes back when asked for, and video has its own.
+      catalog:
+        summarize: {url: "https://openrouter.ai/api/v1/models", auth: bearer, public: true}
+        transcribe: {url: "https://openrouter.ai/api/v1/models?output_modalities=transcription", auth: bearer, public: true}
+        video: {url: "https://openrouter.ai/api/v1/videos/models", auth: bearer, public: true}
     live_capture: false        # batch only, cannot drive live capture
     interactions: [transcribe, summarize, video]
     models:
@@ -1194,17 +1246,21 @@ providers:
     hosting: cloud
     auth: api_key
     key_url: https://aistudio.google.com/api-keys
-    # REST base; auth header is `x-goog-api-key`. Current generation surface is the
-    # Interactions API (`POST {base_url}/interactions`, client.interactions.create).
-    # This is the TRANSCRIPTION base only. Summaries go to Google's
-    # OpenAI-compatible shim one path segment further down,
-    # ".../v1beta/openai", which the native base does not serve and which does
-    # not serve the native surface - loreline.llm.default_base_url holds it,
-    # since one provider row cannot carry two base URLs.
-    base_url: https://generativelanguage.googleapis.com/v1beta
-    # models.list -> Model{name, inputTokenLimit, outputTokenLimit,
-    # supportedGenerationMethods[], temperature, maxTemperature, topP, topK, thinking}
-    catalog_endpoint: https://generativelanguage.googleapis.com/v1beta/models
+    key_env: [GEMINI_API_KEY, GOOGLE_API_KEY]
+    surfaces:
+      transcribe:
+        # The Live API authenticates with the key as a URL query parameter, not a header.
+        # https://ai.google.dev/gemini-api/docs/live-api/live-transcribe
+        realtime: {url: "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent", auth: query_key, overridable: true}
+        # Native REST base, `x-goog-api-key` header; the current generation surface is the
+        # Interactions API (POST {base}/interactions). It does not serve chat.
+        # https://ai.google.dev/gemini-api/docs/transcribe
+        batch: {url: "https://generativelanguage.googleapis.com/v1beta", auth: goog_header, overridable: true}
+      # Google's OpenAI-compatible shim, a sibling path the native base does not serve: Bearer auth.
+      summarize: {url: "https://generativelanguage.googleapis.com/v1beta/openai", auth: bearer, overridable: true}
+      # models.list -> Model{name, inputTokenLimit, outputTokenLimit,
+      # supportedGenerationMethods[], temperature, maxTemperature, topP, topK, thinking}
+      catalog: {url: "https://generativelanguage.googleapis.com/v1beta/models", auth: goog_header}
     # No video: see the note where the Veo models would otherwise be listed.
     interactions: [transcribe, summarize]
     models:
@@ -1444,8 +1500,14 @@ providers:
     hosting: selfhosted
     auth: optional
     key_url: null
-    base_url: null            # user supplied, required
-    catalog_endpoint: "{base_url}/v1/models"
+    # No url anywhere: the operator supplies the server's base (".../v1"), which
+    # is required, and every surface is that base. The catalogue is the server's
+    # own /models list beside it.
+    surfaces:
+      transcribe:
+        batch: {url: null, auth: bearer, overridable: true}
+      summarize: {url: null, auth: bearer, overridable: true}
+      catalog: {url: "{base_url}/models", auth: bearer, overridable: true}
     interactions: [transcribe, summarize]
     # No curated models, so no `default: true` anywhere below, and none is
     # missing: any id written here would be a guess about a server we have
