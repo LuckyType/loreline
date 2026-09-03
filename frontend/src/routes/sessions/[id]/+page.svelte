@@ -790,6 +790,7 @@ onMount(async () => {
 							provider={rpSelectedProvider}
 							bind:value={rpModel}
 							defaultModel={defaults.stt_model}
+							defaultProvider={defaults.stt_provider ?? ''}
 							interaction="transcribe"
 						/>
 						<label
@@ -1097,6 +1098,7 @@ onMount(async () => {
 				provider={selectedLlm}
 				bind:value={sumModel}
 				defaultModel={defaults.summarize_model}
+				defaultProvider={defaults.summarize_provider ?? ''}
 				interaction="summarize"
 				onselect={(m) => (sumModelInfo = m)}
 			/>

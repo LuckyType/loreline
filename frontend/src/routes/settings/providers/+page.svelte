@@ -623,6 +623,7 @@ onMount(async () => {
 					onselect={(m) => (sttModelInfo = m)}
 					bind:value={defaults.stt_model}
 					defaultModel={savedDefaults.stt_model}
+					defaultProvider={savedDefaults.stt_provider ?? ''}
 					autoseed={false}
 				/>
 			</div>
@@ -676,6 +677,7 @@ onMount(async () => {
 						provider={llmSrcProvider}
 						bind:value={defaults.summarize_model}
 						defaultModel={savedDefaults.summarize_model}
+						defaultProvider={savedDefaults.summarize_provider ?? ''}
 						autoseed={false}
 						onselect={(m) => (llmModelInfo = m)}
 					/>
@@ -721,6 +723,7 @@ onMount(async () => {
 						provider={videoSrcProvider}
 						bind:value={defaults.video_model}
 						defaultModel={savedDefaults.video_model}
+						defaultProvider={savedDefaults.video_provider ?? ''}
 						autoseed={false}
 					/>
 				{:else}

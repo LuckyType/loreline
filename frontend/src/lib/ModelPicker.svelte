@@ -9,6 +9,7 @@ let {
 	provider,
 	value = $bindable(''),
 	defaultModel = '',
+	defaultProvider = undefined,
 	disabled = false,
 	id = undefined,
 	autoseed = true,
@@ -20,6 +21,13 @@ let {
 	provider: ProviderConfig | undefined
 	value?: string
 	defaultModel?: string
+	/** The provider the stored default belongs to. Action defaults are stored
+	 *  as provider/model pairs (stt_provider + stt_model and so on, see
+	 *  ActionDefaults), so passing the paired provider lets this picker offer
+	 *  the default straight away instead of waiting for the list to confirm
+	 *  it. Pass the pair matching this picker's `interaction`: that is what
+	 *  keeps a transcribe picker from ever being handed a chat model. */
+	defaultProvider?: string
 	disabled?: boolean
 	id?: string
 	autoseed?: boolean
@@ -40,14 +48,14 @@ let {
 let all = $state<ModelInfo[]>([])
 let loadedFor = $state('')
 let loading = $state(false)
-let seededFor = $state('')
-let seededValue = $state('')
+// Seeding bookkeeping. Deliberately plain variables rather than $state:
+// nothing outside the seeding effect reads them, and keeping them inert stops
+// the effect from re-running on its own writes.
+let seededFor = ''
+let picked = false
 
 // `all` is fetched per provider and must not leak across a provider switch:
-// it's only valid while it matches the provider it was loaded for. The
-// stored default (defaultModel) is global - it can name a model belonging to
-// a different provider entirely - so only offer it when this provider
-// actually has it.
+// it's only valid while it matches the provider it was loaded for.
 const cacheKey = $derived(`${provider?.id ?? ''}:${interaction}:${String(refreshToken)}`)
 const loaded = $derived(provider && loadedFor === cacheKey ? all : [])
 const kind = $derived(provider?.kind)
@@ -71,9 +79,19 @@ const favorites = $derived(withoutHidden(kind, provider?.favorite_models ?? []))
 $effect(() => {
 	onselect?.(detail.get(value))
 })
+// The stored default is global: it can name a model belonging to a different
+// provider entirely, so it only earns a place here once it can be attributed
+// to this one. A caller that passes `defaultProvider` has said so outright;
+// otherwise the provider's own favourites are the only evidence available.
+// Neither test consults `fetched`, and that is the point: `fetched` is empty
+// until the list is lazily loaded, so a default resting on it would appear -
+// and move the seeded selection - the moment the user opened the list.
 const defaultForThisProvider = $derived(
-	defaultModel && (favorites.includes(defaultModel) || fetched.includes(defaultModel))
-		? [defaultModel]
+	defaultModel &&
+		(defaultProvider !== undefined
+			? defaultProvider === provider?.id
+			: favorites.includes(defaultModel))
+		? withoutHidden(kind, [defaultModel])
 		: [],
 )
 
@@ -99,6 +117,11 @@ const options = $derived(
 
 const selectedSunset = $derived(deprecationNote(kind, value))
 
+// Seeding an empty picker is a convenience; changing a selection the user made
+// is a trap, so `picked` is recorded from the dropdown's own pick event rather
+// than inferred from the value. Inferring it missed the user who picked
+// exactly what was seeded, and could not tell a deliberate choice from a
+// seed that a later-arriving input wanted to revise.
 $effect(() => {
 	if (!autoseed) return
 	const pid = provider?.id ?? ''
@@ -110,13 +133,20 @@ $effect(() => {
 	// interaction that provider serves.
 	const prefs = withoutHidden(kind, [...defaultForThisProvider, ...favorites]).filter(Boolean)
 	const want = prefs[0] ?? ''
-	const userOverrode = !!value && value !== seededValue
-	if (pid !== seededFor || !userOverrode) {
+	// A provider switch starts over: the previous provider's pick cannot be
+	// served here, so it is dropped along with the seed it replaced.
+	if (pid !== seededFor) {
 		seededFor = pid
-		seededValue = want
-		if (value !== want) value = want
+		picked = false
 	}
+	if (picked) return
+	if (value !== want) value = want
 })
+
+function pick(model: string) {
+	picked = true
+	onpick?.(model)
+}
 
 async function loadAll() {
 	const key = cacheKey
@@ -161,7 +191,7 @@ async function loadAll() {
 		filterable
 		placeholder="Select model…"
 		onopen={loadAll}
-		{onpick}
+		onpick={pick}
 	/>
 	{#if selectedSunset}
 		<span class="text-xs text-amber-500">{selectedSunset}</span>
