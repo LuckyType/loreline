@@ -33,6 +33,10 @@ No words, no speakers: Google states plainly that "Speaker diarization is not
 supported in live streaming sessions" (the batch ``gemini-3.5-transcribe``
 diarizes; this model does not - see loreline.capabilities).
 
+A glossary, however, does work here, contrary to what this connector used to
+claim: ``setup.inputAudioTranscription.customVocabulary`` is accepted and it
+measurably changes the transcript (see _setup and _vocabulary_for).
+
 Docs: https://ai.google.dev/gemini-api/docs/live-api/live-transcribe
 """
 
@@ -61,7 +65,7 @@ from loreline.stt.backends._ws import (
     get_str,
     probe_health,
 )
-from loreline.stt.base import glossary_terms
+from loreline.stt.base import capped_terms, glossary_support, glossary_terms
 from loreline.stt.registry import register
 
 log = get_logger(__name__)
@@ -101,6 +105,22 @@ _SETUP_TIMEOUT_S = 10.0
 # session; it is not how a healthy session ends, which is generationComplete
 # arriving after audioStreamEnd (see _read_last_turn).
 _RECV_TIMEOUT_S = 10.0
+
+
+def _vocabulary_for(model: str | None, terms: list[str]) -> list[str]:
+    """Glossary terms for ``customVocabulary``, capped for this model.
+
+    The ceiling is enforced here rather than discovered at the vendor because
+    the service rejects the whole *setup* over it, closing the socket with
+    1007 "custom_vocabulary cannot contain more than 1000 entries." That costs
+    the entire utterance, not just the surplus terms. Measured: 1000 entries
+    ack, 1001 close. The number lives in capabilities.yaml, which is also what
+    the UI renders the glossary toggle from.
+    """
+    support = glossary_support(ProviderKind.GEMINI, model)
+    if support is not None and not support.supported:
+        return []
+    return capped_terms(terms, support, realtime=True)
 
 
 def _wire(mapping: dict[str, object], name: str, alt: str) -> object:
@@ -233,7 +253,7 @@ class GeminiLiveBackend:
             return self._url
         return f"{self._url}?{urlencode({'key': self._api_key})}"
 
-    def _setup(self) -> dict[str, object]:
+    def _setup(self, vocabulary: list[str]) -> dict[str, object]:
         # The SDK's LiveConnectConfig(response_modalities=["TEXT"],
         # input_audio_transcription=AudioTranscriptionConfig(language_codes=[]))
         # in wire form. An empty languageCodes list means auto-detect, which is
@@ -241,6 +261,24 @@ class GeminiLiveBackend:
         transcription: dict[str, object] = {
             "languageCodes": [self._language] if self._language else []
         }
+        # VERIFIED against the real service, since this connector previously
+        # claimed the opposite. setup.inputAudioTranscription.customVocabulary
+        # is a real field: sending it acks with setupComplete, and the service
+        # rejects unknown fields rather than ignoring them, so the ack means
+        # something. A probe sending it as an object drew "Invalid value at
+        # 'setup.input_audio_transcription' (custom_vocabulary), Starting an
+        # object on a scalar field", which names the field, while a made-up
+        # sibling drew 'Unknown name "zzzNotAField" ... Cannot find field.'
+        # It also changes the transcript, which is the part that matters,
+        # since an accepted-and-ignored field would ack just the same. Same
+        # 50 s clip, twice each way, byte-identical within each condition:
+        # "Cape Morgion" became "Cape Morgiou", "Rion Island" became "Riou
+        # Island", and "the old Foxy docks" became "the old Phocee docks",
+        # each matching what the batch model returns unprompted. Omitted when
+        # empty so a session with no glossary sends exactly what it sent
+        # before.
+        if vocabulary:
+            transcription["customVocabulary"] = vocabulary
         setup: dict[str, object] = {
             "generationConfig": {"responseModalities": ["TEXT"]},
             "inputAudioTranscription": transcription,
@@ -271,23 +309,21 @@ class GeminiLiveBackend:
         session_id: str,
         glossary: Glossary | None = None,
     ) -> AsyncIterator[TranscriptEvent]:
-        # The Live API documents no custom-vocabulary or prompt parameter for
-        # transcription sessions, so a glossary cannot bias recognition here.
-        # Say so once instead of silently ignoring the GM's toggle.
-        if glossary_terms(glossary):
-            log.warning("gemini.live.glossary_unsupported", provider=self.config.id)
+        vocabulary = _vocabulary_for(self._model, glossary_terms(glossary))
         async for utterance in audio:
-            event = await self._transcribe_one(utterance, session_id=session_id)
+            event = await self._transcribe_one(
+                utterance, session_id=session_id, vocabulary=vocabulary
+            )
             if event is not None:
                 yield event
 
     async def _transcribe_one(
-        self, utterance: Utterance, *, session_id: str
+        self, utterance: Utterance, *, session_id: str, vocabulary: list[str]
     ) -> TranscriptEvent | None:
         state = _TurnState()
         loop = asyncio.get_running_loop()
         async with connect(self._session_url()) as ws:
-            await ws.send(json.dumps(self._setup()))
+            await ws.send(json.dumps(self._setup(vocabulary)))
             await self._await_setup_ack(ws)
             open_socket = True
             # The send is paced at the capture cadence, and the wait between
@@ -392,7 +428,10 @@ class GeminiLiveBackend:
         try:
             async with asyncio.timeout(PROBE_TIMEOUT_S):
                 async with connect(self._session_url()) as ws:
-                    return await probe_health(ws, json.dumps(self._setup()))
+                    # No vocabulary: a health probe should ask the smallest
+                    # question the protocol allows, not carry a campaign's
+                    # terms.
+                    return await probe_health(ws, json.dumps(self._setup([])))
         except TimeoutError:
             return HealthReport(HealthStatus.UNREACHABLE, "the socket did not open in time")
         except (OSError, WebSocketException) as exc:

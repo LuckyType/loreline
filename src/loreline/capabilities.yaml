@@ -1237,9 +1237,33 @@ providers:
           realtime: true
           batch: false
           inline_diarization: false         # "not supported in live streaming sessions"
+          # VERIFIED, after the connector spent a while asserting the
+          # opposite and dropping the GM's glossary on the floor. Probed
+          # against the real service, setup only, no audio:
+          #   * setup.inputAudioTranscription.customVocabulary -> setupComplete
+          #   * the same as custom_vocabulary -> setupComplete
+          #   * a made-up sibling zzzNotAField -> 1007 close, 'Unknown name
+          #     "zzzNotAField" at "setup.input_audio_transcription": Cannot
+          #     find field.' So unknown fields are rejected, not ignored, and
+          #     the ack above is evidence rather than silence.
+          #   * sent as an object -> 1007 close, "Invalid value at
+          #     'setup.input_audio_transcription' (custom_vocabulary),
+          #     Starting an object on a scalar field", which names the field.
+          #   * at setup top level or under generationConfig -> Cannot find
+          #     field. It lives under inputAudioTranscription and nowhere else.
+          # It changes the transcript, too, which is what actually settles it:
+          # on the Monte Cristo clip, twice each way and byte-identical within
+          # each condition, priming these proper nouns turned "Cape Morgion"
+          # into "Cape Morgiou", "Rion Island" into "Riou Island" and "the old
+          # Foxy docks" into "the old Phocee docks", matching what the batch
+          # model returns unprompted.
           glossary:
             supported: true
             field: customVocabulary         # setup.inputAudioTranscription.customVocabulary
+            # Enforced, not advisory: 1000 entries ack, 1001 closes the socket
+            # with 1007 "custom_vocabulary cannot contain more than 1000
+            # entries." Over the cap the whole session dies, not just the
+            # surplus, which is why the connector trims before sending.
             max_terms: 1000                 # docs: best results with <=100 terms
           word_timestamps: false            # "not supported over the Live API"; utterance-level only
           languages: multi

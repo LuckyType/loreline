@@ -60,8 +60,15 @@ async def _send(websocket: ServerConnection, frames: list[str]) -> None:
             return
 
 
-async def gemini_live_handler(websocket: ServerConnection) -> None:
-    """Handle one mock Live session (one utterance each)."""
+async def gemini_live_handler(
+    websocket: ServerConnection, *, setups: list[dict[str, object]] | None = None
+) -> None:
+    """Handle one mock Live session (one utterance each).
+
+    ``setups`` collects each session's ``setup`` body, since that message is
+    the connector's only chance to configure a session and the custom
+    vocabulary rides in it. Bind it with ``functools.partial``.
+    """
     samples = 0
     mid_turn_sent = False
     async for message in websocket:
@@ -69,6 +76,8 @@ async def gemini_live_handler(websocket: ServerConnection) -> None:
             continue
         data = cast("dict[str, object]", json.loads(message))
         if "setup" in data:
+            if setups is not None:
+                setups.append(cast("dict[str, object]", data["setup"]))
             await _send(websocket, [json.dumps({"setupComplete": {}}), _content({})])
             continue
         realtime = data.get("realtimeInput")

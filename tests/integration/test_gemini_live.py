@@ -7,6 +7,7 @@ with generationComplete, and the server never closes the session.
 
 from __future__ import annotations
 
+import functools
 import json
 import time
 from collections.abc import AsyncIterator
@@ -60,7 +61,7 @@ async def test_gemini_live_streaming_transcribe() -> None:
     async with serve(gemini_live_handler, "127.0.0.1", 0) as server:
         port = server.sockets[0].getsockname()[1]
         backend = GeminiLiveBackend(_config(port), model=MODEL, api_key="secret")
-        glossary = Glossary(campaign_id="c1", terms=["Drakonia"])  # ignored, but must not break
+        glossary = Glossary(campaign_id="c1", terms=["Drakonia"])
         events: list[TranscriptEvent] = [
             e
             async for e in backend.transcribe(_one_utterance(), session_id="s1", glossary=glossary)
@@ -139,6 +140,70 @@ async def test_gemini_live_setup_and_key_on_the_wire() -> None:
     assert setup["generationConfig"] == {"responseModalities": ["TEXT"]}
     assert setup["inputAudioTranscription"] == {"languageCodes": ["de"]}
     assert seen["mime"] == "audio/pcm;rate=16000"
+
+
+# ---------------------------------------------------------------------------
+# Custom vocabulary. This connector used to log "glossary_unsupported" and send
+# nothing, on the reading that the Live API documents no such parameter. That
+# was wrong, and the correction was measured against the real service rather
+# than re-read out of the docs: setup.inputAudioTranscription.customVocabulary
+# is accepted, the service rejects unknown sibling fields outright ('Unknown
+# name "zzzNotAField" ... Cannot find field.') so the ack means something, and
+# the transcript changes ("Cape Morgion" -> "Cape Morgiou", "the old Foxy
+# docks" -> "the old Phocee docks"). See capabilities.yaml for the full record.
+# ---------------------------------------------------------------------------
+
+
+async def _setup_frame(
+    port: int, glossary: Glossary | None, setups: list[dict[str, object]]
+) -> dict[str, object]:
+    backend = GeminiLiveBackend(_config(port), model=MODEL, api_key="secret")
+    _ = [e async for e in backend.transcribe(_one_utterance(), session_id="s1", glossary=glossary)]
+    return cast("dict[str, object]", setups[0]["inputAudioTranscription"])
+
+
+async def test_glossary_rides_in_the_setup_as_custom_vocabulary() -> None:
+    setups: list[dict[str, object]] = []
+    handler = functools.partial(gemini_live_handler, setups=setups)
+    async with serve(handler, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        glossary = Glossary(campaign_id="c1", terms=["Drakonia", "Thalric"])
+        transcription = await _setup_frame(port, glossary, setups)
+
+    # lowerCamelCase, like every other field this connector sends. The service
+    # accepts custom_vocabulary too, but proto-JSON emits the camel spelling.
+    assert transcription["customVocabulary"] == ["Drakonia", "Thalric"]
+    assert transcription["languageCodes"] == ["de"]
+
+
+async def test_no_glossary_sends_no_custom_vocabulary_at_all() -> None:
+    """An empty list is not the same message as an absent field, and a session
+    without a glossary must send exactly what it sent before this existed."""
+    setups: list[dict[str, object]] = []
+    handler = functools.partial(gemini_live_handler, setups=setups)
+    async with serve(handler, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        transcription = await _setup_frame(port, None, setups)
+
+    assert "customVocabulary" not in transcription
+
+
+async def test_glossary_is_capped_at_the_ceiling_the_service_enforces() -> None:
+    """Over 1000 entries the service closes the socket with 1007
+    "custom_vocabulary cannot contain more than 1000 entries", which costs the
+    whole utterance rather than just the surplus terms. Measured: 1000 acks,
+    1001 closes. capabilities.yaml carries the number."""
+    setups: list[dict[str, object]] = []
+    handler = functools.partial(gemini_live_handler, setups=setups)
+    async with serve(handler, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        glossary = Glossary(campaign_id="c1", terms=[f"term{i}" for i in range(1200)])
+        transcription = await _setup_frame(port, glossary, setups)
+
+    terms = cast("list[str]", transcription["customVocabulary"])
+    assert len(terms) == 1000
+    # Glossary order is priority order, so the head survives.
+    assert terms[0] == "term0"
 
 
 async def test_gemini_live_one_session_per_utterance() -> None:
