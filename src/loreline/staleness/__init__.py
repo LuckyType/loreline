@@ -13,32 +13,52 @@ write the file); they report, and a human decides which side is wrong.
   a GM actually favourited, because a warning about the whole catalogue at
   every startup is noise nobody reads.
 
-Neither may ever block startup, raise, or fail CI because a vendor was
+The write half is :mod:`loreline.staleness.sync`, run by ``loreline
+sync-capabilities``. It is the only thing here that may change the file, and it
+changes only the fields a vendor catalogue genuinely publishes, for models that
+are already curated - never a hand annotation, and never the curation itself.
+
+Neither check may ever block startup, raise, or fail CI because a vendor was
 unreachable. Silence and a labelled "could not check" are the only two
 acceptable outcomes of a failed lookup, and both checks are built so that
 absence of evidence is never reported as evidence of absence.
 
 The three halves are separate on purpose - :mod:`catalog` works out what the
 vendor says, :mod:`compare` diffs that against the config, :mod:`report`
-renders it - so the planned sync script, which will regenerate the derivable
-fields rather than have them hand edited, can reuse the first half as is.
+renders it - and :mod:`sync` reuses the first two unchanged: the same fetch,
+and the same definition of drift, so the checker and the regenerator can never
+disagree about whether a field is stale.
 """
 
 from loreline.staleness.check import FailOn, run_check, should_fail, summarize
 from loreline.staleness.compare import NOT_CHECKED_NOTE
 from loreline.staleness.report import Finding, Severity, StalenessReport, render
 from loreline.staleness.startup import stale_favorites, warn_about_stale_favorites
+from loreline.staleness.sync import (
+    NEVER_WRITTEN_NOTE,
+    SyncPlan,
+    SyncRefusedError,
+    run_sync,
+)
+from loreline.staleness.sync import render as render_sync
+from loreline.staleness.sync import write as write_sync
 
 __all__ = [
+    "NEVER_WRITTEN_NOTE",
     "NOT_CHECKED_NOTE",
     "FailOn",
     "Finding",
     "Severity",
     "StalenessReport",
+    "SyncPlan",
+    "SyncRefusedError",
     "render",
+    "render_sync",
     "run_check",
+    "run_sync",
     "should_fail",
     "stale_favorites",
     "summarize",
     "warn_about_stale_favorites",
+    "write_sync",
 ]

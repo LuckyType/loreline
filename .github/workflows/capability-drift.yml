@@ -53,3 +53,21 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           uv run loreline check-capabilities | tee -a "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      # The subset of the above a machine may resolve on its own: the fields a
+      # vendor catalogue genuinely publishes. Always a dry run, and never a
+      # failure - it prints the diff a maintainer would get from
+      # `loreline sync-capabilities --write`, so the weekly report says not
+      # only what drifted but which part of it is a one-command fix.
+      - name: What could be regenerated (dry run, writes nothing)
+        if: always()
+        shell: bash
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          {
+            echo '## Regenerable fields'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          uv run loreline sync-capabilities | tee -a "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"

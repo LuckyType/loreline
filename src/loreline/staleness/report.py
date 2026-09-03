@@ -146,6 +146,20 @@ def _severity_sections(findings: Sequence[Finding]) -> list[_Section]:
     return sections
 
 
+def probe_lines(probes: Sequence[CatalogProbe]) -> list[str]:
+    """One indented line per catalogue asked, answered or not.
+
+    Shared with the sync command so both halves of the feature label their
+    provenance identically: a reader comparing a check run against a sync run
+    should not have to work out whether two differently worded "skip" lines
+    mean the same thing.
+    """
+    return [
+        f"   {'ok  ' if p.usable else 'skip'} {p.kind.value}/{p.interaction.value}: {p.detail}"
+        for p in probes
+    ]
+
+
 def render(report: StalenessReport) -> str:
     """The human-readable report, worst first.
 
@@ -167,10 +181,7 @@ def render(report: StalenessReport) -> str:
         lines.append("== checked (offline: no vendor was asked)")
     else:
         lines.append(f"== checked ({len(checked)} of {len(report.probes)} catalogues)")
-    for probe in report.probes:
-        marker = "ok  " if probe.usable else "skip"
-        where = f"{probe.kind.value}/{probe.interaction.value}"
-        lines.append(f"   {marker} {where}: {probe.detail}")
+    lines.extend(probe_lines(report.probes))
     if not report.findings:
         lines.append("")
         # The healthy state, and it has to read as one. An offline run has
@@ -213,5 +224,6 @@ __all__ = [
     "Severity",
     "StalenessReport",
     "order",
+    "probe_lines",
     "render",
 ]

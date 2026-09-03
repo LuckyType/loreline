@@ -24,6 +24,18 @@
 # loreline/capability_config.py; every rule there exists because getting a leaf
 # wrong here shows up as a missing or dead control in the UI rather than as an
 # error.
+#
+# MOSTLY HAND WRITTEN, PARTLY GENERATED. A few fields are published by the
+# vendor catalogues themselves and are regenerated rather than hand edited:
+# llm.context_length, llm.max_output_tokens, llm.temperature, the llm.reasoning
+# block, and the video parameter lists (durations, resolutions, aspect_ratios,
+# audio, image_input). Run `loreline sync-capabilities` to see what has moved
+# and `--write` to apply it; it edits those values in place and touches nothing
+# else, comments included. Everything else here - all of transcribe, the
+# glossary limits, languages, the labels, the deprecation dates, the `default`
+# markers, and which models are listed at all - is a human judgement no vendor
+# publishes, so it stays hand written. `loreline check-capabilities` reports
+# drift in both halves without changing anything.
 
 version: 1
 

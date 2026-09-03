@@ -12,12 +12,17 @@ import uvicorn
 from loreline import __version__
 from loreline.settings import get_settings
 from loreline.staleness import (
+    NEVER_WRITTEN_NOTE,
     NOT_CHECKED_NOTE,
     FailOn,
+    SyncRefusedError,
     render,
+    render_sync,
     run_check,
+    run_sync,
     should_fail,
     summarize,
+    write_sync,
 )
 from loreline.staleness.deprecation import FAIL_HORIZON_DAYS, WARN_HORIZON_DAYS
 
@@ -114,6 +119,89 @@ def check_capabilities(
         typer.echo(summarize(report))
     if should_fail(report, fail_on):
         raise typer.Exit(code=1)
+
+
+@app.command()
+def sync_capabilities(
+    write: Annotated[
+        bool,
+        typer.Option(
+            "--write",
+            help="Actually rewrite capabilities.yaml. Without it this is a dry run.",
+        ),
+    ] = False,
+    request_timeout: Annotated[
+        float,
+        typer.Option(help="Per-catalogue HTTP timeout, in seconds."),
+    ] = 20.0,
+    as_json: Annotated[
+        bool,
+        typer.Option("--json", help="Emit the plan as JSON instead of text."),
+    ] = False,
+) -> None:
+    """Regenerate the machine-derivable fields of capabilities.yaml.
+
+    The write half of check-capabilities, and deliberately much narrower than
+    it: this rewrites only the fields a vendor catalogue genuinely publishes -
+    llm.context_length, llm.max_output_tokens, llm.temperature, the
+    llm.reasoning block, and the video parameter lists - and only for models
+    that are already curated. Every hand annotation is left alone, and adding
+    or dropping a model stays a human decision that check-capabilities reports
+    and this command will not make.
+
+    A DRY RUN BY DEFAULT. It prints a diff of exactly what it would change and
+    writes nothing until --write is passed, so a first run cannot rewrite the
+    file under someone who was only looking.
+
+    Edits are byte-span splices over the file as it stands, so the comments -
+    which are the vendor doc citations and the reasons values are what they
+    are - survive, and a run with no drift leaves the file untouched rather
+    than re-rendered. Anything that cannot be edited that surgically is
+    reported for a hand edit instead of guessed at.
+
+    An unreachable vendor changes nothing: it contributes no comparison at all,
+    so a fetch failure can never be read as "the vendor dropped this value" and
+    blank a field. A run where no catalogue answered writes nothing even with
+    --write.
+    """
+    plan = asyncio.run(run_sync(request_timeout=request_timeout))
+
+    def say(message: str) -> None:
+        """A human status line, suppressed under --json.
+
+        --json is the whole of stdout when it is set, as it is for
+        check-capabilities: a caller piping this into jq should not have to
+        strip a status line off the end.
+        """
+        if not as_json:
+            typer.echo(message)
+
+    if as_json:
+        typer.echo(json.dumps(plan.as_dict(), indent=2))
+    else:
+        typer.echo(render_sync(plan))
+        typer.echo("")
+        typer.echo(NEVER_WRITTEN_NOTE)
+        typer.echo("")
+    if not plan.answered:
+        # Not a failure, and not a clean bill of health either. Writing here
+        # would mean acting on nothing, so the command says so and stops.
+        say("no vendor answered; nothing written.")
+        return
+    if not plan.dirty:
+        say("nothing to write.")
+        return
+    if not write:
+        say(f"dry run: {len(plan.changes)} value(s) would change. Pass --write to apply.")
+        return
+    try:
+        write_sync(plan)
+    except SyncRefusedError as exc:
+        # The verification runs before the write, so the file on disk is still
+        # the original one at this point.
+        typer.echo(f"refused to write: {exc}")
+        raise typer.Exit(code=1) from exc
+    say(f"wrote {len(plan.changes)} value(s) to capabilities.yaml.")
 
 
 @app.command()
