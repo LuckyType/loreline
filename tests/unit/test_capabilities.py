@@ -211,7 +211,11 @@ class TestRealtimeModelResolution:
         the declared default first, but the answer must stay defined: a lookup
         that raised here would break the health probe rather than the pick."""
         assert is_realtime_model(ProviderKind.OPENAI, None)
-        assert not is_realtime_model(ProviderKind.GEMINI, None)
+        # Gemini has a streaming model now, so the kind alone answers "yes".
+        # That a stored Gemini config is still not switched onto it is a
+        # property of create_backend resolving the declared batch default
+        # first, and is asserted there rather than here.
+        assert is_realtime_model(ProviderKind.GEMINI, None)
 
     def test_a_new_model_naming_its_transport_is_recognised(self) -> None:
         """The curated sets rot; both vendors put the transport in the name, so

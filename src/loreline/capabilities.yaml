@@ -1092,15 +1092,37 @@ providers:
       - id: gemini-3.5-transcribe-live
         label: Gemini 3.5 Transcribe (Live)
         interactions: [transcribe]
-        # HIDDEN UNTIL VERIFIED AGAINST THE REAL API. The connector exists
-        # (stt/backends/gemini_live.py) and matches the documented protocol,
-        # but a live session returns setupComplete and then no transcription
-        # frames at all, for our client and for Google's own SDK alike. Until
-        # that is understood this model is described but never offered; a
-        # config naming it explicitly still routes to the Live connector.
-        # Flipping this to false is the entire release step.
-        hidden: true
+        # VERIFIED against the real service: 45 s of human speech transcribed
+        # over the Live connector (stt/backends/gemini_live.py), 438 chars
+        # against 516 from gemini-3.5-transcribe on the same audio. The
+        # earlier "no transcription frames at all" reading was synthetic
+        # speech: server-side VAD gates the pipeline and never hears espeak-ng
+        # as speech, so only real human audio proves anything here.
+        #
+        # Two service behaviours worth knowing before touching the connector,
+        # neither of them documented. A turn ends with
+        # serverContent.generationComplete, never with turnComplete (not once
+        # in 200+ recorded frames). And audio pushed faster than realtime
+        # desynchronises the service: it stops finalizing the open turn (223
+        # of 438 chars on that clip) and leaves up to 2.34 s of silence
+        # between turns, which is why the connector paces its own send rather
+        # than trusting whatever pace its caller feeds it at.
+        #
+        # Live against batch on that same clip: batch 516 chars in 4.0 s, live
+        # 438 chars in 45.8 s, since pacing costs the audio's own duration.
+        # Live also dropped a whole clause batch got right ("On the 24th of
+        # February 1815, the lookout at Notre Dame de la Garde"), missing from
+        # the interim frames too, so it is a model difference and not a
+        # connector bug. For stored audio the batch model wins on every axis,
+        # accuracy, speed, diarization and word timestamps; the live model is
+        # for GMs who want the streaming transport.
+        hidden: false
         transcribe:
+          # realtime/batch name the transport, not what the model may be used
+          # for: batch: false says the Live API has no unary endpoint, so this
+          # model always routes to the websocket connector. Re-processing
+          # stored audio still uses it, which is why that connector has to
+          # survive being fed a whole utterance at once.
           realtime: true
           batch: false
           inline_diarization: false         # "not supported in live streaming sessions"

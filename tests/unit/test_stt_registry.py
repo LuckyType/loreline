@@ -122,11 +122,10 @@ class TestModelResolution:
         assert isinstance(backend, GeminiSTTBackend)
 
     def test_gemini_live_model_resolves_to_the_live_connector(self, tmp_path: Path) -> None:
-        """gemini-3.5-transcribe-live rides the Live API's WebSocket. The model
-        is hidden from the pickers until verified against the real service (see
-        the gate in loreline.stt.catalog), but a config that names it
-        explicitly must still reach the connector - that is how the
-        verification run is switched on without a code change."""
+        """gemini-3.5-transcribe-live rides the Live API's WebSocket. It spent
+        its unverified life hidden from the pickers while still resolving to
+        the connector for a config that named it explicitly, which is how the
+        verification run that unhid it was switched on."""
         backend = create_backend(
             _config(ProviderKind.GEMINI, base_url=None),
             self._secrets(tmp_path),
@@ -135,8 +134,11 @@ class TestModelResolution:
         assert isinstance(backend, GeminiLiveBackend)
 
     def test_gemini_without_a_model_keeps_the_batch_connector(self, tmp_path: Path) -> None:
-        """Gemini's declared default is the batch model: the Live variant is
-        hidden until verified, and a hidden model may not be a default."""
+        """Gemini's declared default is the batch model, and resolving it is
+        what holds a config nobody chose a model for on the batch connector.
+        This matters more now that the Live variant is offered: it serves no
+        diarization and no word timestamps, so a silent reroute would drop
+        both without erroring."""
         backend = create_backend(
             _config(ProviderKind.GEMINI, base_url=None), self._secrets(tmp_path)
         )
