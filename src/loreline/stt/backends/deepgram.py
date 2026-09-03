@@ -23,15 +23,8 @@ from loreline.audio.chunker import Utterance
 from loreline.logging import get_logger
 from loreline.models import Glossary, ProviderConfig, ProviderKind, TranscriptEvent, Word
 from loreline.secrets import SecretStore
-from loreline.stt.backends._ws import (
-    as_dict,
-    as_list,
-    as_obj_dict,
-    get_bool,
-    get_float,
-    get_str,
-    probe_health,
-)
+from loreline.stt.backends._deepgram import auth_headers, listen_params, parse_alternative
+from loreline.stt.backends._ws import as_dict, as_list, as_obj_dict, get_bool, get_str, probe_health
 from loreline.stt.base import glossary_terms
 from loreline.stt.registry import register
 
@@ -61,31 +54,26 @@ class DeepgramBackend:
         self._url = config.base_url or _DEFAULT_URL
 
     def _build_url(self, glossary: Glossary | None) -> str:
-        params: list[tuple[str, str]] = []
-        # Sent only when one was resolved, the way AssemblyAI's speech_model is:
-        # Deepgram applies its own current default to a request that names no
-        # model, which is a better thing to inherit than a value pinned here.
-        # This connector used to pin nova-2, which stayed put long after nova-3
-        # shipped and quietly cost every session the newer model's keyterm
-        # biasing (nova-2 takes the legacy `keywords` field instead).
-        if self._model:
-            params.append(("model", self._model))
+        params = listen_params(
+            model=self._model,
+            language=self._language,
+            terms=glossary_terms(glossary),
+            realtime=True,
+        )
+        # Streaming-only: the batch endpoint reads these from the WAV header,
+        # while a raw PCM socket has no container to read them from.
         params.extend(
             [
-                ("language", self._language),
                 ("encoding", "linear16"),
                 ("sample_rate", str(self.config.sample_rate)),
                 ("channels", "1"),
-                ("diarize", "true"),
-                ("punctuate", "true"),
             ]
         )
-        params.extend(("keyterm", term) for term in glossary_terms(glossary))
         return f"{self._url}?{urlencode(params)}"
 
     @property
     def _headers(self) -> dict[str, str]:
-        return {"Authorization": f"Token {self._api_key}"} if self._api_key else {}
+        return auth_headers(self._api_key)
 
     async def transcribe(
         self,
@@ -159,29 +147,12 @@ class DeepgramBackend:
 
 
 def _parse_results(message: dict[str, object], *, offset: float) -> tuple[str, list[Word]]:
+    """A streaming ``Results`` frame: one channel, its first alternative."""
     channel = as_obj_dict(message.get("channel"))
     alternatives = as_list(channel.get("alternatives"))
     if not alternatives:
         return "", []
-    alt_map = as_obj_dict(alternatives[0])
-    transcript = get_str(alt_map, "transcript")
-    words: list[Word] = []
-    for raw_word in as_list(alt_map.get("words")):
-        word_map = as_obj_dict(raw_word)
-        if not word_map:
-            continue
-        speaker_raw = word_map.get("speaker")
-        speaker = f"Speaker {speaker_raw}" if speaker_raw is not None else None
-        words.append(
-            Word(
-                text=get_str(word_map, "punctuated_word") or get_str(word_map, "word"),
-                start=get_float(word_map, "start") + offset,
-                end=get_float(word_map, "end") + offset,
-                confidence=get_float(word_map, "confidence") or None,
-                speaker=speaker,
-            )
-        )
-    return transcript, words
+    return parse_alternative(as_obj_dict(alternatives[0]), offset=offset)
 
 
 @register(ProviderKind.DEEPGRAM, realtime=True)

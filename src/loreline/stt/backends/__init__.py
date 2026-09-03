@@ -13,7 +13,9 @@ _BACKEND_MODULES = (
     "loreline.stt.backends.openrouter",
     "loreline.stt.backends.openai_realtime",
     "loreline.stt.backends.deepgram",
+    "loreline.stt.backends.deepgram_batch",
     "loreline.stt.backends.assemblyai",
+    "loreline.stt.backends.assemblyai_batch",
     "loreline.stt.backends.gemini",
     "loreline.stt.backends.gemini_live",
 )

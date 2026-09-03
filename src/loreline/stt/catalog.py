@@ -45,22 +45,30 @@ _CUSTOM_BASE_KINDS = {ProviderKind.OPENAI_COMPAT}
 # Curated model lists for providers with no ``/v1/models`` endpoint to ask.
 #
 # Each entry is scoped to what *this app's connectors for that kind* can
-# actually use, which is narrower than the provider's full catalogue. Realtime
-# and batch are not interchangeable: Deepgram serves Whisper batch-only while
-# its own models stream, and Gemini's live transcription needs the Live API (a
-# different transport this app does not implement). Listing a model no
-# connector can drive just moves the failure to run time. OpenAI is the kind
-# with a connector per transport, so its fallback list may mix the two; the
-# registry resolves each model to the right one.
+# actually use *and* have been verified against, which is narrower than the
+# provider's full catalogue. Realtime and batch are not interchangeable:
+# Deepgram serves Whisper batch-only while its own models stream, and Gemini's
+# live transcription needs the Live API. Listing a model no connector can drive
+# just moves the failure to run time. Deepgram, AssemblyAI and OpenAI now each
+# have a connector per transport, so a list here may mix the two; the registry
+# resolves each model to the right one.
 #
 # Checked against each provider's own documentation on 2026-08-31 - see the
 # per-kind notes. Re-check when a provider ships a generation; nothing here is
 # derived automatically.
 _CURATED: dict[ProviderKind, list[str]] = {
-    # WebSocket streaming connector, so every entry must stream. Deepgram's
-    # hosted Whisper models (whisper-tiny…whisper-large) are deliberately
-    # absent: they are pre-recorded only.
+    # Deepgram's hosted Whisper models (whisper-tiny…whisper-large) are
+    # deliberately absent, and THIS LIST IS THE GATE that hides them: they are
+    # pre-recorded only, and their batch connector
+    # (stt/backends/deepgram_batch.py) has never been run against the real API,
+    # so they must not appear in a picker until someone verifies it with a real
+    # key. Deepgram is not fetched live, so this curated list is the only path
+    # into the transcribe catalogue. A config that names one still resolves to
+    # the batch connector (see loreline.stt.registry), which is how the
+    # verification run is switched on without a code change. Once verified,
+    # unhide whisper-large in capabilities.yaml and add it here.
     # https://developers.deepgram.com/docs/models-languages-overview
+    # https://developers.deepgram.com/docs/deepgram-whisper-cloud
     ProviderKind.DEEPGRAM: [
         "flux-general-en",
         "flux-general-multi",
@@ -75,7 +83,12 @@ _CURATED: dict[ProviderKind, list[str]] = {
     ],
     # Universal-Streaming v3 `speech_model` values, verbatim from the streaming
     # docs' code samples. universal-3-5-pro is the endpoint's own default.
+    # universal-2 is deliberately absent for the same reason as the Deepgram
+    # Whisper models above: it is async only, and its batch connector
+    # (stt/backends/assemblyai_batch.py) is unverified against the real API.
+    # Once verified, unhide it in capabilities.yaml and add it here.
     # https://www.assemblyai.com/docs/streaming/universal-streaming
+    # https://www.assemblyai.com/docs/getting-started/models
     ProviderKind.ASSEMBLYAI: [
         "universal-3-5-pro",
         "universal-streaming-english",

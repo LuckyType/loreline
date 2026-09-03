@@ -10,6 +10,10 @@ from loreline.capabilities import default_model
 from loreline.models import Interaction, Protocol, ProviderConfig, ProviderKind
 from loreline.secrets import SecretStore
 from loreline.stt import create_backend, registry
+from loreline.stt.backends.assemblyai import AssemblyAIBackend
+from loreline.stt.backends.assemblyai_batch import AssemblyAIBatchBackend
+from loreline.stt.backends.deepgram import DeepgramBackend
+from loreline.stt.backends.deepgram_batch import DeepgramBatchBackend
 from loreline.stt.backends.gemini import GeminiSTTBackend
 from loreline.stt.backends.gemini_live import GeminiLiveBackend
 from loreline.stt.backends.openai_compat import OpenAICompatBackend
@@ -183,3 +187,46 @@ class TestModelResolution:
         backend = create_backend(_config(ProviderKind.OPENAI_COMPAT), self._secrets(tmp_path))
         assert isinstance(backend, OpenAICompatBackend)
         assert backend._model is None  # pyright: ignore[reportPrivateUsage]
+
+    def test_deepgram_batch_only_model_gets_the_batch_connector(self, tmp_path: Path) -> None:
+        """Deepgram's hosted Whisper is pre-recorded only, so it must not reach
+        the WebSocket connector, which cannot serve it. The model is hidden from
+        the pickers until verified against the real API (see the gate in
+        loreline.stt.catalog), but a config naming it explicitly still routes,
+        which is how that verification run is switched on."""
+        backend = create_backend(
+            _config(ProviderKind.DEEPGRAM, base_url=None),
+            self._secrets(tmp_path),
+            "whisper-large",
+        )
+        assert isinstance(backend, DeepgramBatchBackend)
+
+    def test_deepgram_dual_transport_model_keeps_the_streaming_connector(
+        self, tmp_path: Path
+    ) -> None:
+        """Nova serves both transports and has always streamed here. Adding a
+        batch connector for Whisper must not quietly move it."""
+        backend = create_backend(
+            _config(ProviderKind.DEEPGRAM, base_url=None),
+            self._secrets(tmp_path),
+            "nova-3",
+        )
+        assert isinstance(backend, DeepgramBackend)
+
+    def test_assemblyai_batch_only_model_gets_the_batch_connector(self, tmp_path: Path) -> None:
+        """universal-2 is async only; the streaming endpoint does not accept it
+        as a speech_model at all."""
+        backend = create_backend(
+            _config(ProviderKind.ASSEMBLYAI, base_url=None),
+            self._secrets(tmp_path),
+            "universal-2",
+        )
+        assert isinstance(backend, AssemblyAIBatchBackend)
+
+    def test_assemblyai_streaming_model_keeps_the_streaming_connector(self, tmp_path: Path) -> None:
+        backend = create_backend(
+            _config(ProviderKind.ASSEMBLYAI, base_url=None),
+            self._secrets(tmp_path),
+            "universal-3-5-pro",
+        )
+        assert isinstance(backend, AssemblyAIBackend)

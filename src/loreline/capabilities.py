@@ -170,11 +170,12 @@ def _streams_only(kind: ProviderKind) -> bool:
 
     This is what settles two questions the per-model data alone cannot. For a
     model that supports *both* transports, it picks which connector runs:
-    Deepgram's Nova streams (its batch API has no connector here), while
-    OpenAI's gpt-transcribe posts, which is the routing those configs have
-    always had. And for a model nobody has curated, it beats the name markers:
-    an unrecognised Deepgram model must still stream, because streaming is the
-    only Deepgram transport this repo implements.
+    Deepgram's Nova streams while OpenAI's gpt-transcribe posts, which is the
+    routing those configs have always had. Deepgram now has a batch connector
+    too, but every model it *offers* streams, so Nova keeps the lower-latency
+    transport and only a batch-only model reaches the other one. And for a model
+    nobody has curated, this beats the name markers: an unrecognised Deepgram
+    model is assumed to stream, because everything Deepgram offers here does.
     """
     offered = _offered_transcribers(kind)
     if not offered:
