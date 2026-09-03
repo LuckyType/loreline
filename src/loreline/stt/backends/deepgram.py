@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
 from urllib.parse import urlencode
 
 from websockets.asyncio.client import connect
@@ -22,7 +21,7 @@ from websockets.exceptions import ConnectionClosedOK, WebSocketException
 from loreline.audio.chunker import Utterance
 from loreline.health import PROBE_TIMEOUT_S, HealthReport, HealthStatus
 from loreline.logging import get_logger
-from loreline.models import Glossary, ProviderConfig, ProviderKind, TranscriptEvent, Word
+from loreline.models import Glossary, ProviderConfig, ProviderKind, Word
 from loreline.secrets import SecretStore
 from loreline.stt.backends._deepgram import auth_headers, listen_params, parse_alternative
 from loreline.stt.backends._ws import (
@@ -34,7 +33,7 @@ from loreline.stt.backends._ws import (
     get_str,
     probe_health,
 )
-from loreline.stt.base import glossary_terms
+from loreline.stt.base import Connector, Transcription, glossary_terms, secret_for
 from loreline.stt.registry import register
 
 log = get_logger(__name__)
@@ -45,8 +44,11 @@ _DEFAULT_URL = "wss://api.deepgram.com/v1/listen"
 _RECV_TIMEOUT_S = 10.0
 
 
-class DeepgramBackend:
-    """Streaming transcription with inline diarization via Deepgram."""
+class DeepgramBackend(Connector[str]):
+    """Streaming transcription with inline diarization via Deepgram.
+
+    The prepared value is the socket URL with its query string built.
+    """
 
     def __init__(
         self,
@@ -56,13 +58,13 @@ class DeepgramBackend:
         api_key: str | None = None,
         language: str | None = None,
     ) -> None:
-        self.config = config
+        super().__init__(config)
         self._api_key = api_key
         self._language = language or config.language
         self._model = model
         self._url = config.base_url or _DEFAULT_URL
 
-    def _build_url(self, glossary: Glossary | None) -> str:
+    def prepare(self, glossary: Glossary | None) -> str:
         params = listen_params(
             model=self._model,
             language=self._language,
@@ -84,22 +86,7 @@ class DeepgramBackend:
     def _headers(self) -> dict[str, str]:
         return auth_headers(self._api_key)
 
-    async def transcribe(
-        self,
-        audio: AsyncIterator[Utterance],
-        *,
-        session_id: str,
-        glossary: Glossary | None = None,
-    ) -> AsyncIterator[TranscriptEvent]:
-        url = self._build_url(glossary)
-        async for utterance in audio:
-            event = await self._transcribe_one(url, utterance, session_id=session_id)
-            if event is not None:
-                yield event
-
-    async def _transcribe_one(
-        self, url: str, utterance: Utterance, *, session_id: str
-    ) -> TranscriptEvent | None:
+    async def transcribe_one(self, utterance: Utterance, prepared: str) -> Transcription:
         # One connection per utterance, closed with CloseStream: that is the
         # only flush signal Deepgram defines unconditionally - the server
         # finalizes buffered audio, streams the remaining final Results, then
@@ -111,7 +98,7 @@ class DeepgramBackend:
         # with an empty transcript - accumulate them all, not just the first.
         parts: list[str] = []
         words: list[Word] = []
-        async with connect(url, additional_headers=self._headers) as ws:
+        async with connect(prepared, additional_headers=self._headers) as ws:
             await ws.send(utterance.pcm)
             await ws.send(json.dumps({"type": "CloseStream"}))
             while True:
@@ -129,20 +116,7 @@ class DeepgramBackend:
                     words.extend(more)
                 elif kind in {"Metadata", "Close"}:
                     break
-        transcript = " ".join(parts)
-        if not transcript:
-            return None
-        speaker = words[0].speaker if words else None
-        return TranscriptEvent(
-            session_id=session_id,
-            source=self.config.id,
-            text=transcript,
-            words=words,
-            speaker=speaker,
-            start_ts=utterance.start,
-            end_ts=utterance.end,
-            is_final=True,
-        )
+        return Transcription(text=" ".join(parts), words=words)
 
     async def health(self) -> HealthReport:
         """Open the socket and read one frame, without raising.
@@ -161,9 +135,6 @@ class DeepgramBackend:
         except (OSError, WebSocketException) as exc:
             return classify_handshake_error(exc)
 
-    async def aclose(self) -> None:
-        """Nothing is held between utterances (one connection per utterance)."""
-
 
 def _parse_results(message: dict[str, object], *, offset: float) -> tuple[str, list[Word]]:
     """A streaming ``Results`` frame: one channel, its first alternative."""
@@ -178,5 +149,4 @@ def _parse_results(message: dict[str, object], *, offset: float) -> tuple[str, l
 def _factory(  # pyright: ignore[reportUnusedFunction]
     config: ProviderConfig, secrets: SecretStore, model: str | None
 ) -> DeepgramBackend:
-    api_key = secrets.get(config.auth_ref) if config.auth_ref else None
-    return DeepgramBackend(config, model=model, api_key=api_key)
+    return DeepgramBackend(config, model=model, api_key=secret_for(config, secrets))

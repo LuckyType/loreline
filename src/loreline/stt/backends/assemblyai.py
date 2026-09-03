@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
 from urllib.parse import urlencode
 
 from websockets.asyncio.client import connect
@@ -27,7 +26,7 @@ from websockets.exceptions import ConnectionClosedOK, WebSocketException
 from loreline.audio.chunker import Utterance
 from loreline.health import PROBE_TIMEOUT_S, HealthReport, HealthStatus
 from loreline.logging import get_logger
-from loreline.models import Glossary, ProviderConfig, ProviderKind, TranscriptEvent, Word
+from loreline.models import Glossary, ProviderConfig, ProviderKind, Word
 from loreline.secrets import SecretStore
 from loreline.stt.backends._assemblyai import auth_headers, glossary_for, parse_words
 from loreline.stt.backends._ws import (
@@ -38,7 +37,7 @@ from loreline.stt.backends._ws import (
     get_str,
     probe_health,
 )
-from loreline.stt.base import glossary_terms
+from loreline.stt.base import Connector, Transcription, glossary_terms, secret_for
 from loreline.stt.registry import register
 
 log = get_logger(__name__)
@@ -55,19 +54,22 @@ _MIN_CHUNK_MS = 50
 _RECV_TIMEOUT_S = 15.0
 
 
-class AssemblyAIBackend:
-    """Streaming transcription with inline diarization via AssemblyAI v3."""
+class AssemblyAIBackend(Connector[str]):
+    """Streaming transcription with inline diarization via AssemblyAI v3.
+
+    The prepared value is the socket URL with its query string built.
+    """
 
     def __init__(
         self, config: ProviderConfig, *, model: str | None = None, api_key: str | None = None
     ) -> None:
-        self.config = config
+        super().__init__(config)
         self._api_key = api_key
         self._model = model
         self._language = config.language
         self._url = config.base_url or _DEFAULT_URL
 
-    def _build_url(self, glossary: Glossary | None) -> str:
+    def prepare(self, glossary: Glossary | None) -> str:
         params: list[tuple[str, str]] = [
             ("sample_rate", str(self.config.sample_rate)),
             ("encoding", "pcm_s16le"),
@@ -95,22 +97,7 @@ class AssemblyAIBackend:
     def _headers(self) -> dict[str, str]:
         return auth_headers(self._api_key)
 
-    async def transcribe(
-        self,
-        audio: AsyncIterator[Utterance],
-        *,
-        session_id: str,
-        glossary: Glossary | None = None,
-    ) -> AsyncIterator[TranscriptEvent]:
-        url = self._build_url(glossary)
-        async for utterance in audio:
-            event = await self._transcribe_one(url, utterance, session_id=session_id)
-            if event is not None:
-                yield event
-
-    async def _transcribe_one(
-        self, url: str, utterance: Utterance, *, session_id: str
-    ) -> TranscriptEvent | None:
+    async def transcribe_one(self, utterance: Utterance, prepared: str) -> Transcription:
         # One session per utterance, closed with Terminate: that is the only
         # flush signal the v3 protocol defines - the server transcribes
         # everything it received (possibly as several end-of-turn messages),
@@ -121,7 +108,7 @@ class AssemblyAIBackend:
         # With format_turns the server may resend a turn it already ended as
         # a formatted duplicate, so keep the last message per turn_order.
         turns: dict[int, tuple[str, list[Word]]] = {}
-        async with connect(url, additional_headers=self._headers) as ws:
+        async with connect(prepared, additional_headers=self._headers) as ws:
             for chunk in _audio_chunks(utterance.pcm, self.config.sample_rate):
                 await ws.send(chunk)
             await ws.send(json.dumps({"type": "Terminate"}))
@@ -141,20 +128,9 @@ class AssemblyAIBackend:
                 elif kind == "Termination":
                     break
         ordered = [turns[order] for order in sorted(turns)]
-        transcript = " ".join(text for text, _ in ordered if text)
-        words = [word for _, turn_words in ordered for word in turn_words]
-        if not transcript:
-            return None
-        speaker = words[0].speaker if words else None
-        return TranscriptEvent(
-            session_id=session_id,
-            source=self.config.id,
-            text=transcript,
-            words=words,
-            speaker=speaker,
-            start_ts=utterance.start,
-            end_ts=utterance.end,
-            is_final=True,
+        return Transcription(
+            text=" ".join(text for text, _ in ordered if text),
+            words=[word for _, turn_words in ordered for word in turn_words],
         )
 
     async def health(self) -> HealthReport:
@@ -173,9 +149,6 @@ class AssemblyAIBackend:
             return HealthReport(HealthStatus.UNREACHABLE, "the socket did not open in time")
         except (OSError, WebSocketException) as exc:
             return classify_handshake_error(exc)
-
-    async def aclose(self) -> None:
-        """Nothing is held between utterances (one session per utterance)."""
 
 
 def _audio_chunks(pcm: bytes, sample_rate: int) -> list[bytes]:
@@ -200,5 +173,4 @@ def _audio_chunks(pcm: bytes, sample_rate: int) -> list[bytes]:
 def _factory(  # pyright: ignore[reportUnusedFunction]
     config: ProviderConfig, secrets: SecretStore, model: str | None
 ) -> AssemblyAIBackend:
-    api_key = secrets.get(config.auth_ref) if config.auth_ref else None
-    return AssemblyAIBackend(config, model=model, api_key=api_key)
+    return AssemblyAIBackend(config, model=model, api_key=secret_for(config, secrets))
