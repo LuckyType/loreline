@@ -12,6 +12,7 @@ finding gets ignored along with the rest.
 from __future__ import annotations
 
 from datetime import date, timedelta
+from typing import cast
 
 import pytest
 from pydantic import ValidationError
@@ -45,7 +46,26 @@ CURRENT_MODEL: dict[str, object] = {
 }
 
 
-def _provider(**overrides: object) -> dict[str, object]:
+def _surfaces(interactions: object, catalog: dict[str, str] | None) -> dict[str, object]:
+    """One placeholder surface per declared interaction, plus the catalogue
+    under test: the schema insists every interaction is reachable, and these
+    tests are about what the check says, not where a vendor lives."""
+    surface: dict[str, object] = {"url": "https://example.invalid/v1", "auth": "bearer"}
+    names = cast("list[str]", interactions) if isinstance(interactions, list) else []
+    surfaces: dict[str, object] = {}
+    if "transcribe" in names:
+        surfaces["transcribe"] = {"batch": dict(surface)}
+    for other in ("summarize", "video"):
+        if other in names:
+            surfaces[other] = dict(surface)
+    if catalog:
+        surfaces["catalog"] = {
+            name: {"url": url, "auth": "bearer"} for name, url in catalog.items()
+        }
+    return surfaces
+
+
+def _provider(catalog: dict[str, str] | None = None, **overrides: object) -> dict[str, object]:
     spec: dict[str, object] = {
         "label": "Test",
         "key_url": "https://example.invalid/keys",
@@ -53,6 +73,7 @@ def _provider(**overrides: object) -> dict[str, object]:
         "models": [dict(CURRENT_MODEL)],
     }
     spec.update(overrides)
+    spec["surfaces"] = _surfaces(spec["interactions"], catalog)
     return spec
 
 
@@ -273,7 +294,7 @@ def _chat_config(**overrides: object) -> CapabilityConfig:
         {
             "openrouter": _provider(
                 interactions=["summarize"],
-                catalog_endpoint={"summarize": ENDPOINT},
+                catalog={"summarize": ENDPOINT},
                 models=[_chat_model(**overrides), _chat_model(id=ANCHOR, default=True)],
             )
         }
@@ -444,7 +465,7 @@ def _video_config() -> CapabilityConfig:
         {
             "openrouter": _provider(
                 interactions=["video"],
-                catalog_endpoint={"video": "https://example.invalid/videos/models"},
+                catalog={"video": "https://example.invalid/videos/models"},
                 models=[
                     {
                         "id": "vendor/video-1",
@@ -503,7 +524,7 @@ def _stt_config() -> CapabilityConfig:
         {
             "openrouter": _provider(
                 interactions=["transcribe"],
-                catalog_endpoint={"transcribe": ENDPOINT},
+                catalog={"transcribe": ENDPOINT},
                 models=[
                     {
                         "id": "vendor/stt-1",

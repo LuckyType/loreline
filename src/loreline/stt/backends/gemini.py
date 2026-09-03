@@ -30,9 +30,10 @@ import httpx
 
 from loreline.audio.chunker import Utterance
 from loreline.audio.wav import pcm_to_wav
+from loreline.capabilities import surface_for
 from loreline.health import HealthReport, probe_endpoint
 from loreline.logging import get_logger
-from loreline.models import Glossary, ProviderConfig, ProviderKind, Word
+from loreline.models import Glossary, Interaction, ProviderConfig, ProviderKind, Word
 from loreline.secrets import SecretStore
 from loreline.stt.base import (
     FeatureConflictGuard,
@@ -46,7 +47,6 @@ from loreline.stt.registry import register
 
 log = get_logger(__name__)
 
-_DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 # The API caps custom_vocabulary at 1000 terms; a longer glossary is truncated
 # rather than rejected outright mid-session. The curated models record that
 # ceiling in capabilities.yaml, which is what the request actually reads; this
@@ -91,12 +91,15 @@ class GeminiSTTBackend(HttpConnector[list[str]]):
         language: str | None = None,
         diarize: bool = True,
     ) -> None:
+        # The native surface: x-goog-api-key rather than a bearer token, and a
+        # base its OpenAI-compatible sibling (the summarize surface) does not
+        # serve. Both facts are the yaml's, not this connector's.
+        endpoint = surface_for(config, Interaction.TRANSCRIBE, "batch")
         super().__init__(
             config,
             client=client,
-            base_url=config.base_url or _DEFAULT_BASE_URL,
-            # Gemini authenticates with this header rather than a bearer token.
-            headers={"x-goog-api-key": api_key} if api_key else None,
+            base_url=endpoint.url,
+            headers=endpoint.request_headers(api_key),
             timeout=60.0,
         )
         self._language = language or config.language

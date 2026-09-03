@@ -26,23 +26,16 @@ from typing import cast
 
 import httpx
 
-from loreline.capabilities import supports
+from loreline.capabilities import supports, surface_for
 from loreline.logging import get_logger
 from loreline.models import Interaction, ProviderConfig, ProviderKind, VideoModelInfo
 
 log = get_logger(__name__)
 
-_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 # A start/poll call is a small JSON round trip; only the content download moves
 # real bytes, so it gets its own, much longer budget.
 _TIMEOUT_S = 60.0
 _DOWNLOAD_TIMEOUT_S = 600.0
-
-# Same leaderboard attribution headers the chat connector sends.
-_OPENROUTER_HEADERS = {
-    "HTTP-Referer": "https://github.com/LuckyType/loreline",
-    "X-Title": "Loreline",
-}
 
 # Upstream job states. Only `completed` yields bytes; the other three terminal
 # states are failures from this app's point of view, `expired` included - it
@@ -68,10 +61,6 @@ def supports_video(kind: ProviderKind) -> bool:
     return supports(kind, Interaction.VIDEO)
 
 
-def base_url(config: ProviderConfig) -> str:
-    return (config.base_url or _OPENROUTER_BASE_URL).rstrip("/")
-
-
 def _client(
     config: ProviderConfig,
     api_key: str | None,
@@ -81,10 +70,12 @@ def _client(
 ) -> httpx.AsyncClient:
     if factory is not None:
         return factory()
-    headers = {**_OPENROUTER_HEADERS}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-    return httpx.AsyncClient(base_url=base_url(config), headers=headers, timeout=timeout)
+    # The kind's video surface: the gateway base plus the same attribution
+    # headers the chat connector sends, both declared in capabilities.yaml.
+    endpoint = surface_for(config, Interaction.VIDEO)
+    return httpx.AsyncClient(
+        base_url=endpoint.url, headers=endpoint.request_headers(api_key), timeout=timeout
+    )
 
 
 def _error_detail(response: httpx.Response) -> str:

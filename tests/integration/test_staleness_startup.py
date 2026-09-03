@@ -64,10 +64,21 @@ CURRENT_MODEL: dict[str, object] = {
 }
 
 
-def _spec(**overrides: object) -> dict[str, object]:
+def _spec(catalog: str | None = None, **overrides: object) -> dict[str, object]:
+    """A transcribing provider, with a catalogue where the test needs one.
+
+    The schema wants a surface for every interaction, so a placeholder batch
+    surface is always present; only the catalogue is what these tests read.
+    """
+    surfaces: dict[str, object] = {
+        "transcribe": {"batch": {"url": "https://example.invalid/v1", "auth": "bearer"}}
+    }
+    if catalog:
+        surfaces["catalog"] = {"transcribe": {"url": catalog, "auth": "bearer"}}
     spec: dict[str, object] = {
         "label": "Test",
         "key_url": "https://example.invalid/keys",
+        "surfaces": surfaces,
         "interactions": ["transcribe"],
         "models": [dict(CURRENT_MODEL)],
     }
@@ -91,7 +102,7 @@ def _config_with_dated_model(model_id: str, deprecated: str) -> CapabilityConfig
     }
     providers: dict[str, object] = {kind.value: _spec() for kind in ProviderKind}
     providers[ProviderKind.OPENROUTER.value] = _spec(
-        catalog_endpoint={"transcribe": "https://example.invalid/models"},
+        catalog="https://example.invalid/models",
         models=[dated, dict(CURRENT_MODEL)],
     )
     return CapabilityConfig.model_validate({"version": 1, "providers": providers})

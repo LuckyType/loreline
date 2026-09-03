@@ -19,11 +19,12 @@ from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosedOK, WebSocketException
 
 from loreline.audio.chunker import Utterance
+from loreline.capabilities import surface_for
 from loreline.health import PROBE_TIMEOUT_S, HealthReport, HealthStatus
 from loreline.logging import get_logger
-from loreline.models import Glossary, ProviderConfig, ProviderKind, Word
+from loreline.models import Glossary, Interaction, ProviderConfig, ProviderKind, Word
 from loreline.secrets import SecretStore
-from loreline.stt.backends._deepgram import auth_headers, listen_params, parse_alternative
+from loreline.stt.backends._deepgram import listen_params, parse_alternative
 from loreline.stt.backends._ws import (
     as_dict,
     as_list,
@@ -38,7 +39,6 @@ from loreline.stt.registry import register
 
 log = get_logger(__name__)
 
-_DEFAULT_URL = "wss://api.deepgram.com/v1/listen"
 # Safety net per received frame; CloseStream -> Metadata is the real
 # end-of-flush signal, and results stream back within a couple of seconds.
 _RECV_TIMEOUT_S = 10.0
@@ -62,7 +62,8 @@ class DeepgramBackend(Connector[str]):
         self._api_key = api_key
         self._language = language or config.language
         self._model = model
-        self._url = config.base_url or _DEFAULT_URL
+        self._endpoint = surface_for(config, Interaction.TRANSCRIBE, "realtime")
+        self._url = self._endpoint.url
 
     def prepare(self, glossary: Glossary | None) -> str:
         params = listen_params(
@@ -84,7 +85,7 @@ class DeepgramBackend(Connector[str]):
 
     @property
     def _headers(self) -> dict[str, str]:
-        return auth_headers(self._api_key)
+        return self._endpoint.request_headers(self._api_key)
 
     async def transcribe_one(self, utterance: Utterance, prepared: str) -> Transcription:
         # One connection per utterance, closed with CloseStream: that is the

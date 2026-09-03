@@ -82,7 +82,8 @@ async def test_health_path_is_per_kind_not_hardcoded(tmp_path: Path) -> None:
 
     Verified live: OpenRouter answers /models with its whole catalogue to an
     anonymous caller, so grading it would report every key as healthy - the
-    same defect this change exists to remove. Its factory overrides the path.
+    same defect this change exists to remove. Its batch surface in
+    capabilities.yaml declares ``health: /key``, and the connector reads it.
     """
     seen: list[str] = []
 

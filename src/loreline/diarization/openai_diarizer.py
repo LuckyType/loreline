@@ -27,14 +27,13 @@ from typing import cast
 
 import httpx
 
-from loreline.capabilities import default_diarizing_model
+from loreline.capabilities import default_diarizing_model, surface
 from loreline.httpclient import ClientHandle
 from loreline.logging import get_logger
-from loreline.models import ProviderKind, SpeakerSegment
+from loreline.models import Interaction, ProviderKind, SpeakerSegment
 
 log = get_logger(__name__)
 
-_DEFAULT_BASE_URL = "https://api.openai.com/v1"
 _MAX_UPLOAD_BYTES = 25 * 1024 * 1024  # OpenAI /v1/audio/transcriptions limit
 
 
@@ -62,9 +61,17 @@ class OpenAIDiarizer:
             )
             raise ValueError(msg)
         self._model = resolved
-        headers = {"Authorization": f"Bearer {self._api_key}"} if self._api_key else {}
+        # The same batch surface the OpenAI transcription connector posts to:
+        # this pass is one more /audio/transcriptions request against it.
+        batch = surface(ProviderKind.OPENAI, Interaction.TRANSCRIBE, "batch")
+        if batch is None or batch.url is None:
+            msg = "capabilities.yaml declares no batch transcription surface for openai"
+            raise ValueError(msg)
         self._http = ClientHandle(
-            client, base_url=base_url or _DEFAULT_BASE_URL, headers=headers, timeout=600.0
+            client,
+            base_url=base_url or batch.url,
+            headers=batch.request_headers(self._api_key),
+            timeout=600.0,
         )
         self._client = self._http.client
 

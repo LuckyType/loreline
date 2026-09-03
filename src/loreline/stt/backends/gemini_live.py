@@ -46,15 +46,15 @@ import asyncio
 import base64
 import json
 from dataclasses import dataclass, field
-from urllib.parse import urlencode
 
 from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import ConnectionClosedOK, WebSocketException
 
 from loreline.audio.chunker import Utterance
+from loreline.capabilities import surface_for
 from loreline.health import PROBE_TIMEOUT_S, HealthReport, HealthStatus
 from loreline.logging import get_logger
-from loreline.models import Glossary, ProviderConfig, ProviderKind
+from loreline.models import Glossary, Interaction, ProviderConfig, ProviderKind
 from loreline.secrets import SecretStore
 from loreline.stt.backends._ws import (
     as_dict,
@@ -75,10 +75,6 @@ from loreline.stt.registry import register
 
 log = get_logger(__name__)
 
-_DEFAULT_URL = (
-    "wss://generativelanguage.googleapis.com/ws/"
-    "google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
-)
 # The documented chunk cadence; at 16 kHz s16le that is 3200 bytes per message.
 # It is also the send *rate*: this connector waits a chunk's worth of time
 # between chunks. That is not politeness, it is what makes the service's turn
@@ -249,14 +245,13 @@ class GeminiLiveBackend(Connector[list[str]]):
         self._api_key = api_key
         self._language = language or config.language
         self._model = model
-        self._url = config.base_url or _DEFAULT_URL
+        self._endpoint = surface_for(config, Interaction.TRANSCRIBE, "realtime")
 
     def _session_url(self) -> str:
         # The Live API authenticates with the key as a URL query parameter,
-        # not a header (unlike the batch Gemini connector's x-goog-api-key).
-        if not self._api_key:
-            return self._url
-        return f"{self._url}?{urlencode({'key': self._api_key})}"
+        # not a header (unlike the batch Gemini connector's x-goog-api-key);
+        # the surface says so, and the endpoint spells it.
+        return self._endpoint.url_with_key(self._api_key)
 
     def _setup(self, vocabulary: list[str]) -> dict[str, object]:
         # The SDK's LiveConnectConfig(response_modalities=["TEXT"],

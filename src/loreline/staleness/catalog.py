@@ -18,14 +18,15 @@ check" instead of "your models are gone". Two rules encode that:
 * A paginated answer we did not follow to the end is marked ``partial``:
   present models are still trustworthy, absent ones prove nothing.
 
-The per-vendor knowledge is all in this module: which endpoint (read from the
-capability config, never hardcoded), which header carries the key, which
-environment variable CI would find it in, and how to read the body. Endpoints
-differ enough that one generic parser would be a lie: OpenRouter's chat
-catalogue publishes reasoning and parameter metadata, its video catalogue is a
-different schema entirely, OpenAI's carries nothing but an id and a shutdown
-date, Deepgram splits stt from tts, and Gemini prefixes every id with
-``models/``.
+Where each catalogue lives, how the key is spelled for it, whether it answers
+without one, and which environment variable CI would find a key in, are all
+read from the capability config (the kind's ``catalog`` surface and
+``key_env``), never restated here. What stays in this module is how to read
+the body, because the bodies differ enough that one generic parser would be a
+lie: OpenRouter's chat catalogue publishes reasoning and parameter metadata,
+its video catalogue is a different schema entirely, OpenAI's carries nothing
+but an id and a shutdown date, Deepgram splits stt from tts, and Gemini
+prefixes every id with ``models/``.
 """
 
 from __future__ import annotations
@@ -40,7 +41,7 @@ from typing import cast
 
 import httpx
 
-from loreline.capability_config import ProviderSpec
+from loreline.capability_config import ProviderSpec, Surface
 from loreline.logging import get_logger
 from loreline.models import Interaction, ProviderKind
 
@@ -164,77 +165,33 @@ class _UnreadableError(Exception):
     """The body arrived and could not be understood. Never leaves this module."""
 
 
-@dataclass(frozen=True, slots=True)
-class _Auth:
-    """How one vendor wants its key, and where a CI run would find one.
-
-    ``required=False`` marks a catalogue that answers without credentials.
-    OpenRouter's ``/api/v1/models`` is the one such endpoint here, verified
-    unauthenticated on 2026-09-02 (HTTP 200, 425 models), which is what lets
-    the CI check run with no secret at all.
-    """
-
-    header: str = "Authorization"
-    prefix: str = "Bearer "
-    env: tuple[str, ...] = ()
-    required: bool = True
-
-
-# Per-kind auth, keyed by ProviderKind so a new kind fails the lookup loudly
-# rather than silently probing unauthenticated.
-_AUTH: dict[ProviderKind, _Auth] = {
-    # Public catalogue. A key is still sent when one is around: an
-    # authenticated call sees the same list plus the account's own limits.
-    ProviderKind.OPENROUTER: _Auth(env=("OPENROUTER_API_KEY",), required=False),
-    ProviderKind.OPENAI: _Auth(env=("OPENAI_API_KEY",)),
-    # "Authorization: Token <key>", not Bearer.
-    # https://developers.deepgram.com/reference/manage/models/list
-    ProviderKind.DEEPGRAM: _Auth(prefix="Token ", env=("DEEPGRAM_API_KEY",)),
-    # Bare key, no scheme prefix.
-    ProviderKind.ASSEMBLYAI: _Auth(prefix="", env=("ASSEMBLYAI_API_KEY",)),
-    # Google accepts the key as a header as well as a query parameter; the
-    # header keeps it out of logs and out of the endpoint string we print.
-    ProviderKind.GEMINI: _Auth(
-        header="x-goog-api-key", prefix="", env=("GEMINI_API_KEY", "GOOGLE_API_KEY")
-    ),
-    # Whatever the operator's server wants, if anything. Never probed by the CI
-    # check (there is no address to call); the startup check passes the stored
-    # key and base URL of a configured provider.
-    ProviderKind.OPENAI_COMPAT: _Auth(required=False),
-}
-
-
-def credential_from_env(kind: ProviderKind) -> str | None:
+def credential_from_env(spec: ProviderSpec) -> str | None:
     """A key for this vendor from the environment, if CI was given one."""
-    auth = _AUTH.get(kind)
-    if auth is None:
-        return None
-    for name in auth.env:
+    for name in spec.key_env:
         value = os.environ.get(name)
         if value:
             return value
     return None
 
 
-def _headers(kind: ProviderKind, api_key: str | None) -> dict[str, str]:
-    auth = _AUTH.get(kind)
-    if auth is None or not api_key:
-        return {}
-    return {auth.header: f"{auth.prefix}{api_key}"}
+def needs_credentials(spec: ProviderSpec, interaction: Interaction) -> bool:
+    """Whether this vendor refuses its catalogue without a key.
+
+    False for a catalogue declared ``public`` (OpenRouter's, verified
+    unauthenticated on 2026-09-02: HTTP 200, 425 models, which is what lets
+    the CI check run with no secret at all) and for a kind whose server may
+    not check one (``auth: optional``, the self-hosted kind). A key is still
+    sent when one is around: an authenticated call sees the same list plus
+    the account's own limits.
+    """
+    catalog = spec.catalog(interaction)
+    if catalog is None:
+        return True
+    return not catalog.public and spec.auth == "api_key"
 
 
-def needs_credentials(kind: ProviderKind) -> bool:
-    """Whether this vendor refuses its catalogue without a key."""
-    auth = _AUTH.get(kind)
-    return auth.required if auth else True
-
-
-# The yaml spells the self-hosted endpoint from the server root ("{base_url}/v1/models"),
-# while a stored provider's base_url already carries the version segment
-# ("http://speaches:8000/v1") because that is what the connectors post to.
-# Substituting naively would ask for /v1/v1/models, so one trailing version
-# segment is dropped.
-_VERSION_SUFFIXES = ("/v1", "/v1beta")
+def _catalog(spec: ProviderSpec, interaction: Interaction) -> Surface | None:
+    return spec.catalog(interaction)
 
 
 def endpoint_for(
@@ -246,31 +203,19 @@ def endpoint_for(
     endpoints are already written down once and a second copy is exactly the
     drift this feature exists to catch. None means there is nothing to call:
     the vendor publishes no catalogue, or the address belongs to a server only
-    the operator can name.
+    the operator can name and ``base_url`` did not supply it. A stored
+    provider's base already carries the version segment the connectors post
+    to ("http://speaches:8000/v1"), so the self-hosted catalogue is spliced
+    beside it as "{base_url}/models".
     """
-    raw = spec.catalog_endpoint
-    if raw is None:
-        return None
-    url = raw if isinstance(raw, str) else raw.get(interaction)
-    if not url:
-        return None
-    if "{base_url}" not in url:
-        return url
-    if not base_url:
-        return None
-    trimmed = base_url.rstrip("/")
-    for suffix in _VERSION_SUFFIXES:
-        if trimmed.endswith(suffix):
-            trimmed = trimmed[: -len(suffix)]
-            break
-    return url.replace("{base_url}", trimmed)
+    catalog = _catalog(spec, interaction)
+    return catalog.resolve(base_url) if catalog else None
 
 
 def _needs_base_url(spec: ProviderSpec, interaction: Interaction) -> bool:
-    """Whether this endpoint is a template waiting for an operator's base URL."""
-    raw = spec.catalog_endpoint
-    url = raw if isinstance(raw, str) else (raw or {}).get(interaction)
-    return bool(url) and "{base_url}" in str(url)
+    """Whether this endpoint is one only an operator's base URL can locate."""
+    catalog = _catalog(spec, interaction)
+    return catalog is not None and catalog.resolve(None) is None
 
 
 async def probe(
@@ -300,9 +245,8 @@ async def probe(
             else "vendor publishes no catalogue for this interaction"
         )
         return CatalogProbe(kind, interaction, None, CatalogStatus.NO_CATALOGUE, detail)
-    if api_key is None and needs_credentials(kind):
-        auth = _AUTH.get(kind)
-        env = ", ".join(auth.env) if auth and auth.env else "an API key"
+    if api_key is None and needs_credentials(spec, interaction):
+        env = ", ".join(spec.key_env) or "an API key"
         return CatalogProbe(
             kind,
             interaction,
@@ -310,10 +254,12 @@ async def probe(
             CatalogStatus.NO_CREDENTIALS,
             f"not checked, no credentials (set {env})",
         )
+    catalog = _catalog(spec, interaction)
+    headers = catalog.request_headers(api_key) if catalog else {}
     factory = client_factory or (lambda: httpx.AsyncClient(timeout=request_timeout))
     try:
         async with factory() as client:
-            response = await client.get(url, headers=_headers(kind, api_key))
+            response = await client.get(url, headers=headers)
             response.raise_for_status()
             body = response.content
     except httpx.HTTPError as exc:

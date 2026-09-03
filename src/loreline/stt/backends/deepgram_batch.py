@@ -32,27 +32,20 @@ import httpx
 
 from loreline.audio.chunker import Utterance
 from loreline.audio.wav import pcm_to_wav
+from loreline.capabilities import surface_for
 from loreline.health import HealthReport, probe_endpoint
 from loreline.logging import get_logger
-from loreline.models import Glossary, ProviderConfig, ProviderKind
+from loreline.models import Glossary, Interaction, ProviderConfig, ProviderKind
 from loreline.secrets import SecretStore
-from loreline.stt.backends._deepgram import auth_headers, listen_params, parse_alternative
+from loreline.stt.backends._deepgram import listen_params, parse_alternative
 from loreline.stt.backends._ws import as_list, as_obj_dict
-from loreline.stt.base import (
-    HttpConnector,
-    Transcription,
-    glossary_terms,
-    http_base_url,
-    secret_for,
-)
+from loreline.stt.base import HttpConnector, Transcription, glossary_terms, secret_for
 from loreline.stt.registry import register
 
 log = get_logger(__name__)
 
-# Host only: the pre-recorded and streaming endpoints share the /v1/listen path
-# and differ in scheme, which is why capabilities.yaml records the bare host as
-# this provider's base_url.
-_DEFAULT_BASE_URL = "https://api.deepgram.com"
+# The batch surface in capabilities.yaml is the bare host: the pre-recorded
+# and streaming endpoints share this path and differ in scheme.
 _LISTEN_PATH = "/v1/listen"
 # The health probe. See ``health`` for why it is not the model list.
 _AUTH_PROBE_PATH = "/v1/auth/token"
@@ -82,11 +75,12 @@ class DeepgramBatchBackend(HttpConnector[_Params]):
         api_key: str | None = None,
         language: str | None = None,
     ) -> None:
+        endpoint = surface_for(config, Interaction.TRANSCRIBE, "batch")
         super().__init__(
             config,
             client=client,
-            base_url=http_base_url(config.base_url) or _DEFAULT_BASE_URL,
-            headers=auth_headers(api_key),
+            base_url=endpoint.url,
+            headers=endpoint.request_headers(api_key),
             timeout=_TIMEOUT_S,
         )
         self._language = language or config.language

@@ -29,9 +29,10 @@ from websockets.exceptions import WebSocketException
 
 from loreline.audio.chunker import Utterance
 from loreline.audio.resample import resample_pcm16
+from loreline.capabilities import surface_for
 from loreline.health import PROBE_TIMEOUT_S, HealthReport, HealthStatus
 from loreline.logging import get_logger
-from loreline.models import Glossary, ProviderConfig, ProviderKind
+from loreline.models import Glossary, Interaction, ProviderConfig, ProviderKind
 from loreline.secrets import SecretStore
 from loreline.stt.backends._ws import (
     as_dict,
@@ -45,7 +46,6 @@ from loreline.stt.registry import register
 
 log = get_logger(__name__)
 
-_DEFAULT_URL = "wss://api.openai.com/v1/realtime?intent=transcription"
 _COMPLETED = "conversation.item.input_audio_transcription.completed"
 _FAILED = "conversation.item.input_audio_transcription.failed"
 # OpenAI Realtime rejects input sample rates below 24 kHz, while our capture
@@ -94,7 +94,8 @@ class OpenAIRealtimeBackend(Connector[None]):
         self._api_key = api_key
         self._language = language or config.language
         self._model = model
-        self._url = config.base_url or _DEFAULT_URL
+        self._endpoint = surface_for(config, Interaction.TRANSCRIBE, "realtime")
+        self._url = self._endpoint.url
         self._out_rate = max(config.sample_rate, _OUTPUT_RATE)
         self._ws: ClientConnection | None = None
         self._prompt: str | None = None
@@ -102,7 +103,7 @@ class OpenAIRealtimeBackend(Connector[None]):
 
     @property
     def _headers(self) -> dict[str, str]:
-        return {"Authorization": f"Bearer {self._api_key}"} if self._api_key else {}
+        return self._endpoint.request_headers(self._api_key)
 
     def _session_update(self) -> str:
         transcription: dict[str, object] = {"language": self._language}

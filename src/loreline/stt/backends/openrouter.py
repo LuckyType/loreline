@@ -1,10 +1,12 @@
 """OpenRouter transcription backend.
 
 OpenRouter's STT is an OpenAI-compatible ``POST /audio/transcriptions``, so this
-reuses :class:`OpenAICompatBackend` wholesale and only supplies the endpoint
-and the attribution headers. The model arrives resolved from the registry,
-which for this kind means an id in OpenRouter's ``vendor/model`` form - a bare
-OpenAI model name is not a valid id here.
+reuses :class:`OpenAICompatBackend` wholesale; the gateway base, the
+leaderboard attribution headers and the ``/key`` health probe (``/models`` is
+public there and would call any key healthy) are all on this kind's batch
+transcription surface in capabilities.yaml. The model arrives resolved from
+the registry, which for this kind means an id in OpenRouter's ``vendor/model``
+form - a bare OpenAI model name is not a valid id here.
 
 **Re-processing only.** OpenRouter offers no streaming, realtime or websocket
 transcription - a single request/response file upload is the entire API. It is
@@ -26,30 +28,9 @@ from loreline.stt.backends.openai_compat import OpenAICompatBackend
 from loreline.stt.base import secret_for
 from loreline.stt.registry import register
 
-_BASE_URL = "https://openrouter.ai/api/v1"
-# Not /models: verified live, OpenRouter serves its whole catalogue to an
-# anonymous caller (425 models, no Authorization header), so probing it would
-# call any key healthy, including none. /key describes the calling key itself.
-# The chat connector asks the same route for the same reason; see
-# loreline.llm._OPENROUTER_HEALTH_PATH.
-_HEALTH_PATH = "/key"
-
-# Same leaderboard attribution headers the chat and video connectors send.
-_HEADERS = {
-    "HTTP-Referer": "https://github.com/LuckyType/loreline",
-    "X-Title": "Loreline",
-}
-
 
 @register(ProviderKind.OPENROUTER)
 def _factory(  # pyright: ignore[reportUnusedFunction]
     config: ProviderConfig, secrets: SecretStore, model: str | None
 ) -> OpenAICompatBackend:
-    return OpenAICompatBackend(
-        config,
-        model=model,
-        api_key=secret_for(config, secrets),
-        default_base_url=_BASE_URL,
-        extra_headers=_HEADERS,
-        health_path=_HEALTH_PATH,
-    )
+    return OpenAICompatBackend(config, model=model, api_key=secret_for(config, secrets))

@@ -105,7 +105,8 @@ class TestModelResolution:
     def test_openai_batch_ignores_the_realtime_base_url(self, tmp_path: Path) -> None:
         """For the OPENAI kind, base_url has always meant the Realtime WebSocket
         endpoint - handing a wss URL to the HTTP batch connector would fail
-        every request."""
+        every request. The batch surface is declared non-overridable, so the
+        client is built on OpenAI's own base whatever the row says."""
         backend = create_backend(
             _config(
                 ProviderKind.OPENAI,
@@ -115,7 +116,8 @@ class TestModelResolution:
             "whisper-1",
         )
         assert isinstance(backend, OpenAICompatBackend)
-        assert backend.config.base_url is None
+        client = backend._client  # pyright: ignore[reportPrivateUsage]
+        assert str(client.base_url).rstrip("/") == "https://api.openai.com/v1"
 
     def test_gemini_batch_model_resolves(self, tmp_path: Path) -> None:
         backend = create_backend(

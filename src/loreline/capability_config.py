@@ -19,7 +19,9 @@ why every consumer treats a missing entry as "unknown, allow it" rather than
 Three levels, matching the three questions the UI asks:
 
 * provider - what is this vendor for, can it drive a live capture, where does a
-  key come from, is there a catalogue endpoint to call at runtime.
+  key come from, and how each of its surfaces is reached: the URL and the auth
+  scheme per interaction (and per transport for transcription), plus the
+  catalogue to call at runtime, if it publishes one.
 * model - which interactions this specific model serves.
 * capability block - the per-interaction parameter surface: whether glossary
   biasing exists and under which request field, whether reasoning effort may be
@@ -31,6 +33,7 @@ from __future__ import annotations
 
 import fnmatch
 from collections.abc import Iterable
+from enum import StrEnum
 from pathlib import Path
 from typing import Literal, Self
 
@@ -59,6 +62,17 @@ CONFIG_PATH = Path(__file__).with_name("capabilities.yaml")
 # the UI offered "Use glossary", the connector sent the terms alongside a
 # feature the vendor refuses, and every utterance died with a 400.
 CONFLICT_PRECEDENCE = ("glossary", "inline_diarization", "word_timestamps")
+
+# The two ways audio reaches a model. A string literal rather than an enum
+# because it is spelled in the yaml as a key (``surfaces.transcribe.batch``)
+# and as a value (``prefer: batch``), and both read best as the bare word.
+Transport = Literal["realtime", "batch"]
+
+# The placeholder an operator-supplied base URL is spliced into, for a surface
+# that lives on a server only the provider row can name.
+BASE_URL_PLACEHOLDER = "{base_url}"
+_SOCKET_SCHEMES = ("ws://", "wss://")
+_HTTP_SCHEMES = ("http://", "https://")
 
 
 class _Strict(BaseModel):
@@ -139,7 +153,7 @@ class TranscribeCapabilities(_Strict):
     # preference is a fact about the model, so it is written on the model, and
     # the validator below means a new dual-transport entry cannot be added
     # without stating it.
-    prefer: Literal["realtime", "batch"] | None = None
+    prefer: Transport | None = None
     inline_diarization: bool = False
     glossary: GlossarySupport = GlossarySupport()
     word_timestamps: bool = False
@@ -451,6 +465,160 @@ class ModelPattern(_Strict):
         return fnmatch.fnmatch(model_id.lower(), self.match.lower())
 
 
+class AuthScheme(StrEnum):
+    """How a surface wants the credential spelled on the wire.
+
+    A data value, so the yaml can say it and one place can render it. Every
+    vendor here spells it differently: Deepgram wants ``Authorization: Token``,
+    AssemblyAI the bare key with no scheme at all, Google its own header on the
+    native surface and a query parameter on the Live socket, and everything
+    OpenAI-compatible a Bearer token. Sending the wrong spelling is a 401 that
+    reads exactly like a bad key, which is why the spelling travels with the
+    surface rather than being remembered per connector.
+    """
+
+    BEARER = "bearer"
+    TOKEN_HEADER = "token_header"
+    RAW_HEADER = "raw_header"
+    GOOG_HEADER = "goog_header"
+    QUERY_KEY = "query_key"
+    NONE = "none"
+
+    def headers(self, api_key: str | None) -> dict[str, str]:
+        """The request headers that carry ``api_key``, or none without one."""
+        if not api_key:
+            return {}
+        if self is AuthScheme.BEARER:
+            return {"Authorization": f"Bearer {api_key}"}
+        if self is AuthScheme.TOKEN_HEADER:
+            return {"Authorization": f"Token {api_key}"}
+        if self is AuthScheme.RAW_HEADER:
+            return {"Authorization": api_key}
+        if self is AuthScheme.GOOG_HEADER:
+            return {"x-goog-api-key": api_key}
+        return {}
+
+    def query(self, api_key: str | None) -> dict[str, str]:
+        """The query parameters that carry ``api_key``: only the Live socket's."""
+        if self is AuthScheme.QUERY_KEY and api_key:
+            return {"key": api_key}
+        return {}
+
+
+class Surface(_Strict):
+    """How to reach one vendor for one interaction over one transport.
+
+    ``url`` is the address a connector builds on: a base for an HTTP surface
+    (the connector appends its paths), the socket URL for a streaming one, or
+    the whole address for a catalogue. It is absolute, except on a surface an
+    operator has to point somewhere themselves: then it is null, or a template
+    around ``{base_url}``, and ``overridable`` must say so.
+
+    ``overridable`` is whether a provider row's stored ``base_url`` may replace
+    this address. The replacement honours the transport: a WebSocket URL is
+    applied to a socket surface and dropped by an HTTP one (a row whose
+    streaming connector shipped first has always carried the socket address,
+    and handing that to an HTTP client fails every request), and the reverse.
+    """
+
+    url: str | None = None
+    auth: AuthScheme = AuthScheme.BEARER
+    overridable: bool = False
+    # Headers every request to this surface carries besides the credential:
+    # OpenRouter's leaderboard attribution is the one case.
+    headers: dict[str, str] = Field(default_factory=dict[str, str])
+    # The cheap authenticated read a health probe asks of this surface, for the
+    # OpenAI-compatible family whose default ``/models`` is public on some
+    # gateways. Connectors with their own vendor probe do not read it.
+    health: str | None = None
+    # A catalogue that answers without a credential, so a CI run with no
+    # secrets can still read it. A key is still sent when one is around.
+    public: bool = False
+
+    @model_validator(mode="after")
+    def _absolute_unless_operator_supplied(self) -> Self:
+        if self.url is None or BASE_URL_PLACEHOLDER in self.url:
+            if not self.overridable:
+                raise ValueError(
+                    "a surface without a fixed url must be overridable: "
+                    "only the provider row can say where it is"
+                )
+        elif not self.url.lower().startswith(_SOCKET_SCHEMES + _HTTP_SCHEMES):
+            raise ValueError(f"surface url {self.url!r} must be absolute (http(s) or ws(s))")
+        if self.health is not None and not self.health.startswith("/"):
+            raise ValueError(f"health path {self.health!r} must be relative to the surface url")
+        return self
+
+    @property
+    def socket(self) -> bool:
+        """Whether this surface is a WebSocket, as opposed to HTTP."""
+        return bool(self.url) and self.url.lower().startswith(_SOCKET_SCHEMES)
+
+    def resolve(self, base_url: str | None) -> str | None:
+        """The effective address once a provider row's ``base_url`` had its say.
+
+        None means there is nothing to call: the surface has no address of its
+        own and the row supplied none, or supplied one for the other transport.
+        """
+        override = base_url if base_url and self.overridable else None
+        if override and override.lower().startswith(_SOCKET_SCHEMES) == self.socket:
+            if self.url and BASE_URL_PLACEHOLDER in self.url:
+                return self.url.replace(BASE_URL_PLACEHOLDER, override.rstrip("/"))
+            return override
+        if self.url is None or BASE_URL_PLACEHOLDER in self.url:
+            return None
+        return self.url
+
+    def request_headers(self, api_key: str | None) -> dict[str, str]:
+        """The credential in this surface's spelling, plus its fixed headers."""
+        return {**self.auth.headers(api_key), **self.headers}
+
+
+class TranscribeSurfaces(_Strict):
+    """A vendor's transcription surfaces, one per transport it serves."""
+
+    realtime: Surface | None = None
+    batch: Surface | None = None
+
+    @model_validator(mode="after")
+    def _at_least_one_transport(self) -> Self:
+        if self.realtime is None and self.batch is None:
+            raise ValueError("transcribe surfaces must name at least one transport")
+        return self
+
+    def for_transport(self, transport: Transport) -> Surface | None:
+        return self.realtime if transport == "realtime" else self.batch
+
+
+class Surfaces(_Strict):
+    """Every address a vendor is reached at, keyed the way requests are routed.
+
+    Transcription is keyed by transport because the two differ in host,
+    scheme and sometimes auth for one vendor; the other interactions have one
+    surface each. ``catalog`` is where the runtime picker and the staleness
+    check read the vendor's own model list: one surface when it serves every
+    interaction, a mapping when the vendor splits it (OpenRouter's three
+    disjoint lists), absent when this file is the catalogue.
+    """
+
+    transcribe: TranscribeSurfaces | None = None
+    summarize: Surface | None = None
+    video: Surface | None = None
+    catalog: Surface | dict[Interaction, Surface] | None = None
+
+    def for_interaction(self, interaction: Interaction) -> Surface | TranscribeSurfaces | None:
+        if interaction is Interaction.TRANSCRIBE:
+            return self.transcribe
+        if interaction is Interaction.SUMMARIZE:
+            return self.summarize
+        return self.video
+
+    def catalog_for(self, interaction: Interaction) -> Surface | None:
+        if isinstance(self.catalog, Surface):
+            return self.catalog
+        return self.catalog.get(interaction) if self.catalog else None
+
+
 class ProviderSpec(_Strict):
     """One vendor. Exactly one entry per vendor, capabilities as flags."""
 
@@ -459,13 +627,13 @@ class ProviderSpec(_Strict):
     # ``optional`` covers a self-hosted server that may or may not check a key.
     auth: Literal["api_key", "optional", "none"] = "api_key"
     key_url: str | None = None
-    # None means the operator must supply one (self-hosted has no sensible
-    # default and guessing localhost would be a lie).
-    base_url: str | None = None
-    # Runtime model discovery. A bare string when one endpoint serves every
-    # interaction; a mapping when the vendor splits its catalogue, as OpenRouter
-    # does across three disjoint lists. None means this file is the catalogue.
-    catalog_endpoint: str | dict[Interaction, str] | None = None
+    # Environment variables a CI run would find this vendor's key in, for the
+    # staleness check, which runs without stored providers.
+    key_env: list[str] = Field(default_factory=list[str])
+    # Where this vendor is reached, per interaction and transport. This is the
+    # only place an endpoint or an auth scheme is written down; the connectors
+    # read it through loreline.capabilities.surface_for.
+    surfaces: Surfaces
     # False for a provider we allow for stored-audio work but never for a live
     # session. A policy switch, not a technical one: see the OpenRouter note in
     # the yaml.
@@ -473,6 +641,63 @@ class ProviderSpec(_Strict):
     interactions: list[Interaction]
     models: list[ModelSpec] = Field(default_factory=list[ModelSpec])
     model_patterns: list[ModelPattern] = Field(default_factory=list[ModelPattern])
+
+    @model_validator(mode="after")
+    def _surfaces_match_interactions(self) -> Self:
+        """Every declared interaction is reachable, and nothing else is.
+
+        A declared interaction with no surface would fail at request time with
+        a connector that has nowhere to go; a surface for an interaction the
+        provider no longer declares is the stale block left behind by an edit.
+        """
+        for interaction in Interaction:
+            declared = interaction in self.interactions
+            present = self.surfaces.for_interaction(interaction) is not None
+            if declared and not present:
+                raise ValueError(
+                    f"provider {self.label!r} declares {interaction.value} "
+                    f"but has no surfaces.{interaction.value} entry"
+                )
+            if present and not declared:
+                raise ValueError(
+                    f"provider {self.label!r} has a surfaces.{interaction.value} entry "
+                    f"but does not declare {interaction.value}"
+                )
+        catalog = self.surfaces.catalog
+        if isinstance(catalog, dict):
+            extra = sorted(i.value for i in catalog if i not in self.interactions)
+            if extra:
+                raise ValueError(
+                    f"provider {self.label!r} lists a catalog for {', '.join(extra)}, "
+                    "which it does not offer"
+                )
+        return self
+
+    @model_validator(mode="after")
+    def _every_declared_transport_has_a_surface(self) -> Self:
+        """A model may not claim a transport its vendor has no address for.
+
+        Hidden models count too: a config naming one explicitly still routes,
+        and it must route somewhere real.
+        """
+        surfaces = self.surfaces.transcribe
+        entries: list[ModelSpec | ModelPattern] = [*self.models, *self.model_patterns]
+        for entry in entries:
+            caps = entry.transcribe
+            if caps is None:
+                continue
+            name = entry.id if isinstance(entry, ModelSpec) else entry.match
+            served_by: tuple[tuple[Transport, bool], ...] = (
+                ("realtime", caps.realtime),
+                ("batch", caps.batch),
+            )
+            for transport, served in served_by:
+                if served and (surfaces is None or surfaces.for_transport(transport) is None):
+                    raise ValueError(
+                        f"model {name!r} transcribes over {transport} but provider "
+                        f"{self.label!r} declares no surfaces.transcribe.{transport}"
+                    )
+        return self
 
     @model_validator(mode="after")
     def _models_stay_within_provider_interactions(self) -> Self:
@@ -560,6 +785,25 @@ class ProviderSpec(_Strict):
         ]
         entries.extend(p for p in self.model_patterns if interaction in p.interactions)
         return entries
+
+    def surface(
+        self, interaction: Interaction, transport: Transport | None = None
+    ) -> Surface | None:
+        """The declared surface for one interaction, and transport if transcribing.
+
+        None means this vendor is not reached that way at all, which the
+        validators above make the same statement as "does not declare it".
+        """
+        block = self.surfaces.for_interaction(interaction)
+        if isinstance(block, TranscribeSurfaces):
+            return block.for_transport(transport) if transport else None
+        return block
+
+    def catalog(self, interaction: Interaction) -> Surface | None:
+        """Where the vendor's own model list for an interaction is read, or None."""
+        if interaction not in self.interactions:
+            return None
+        return self.surfaces.catalog_for(interaction)
 
 
 class CapabilityConfig(_Strict):

@@ -55,6 +55,7 @@ import {
 	interactionsFor,
 	isHiddenModel,
 	reasoningEffortsFor,
+	requiresBaseUrl,
 } from '$lib/capabilities.svelte'
 import {
 	providersFor,
@@ -121,8 +122,8 @@ const catalog = $derived(
 	(Object.keys(PRESENTATION) as ProviderKind[]).map((kind): ProviderChoice => {
 		const spec = capabilities.provider(kind)
 		const copy = PRESENTATION[kind]
-		// A base URL the config leaves null is one only the operator can supply.
-		const needsBaseUrl = spec ? spec.base_url === null : !!copy.baseUrlPlaceholder
+		// A surface the config leaves without an address is one only the operator can supply.
+		const needsBaseUrl = spec ? requiresBaseUrl(spec) : !!copy.baseUrlPlaceholder
 		return {
 			kind,
 			label: spec?.label ?? kind,

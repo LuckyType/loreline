@@ -126,7 +126,7 @@ async def gather_probes(
 
     async def run(kind: ProviderKind, interactions: list[Interaction]) -> list[CatalogProbe]:
         spec = config.providers[kind]
-        api_key = (credentials or {}).get(kind) or credential_from_env(kind)
+        api_key = (credentials or {}).get(kind) or credential_from_env(spec)
         first = await probe(
             kind,
             interactions[0],

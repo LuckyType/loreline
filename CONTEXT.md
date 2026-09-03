@@ -23,6 +23,12 @@ _Avoid_: protocol (that is `Protocol`, the wire enum on a ProviderConfig)
 **ProviderConfig**: One stored provider row a GM configured: a kind, a
 credential reference, an optional base URL and language.
 
+**Surface**: How to reach a vendor for one interaction over one transport:
+the URL and the auth scheme, declared once in the yaml under the provider,
+optionally overridable by the provider row's base URL. A request's surface
+follows the model's chosen transport, never the vendor as a whole.
+_Avoid_: endpoint constant, default base URL (each was one connector's copy)
+
 **ModelSpec / TranscribeCapabilities**: One curated model and its transcription
 surface: transports served, speakers, word timings, glossary ceiling.
 

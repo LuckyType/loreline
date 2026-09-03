@@ -29,11 +29,20 @@ which is what keeps this file from becoming a gate on what an operator may run.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from functools import lru_cache
+from urllib.parse import urlencode
 
-from loreline.capability_config import CapabilityConfig, ModelPattern, ModelSpec, ProviderSpec
+from loreline.capability_config import (
+    CapabilityConfig,
+    ModelPattern,
+    ModelSpec,
+    ProviderSpec,
+    Surface,
+    Transport,
+)
 from loreline.capability_config import load as _load_config
-from loreline.models import Interaction, ModelInfo, ProviderKind
+from loreline.models import Interaction, ModelInfo, ProviderConfig, ProviderKind
 
 
 @lru_cache(maxsize=1)
@@ -54,6 +63,92 @@ def reload() -> CapabilityConfig:
 
 def _provider(kind: ProviderKind) -> ProviderSpec | None:
     return config().provider(kind)
+
+
+@dataclass(frozen=True, slots=True)
+class Endpoint:
+    """A surface after the provider row had its say: the address is final.
+
+    What a connector builds its client on. ``url`` is never None here, which
+    is the whole difference from :class:`Surface`: a surface may leave the
+    address to the operator, an endpoint is one that has it.
+    """
+
+    url: str
+    surface: Surface
+
+    @property
+    def health(self) -> str | None:
+        """The probe path the surface declares, if it declares one."""
+        return self.surface.health
+
+    def request_headers(self, api_key: str | None) -> dict[str, str]:
+        """The credential in this surface's spelling, plus its fixed headers."""
+        return self.surface.request_headers(api_key)
+
+    def url_with_key(self, api_key: str | None) -> str:
+        """The address with the credential in its query string, where that is
+        how the surface authenticates (Gemini's Live socket); else the address."""
+        query = self.surface.auth.query(api_key)
+        if not query:
+            return self.url
+        separator = "&" if "?" in self.url else "?"
+        return f"{self.url}{separator}{urlencode(query)}"
+
+
+def surface(
+    kind: ProviderKind, interaction: Interaction, transport: Transport | None = None
+) -> Surface | None:
+    """The declared surface for one kind, interaction and transport, or None.
+
+    The declaration as written, before any provider row's override. Callers
+    building a client want :func:`surface_for`; this is for the readers that
+    have no row in hand.
+    """
+    spec = _provider(kind)
+    return spec.surface(interaction, transport) if spec else None
+
+
+def surface_for(
+    config: ProviderConfig, interaction: Interaction, transport: Transport | None = None
+) -> Endpoint:
+    """The endpoint a provider row reaches for one interaction and transport.
+
+    Applies the row's ``base_url`` where the surface allows it (see
+    :meth:`Surface.resolve` for the transport rule), and raises ``ValueError``
+    when there is nothing to call: the kind declares no such surface, or the
+    surface is one only the operator can locate and the row names no address.
+    Raising is right here: a connector with nowhere to post is a configuration
+    error, and the message names the missing piece rather than letting a
+    request fail against a URL nobody chose.
+    """
+    spec = _provider(config.kind)
+    declared = spec.surface(interaction, transport) if spec else None
+    if spec is None or declared is None:
+        where = f"{interaction.value} over {transport}" if transport else interaction.value
+        raise ValueError(f"{config.kind.value} declares no surface for {where}")
+    url = declared.resolve(config.base_url)
+    if url is None:
+        raise ValueError(f"{spec.label} needs a base URL to {interaction.value}")
+    return Endpoint(url, declared)
+
+
+def catalog_for(
+    kind: ProviderKind, interaction: Interaction, *, base_url: str | None = None
+) -> Endpoint | None:
+    """Where a kind's own model list for an interaction is read, or None.
+
+    None is a normal answer, not an error: the vendor publishes no list for
+    this interaction, or the list lives on a server whose address only the
+    operator knows and ``base_url`` did not supply it. Callers fall back to
+    the curated models in the file.
+    """
+    spec = _provider(kind)
+    declared = spec.catalog(interaction) if spec else None
+    if declared is None:
+        return None
+    url = declared.resolve(base_url)
+    return Endpoint(url, declared) if url else None
 
 
 def interactions_for(kind: ProviderKind) -> frozenset[Interaction]:

@@ -44,28 +44,21 @@ import httpx
 
 from loreline.audio.chunker import Utterance
 from loreline.audio.wav import pcm_to_wav
+from loreline.capabilities import surface_for
 from loreline.health import HealthReport, probe_endpoint
 from loreline.logging import get_logger
-from loreline.models import Glossary, ProviderConfig, ProviderKind
+from loreline.models import Glossary, Interaction, ProviderConfig, ProviderKind
 from loreline.secrets import SecretStore
-from loreline.stt.backends._assemblyai import auth_headers, glossary_for, parse_words
+from loreline.stt.backends._assemblyai import glossary_for, parse_words
 from loreline.stt.backends._ws import as_obj_dict, get_str
-from loreline.stt.base import (
-    HttpConnector,
-    Transcription,
-    glossary_terms,
-    http_base_url,
-    secret_for,
-)
+from loreline.stt.base import HttpConnector, Transcription, glossary_terms, secret_for
 from loreline.stt.registry import register
 
 log = get_logger(__name__)
 
-# REST host. The streaming connector's default is a different host entirely
-# (wss://streaming.assemblyai.com), which is why a stored base_url meant for it
-# is dropped rather than reused. EU accounts use https://api.eu.assemblyai.com,
-# which an operator sets as the provider's base_url.
-_DEFAULT_BASE_URL = "https://api.assemblyai.com"
+# Paths under the REST host declared as this kind's batch surface. The
+# streaming surface is a different host entirely, which is why a stored
+# base_url meant for it never reaches this connector (see Surface.resolve).
 _UPLOAD_PATH = "/v2/upload"
 _TRANSCRIPT_PATH = "/v2/transcript"
 # Per-request HTTP timeout. Generous for the upload of an utterance-sized WAV;
@@ -109,11 +102,12 @@ class AssemblyAIBatchBackend(HttpConnector[list[str]]):
         poll_max_s: float = _POLL_MAX_S,
         job_timeout_s: float = _JOB_TIMEOUT_S,
     ) -> None:
+        endpoint = surface_for(config, Interaction.TRANSCRIBE, "batch")
         super().__init__(
             config,
             client=client,
-            base_url=http_base_url(config.base_url) or _DEFAULT_BASE_URL,
-            headers=auth_headers(api_key),
+            base_url=endpoint.url,
+            headers=endpoint.request_headers(api_key),
             timeout=_TIMEOUT_S,
         )
         self._language = language or config.language

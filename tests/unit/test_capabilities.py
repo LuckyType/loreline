@@ -7,11 +7,14 @@ with and only discover the mistake when the job failed.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 
-from loreline import capabilities
+from loreline import capabilities, capability_config
 from loreline.capabilities import (
+    catalog_for,
     config,
     curated_models,
     default_diarizing_model,
@@ -24,9 +27,11 @@ from loreline.capabilities import (
     supports_inline_diarization,
     supports_live_capture,
     supports_realtime,
+    surface,
+    surface_for,
 )
 from loreline.capability_config import CapabilityConfig, ModelSpec, TranscribeCapabilities
-from loreline.models import Interaction, ModelInfo, ProviderKind
+from loreline.models import Interaction, ModelInfo, Protocol, ProviderConfig, ProviderKind
 
 
 class TestCapabilityTable:
@@ -515,3 +520,171 @@ class TestGeminiSummarizeEfforts:
         the model ever sees the request."""
         for model_id in ("gemini-3.8-flash", "gemini-3.5-flash", "gemini-3.1-pro-preview"):
             assert not {"xhigh", "max"} & set(self._efforts(model_id))
+
+
+def _row(kind: ProviderKind, base_url: str | None = None) -> ProviderConfig:
+    return ProviderConfig(
+        id="p1", name="Row", kind=kind, protocol=Protocol.HTTP_BATCH, base_url=base_url
+    )
+
+
+class TestSurfaces:
+    """Where a request goes follows the surface its transport uses.
+
+    The endpoints and auth schemes used to be fourteen constants across twelve
+    modules, and each connector applied a provider row's base_url by its own
+    rule. These pin the one accessor that replaced them: the declared surface,
+    the row's override, and the credential spelled the way that surface wants.
+    """
+
+    def test_the_declared_surface_is_read_per_transport(self) -> None:
+        realtime = surface(ProviderKind.DEEPGRAM, Interaction.TRANSCRIBE, "realtime")
+        batch = surface(ProviderKind.DEEPGRAM, Interaction.TRANSCRIBE, "batch")
+        assert realtime is not None and realtime.url == "wss://api.deepgram.com/v1/listen"
+        assert batch is not None and batch.url == "https://api.deepgram.com"
+        # A transcription surface is not one thing, so the bare interaction has
+        # no answer; a kind that does not serve an interaction has none either.
+        assert surface(ProviderKind.DEEPGRAM, Interaction.TRANSCRIBE) is None
+        assert surface(ProviderKind.DEEPGRAM, Interaction.SUMMARIZE) is None
+        assert surface(ProviderKind.OPENROUTER, Interaction.TRANSCRIBE, "realtime") is None
+
+    def test_gemini_reaches_two_different_google_surfaces(self) -> None:
+        """The native base serves transcription and Google's OpenAI-compatible
+        shim serves chat; neither answers the other's requests, and the two
+        differ in auth as well. One vendor, two surfaces, which is the reason
+        this is declared per interaction rather than per vendor."""
+        native = surface_for(_row(ProviderKind.GEMINI), Interaction.TRANSCRIBE, "batch")
+        shim = surface_for(_row(ProviderKind.GEMINI), Interaction.SUMMARIZE)
+        assert native.url == "https://generativelanguage.googleapis.com/v1beta"
+        assert shim.url == "https://generativelanguage.googleapis.com/v1beta/openai"
+        assert native.request_headers("k") == {"x-goog-api-key": "k"}
+        assert shim.request_headers("k") == {"Authorization": "Bearer k"}
+
+    def test_the_live_socket_carries_the_key_in_its_query_string(self) -> None:
+        live = surface_for(_row(ProviderKind.GEMINI), Interaction.TRANSCRIBE, "realtime")
+        assert live.request_headers("k") == {}
+        assert live.url_with_key("k") == f"{live.url}?key=k"
+        assert live.url_with_key(None) == live.url
+        # A socket whose address already carries a query keeps it.
+        realtime = surface_for(_row(ProviderKind.OPENAI), Interaction.TRANSCRIBE, "realtime")
+        assert realtime.url_with_key("k") == realtime.url  # bearer: nothing added
+        assert "?intent=transcription" in realtime.url
+
+    @pytest.mark.parametrize(
+        ("kind", "headers"),
+        [
+            (ProviderKind.DEEPGRAM, {"Authorization": "Token k"}),
+            (ProviderKind.ASSEMBLYAI, {"Authorization": "k"}),
+            (ProviderKind.OPENAI, {"Authorization": "Bearer k"}),
+            (
+                ProviderKind.OPENROUTER,
+                {
+                    "Authorization": "Bearer k",
+                    "HTTP-Referer": "https://github.com/LuckyType/loreline",
+                    "X-Title": "Loreline",
+                },
+            ),
+        ],
+    )
+    def test_batch_transcription_spells_the_credential_per_vendor(
+        self, kind: ProviderKind, headers: dict[str, str]
+    ) -> None:
+        endpoint = surface_for(_row(kind), Interaction.TRANSCRIBE, "batch")
+        assert endpoint.request_headers("k") == headers
+
+    def test_openrouter_probes_its_key_route_and_the_rest_default(self) -> None:
+        """OpenRouter serves its catalogue to anonymous callers, so a /models
+        probe would call any key healthy; /key describes the calling key."""
+        chat = surface_for(_row(ProviderKind.OPENROUTER), Interaction.SUMMARIZE)
+        assert chat.health == "/key"
+        assert surface_for(_row(ProviderKind.OPENAI), Interaction.SUMMARIZE).health is None
+
+    def test_a_row_address_reaches_the_surface_of_its_own_transport(self) -> None:
+        """The stored base_url of a kind whose streaming connector shipped
+        first is the socket; the batch surface must not inherit it."""
+        row = _row(ProviderKind.DEEPGRAM, base_url="ws://127.0.0.1:9")
+        assert surface_for(row, Interaction.TRANSCRIBE, "realtime").url == "ws://127.0.0.1:9"
+        assert surface_for(row, Interaction.TRANSCRIBE, "batch").url == "https://api.deepgram.com"
+        eu = _row(ProviderKind.ASSEMBLYAI, base_url="https://api.eu.assemblyai.com")
+        assert (
+            surface_for(eu, Interaction.TRANSCRIBE, "batch").url == "https://api.eu.assemblyai.com"
+        )
+        assert (
+            surface_for(eu, Interaction.TRANSCRIBE, "realtime").url
+            == "wss://streaming.assemblyai.com/v3/ws"
+        )
+
+    def test_openai_batch_transcription_refuses_any_row_address(self) -> None:
+        """A base_url on an OpenAI row has only ever meant its Realtime socket;
+        the openai_compat kind is the way to a custom batch endpoint."""
+        row = _row(ProviderKind.OPENAI, base_url="https://proxy.invalid/v1")
+        assert surface_for(row, Interaction.TRANSCRIBE, "batch").url == "https://api.openai.com/v1"
+        assert surface_for(row, Interaction.SUMMARIZE).url == "https://proxy.invalid/v1"
+
+    def test_the_self_hosted_kind_is_wherever_the_row_says(self) -> None:
+        row = _row(ProviderKind.OPENAI_COMPAT, base_url="http://speaches:8000/v1")
+        assert surface_for(row, Interaction.TRANSCRIBE, "batch").url == "http://speaches:8000/v1"
+        assert surface_for(row, Interaction.SUMMARIZE).url == "http://speaches:8000/v1"
+        assert surface_for(row, Interaction.SUMMARIZE).request_headers(None) == {}
+
+    def test_the_self_hosted_kind_without_an_address_is_an_error_not_a_guess(self) -> None:
+        """There is no sensible default for someone else's server, and posting
+        to OpenAI with a self-hosted row's key would be worse than failing."""
+        with pytest.raises(ValueError, match="needs a base URL to transcribe"):
+            surface_for(_row(ProviderKind.OPENAI_COMPAT), Interaction.TRANSCRIBE, "batch")
+
+    def test_an_interaction_the_kind_does_not_serve_is_an_error(self) -> None:
+        with pytest.raises(ValueError, match="deepgram declares no surface for summarize"):
+            surface_for(_row(ProviderKind.DEEPGRAM), Interaction.SUMMARIZE)
+        with pytest.raises(ValueError, match="no surface for transcribe over realtime"):
+            surface_for(_row(ProviderKind.OPENROUTER), Interaction.TRANSCRIBE, "realtime")
+
+    def test_catalogues_are_read_where_the_vendor_publishes_them(self) -> None:
+        """OpenRouter splits its list three ways; OpenAI serves one list for
+        both its interactions; AssemblyAI publishes none; the self-hosted
+        server's list is beside whatever base the row names."""
+        transcribe = catalog_for(ProviderKind.OPENROUTER, Interaction.TRANSCRIBE)
+        video = catalog_for(ProviderKind.OPENROUTER, Interaction.VIDEO)
+        assert transcribe is not None and transcribe.url.endswith(
+            "?output_modalities=transcription"
+        )
+        assert video is not None and video.url.endswith("/videos/models")
+        openai = catalog_for(ProviderKind.OPENAI, Interaction.SUMMARIZE)
+        assert openai is not None and openai.url == "https://api.openai.com/v1/models"
+        assert catalog_for(ProviderKind.ASSEMBLYAI, Interaction.TRANSCRIBE) is None
+        assert catalog_for(ProviderKind.OPENAI_COMPAT, Interaction.TRANSCRIBE) is None
+        local = catalog_for(
+            ProviderKind.OPENAI_COMPAT, Interaction.TRANSCRIBE, base_url="http://x:8000/v1"
+        )
+        assert local is not None and local.url == "http://x:8000/v1/models"
+        # A cloud catalogue is not moved by a row address.
+        assert (
+            catalog_for(ProviderKind.OPENAI, Interaction.SUMMARIZE, base_url="http://x") == openai
+        )
+        # Not offered means not catalogued, whatever the shared surface says.
+        assert catalog_for(ProviderKind.OPENAI, Interaction.VIDEO) is None
+
+    def test_reload_picks_up_a_changed_surface(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Surfaces are read from the file like everything else in it."""
+        shipped = capability_config.CONFIG_PATH.read_text(encoding="utf-8")
+        moved = shipped.replace(
+            'batch: {url: "https://api.deepgram.com", auth: token_header, overridable: true}',
+            'batch: {url: "https://dg.example.invalid", auth: token_header, overridable: true}',
+        )
+        assert moved != shipped
+        edited = tmp_path / "capabilities.yaml"
+        edited.write_text(moved, encoding="utf-8")
+        monkeypatch.setattr(capability_config, "CONFIG_PATH", edited)
+        try:
+            capabilities.reload()
+            batch = surface_for(_row(ProviderKind.DEEPGRAM), Interaction.TRANSCRIBE, "batch")
+            assert batch.url == "https://dg.example.invalid"
+        finally:
+            monkeypatch.undo()
+            capabilities.reload()
+        assert (
+            surface_for(_row(ProviderKind.DEEPGRAM), Interaction.TRANSCRIBE, "batch").url
+            == "https://api.deepgram.com"
+        )

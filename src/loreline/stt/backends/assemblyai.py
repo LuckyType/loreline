@@ -24,11 +24,12 @@ from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosedOK, WebSocketException
 
 from loreline.audio.chunker import Utterance
+from loreline.capabilities import surface_for
 from loreline.health import PROBE_TIMEOUT_S, HealthReport, HealthStatus
 from loreline.logging import get_logger
-from loreline.models import Glossary, ProviderConfig, ProviderKind, Word
+from loreline.models import Glossary, Interaction, ProviderConfig, ProviderKind, Word
 from loreline.secrets import SecretStore
-from loreline.stt.backends._assemblyai import auth_headers, glossary_for, parse_words
+from loreline.stt.backends._assemblyai import glossary_for, parse_words
 from loreline.stt.backends._ws import (
     as_dict,
     classify_handshake_error,
@@ -42,7 +43,6 @@ from loreline.stt.registry import register
 
 log = get_logger(__name__)
 
-_DEFAULT_URL = "wss://streaming.assemblyai.com/v3/ws"
 # The v3 endpoint rejects any single audio message outside 50-1000 ms (close
 # code 3007), so utterances are re-chunked before sending.
 _CHUNK_MS = 800
@@ -67,7 +67,8 @@ class AssemblyAIBackend(Connector[str]):
         self._api_key = api_key
         self._model = model
         self._language = config.language
-        self._url = config.base_url or _DEFAULT_URL
+        self._endpoint = surface_for(config, Interaction.TRANSCRIBE, "realtime")
+        self._url = self._endpoint.url
 
     def prepare(self, glossary: Glossary | None) -> str:
         params: list[tuple[str, str]] = [
@@ -95,7 +96,7 @@ class AssemblyAIBackend(Connector[str]):
 
     @property
     def _headers(self) -> dict[str, str]:
-        return auth_headers(self._api_key)
+        return self._endpoint.request_headers(self._api_key)
 
     async def transcribe_one(self, utterance: Utterance, prepared: str) -> Transcription:
         # One session per utterance, closed with Terminate: that is the only
