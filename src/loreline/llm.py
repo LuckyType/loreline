@@ -2,7 +2,8 @@
 
 Talks to any OpenAI-compatible chat endpoint (OpenAI cloud, OpenRouter, Ollama,
 LM Studio, vLLM, …) via ``POST /chat/completions``. A single connector covers
-them all; only the ``base_url`` and the API key differ per kind, and the model
+them all; what differs per kind (the base, the attribution headers, the probe
+path) is the kind's ``summarize`` surface in capabilities.yaml, and the model
 comes from the request (see :func:`summarize_transcript`).
 """
 
@@ -16,50 +17,23 @@ import httpx
 from openrouter.components.chatrequest import ChatRequestReasoning
 from openrouter.components.providerpreferences import ProviderPreferences
 
-from loreline.capabilities import kinds_for
-from loreline.health import HealthReport, error_body, error_detail, probe_endpoint
+from loreline.capabilities import Endpoint, kinds_for, surface_for
+from loreline.health import HealthReport, HealthStatus, error_body, error_detail, probe_endpoint
 from loreline.logging import get_logger
 from loreline.models import Interaction, OpenRouterRouting, ProviderConfig, ProviderKind
 
 log = get_logger(__name__)
 
-_DEFAULT_BASE_URL = "https://api.openai.com/v1"
-_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-# Google's OpenAI-compatible shim. It is a sibling path of the native REST base
-# the STT connector talks to (".../v1beta"), not the same URL: verified against
-# the live API, ".../v1beta/openai" answers both GET /models and
-# POST /chat/completions, while the native base answers neither. The two
-# connectors therefore each apply their own default, which works because the
-# settings UI offers no base_url field for a cloud kind (see the provider form:
-# the input appears only where capabilities.yaml records base_url: null), so a
-# stored Gemini config carries none for either to collide over.
-# Auth is the plain `Authorization: Bearer <key>` header this module already
-# sends; the `x-goog-api-key` header is the native surface's spelling.
-_GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai"
-# Kinds whose chat endpoint is not OpenAI's. Everything else defaults to OpenAI.
-_BASE_URLS: dict[ProviderKind, str] = {
-    ProviderKind.OPENROUTER: _OPENROUTER_BASE_URL,
-    ProviderKind.GEMINI: _GEMINI_BASE_URL,
-}
 _TIMEOUT_S = 120.0
-# OpenRouter's /models is public: it answers with the full catalogue and no
-# Authorization header at all, so grading it can never tell a good key from a
-# bad one. /key describes the calling key itself and 401s when there is none.
-# https://openrouter.ai/docs/api-reference/limits
-_OPENROUTER_HEALTH_PATH = "/key"
+# The health probe where the surface names none: free, exercises the key and
+# implemented by every OpenAI-compatible server. OpenRouter's surface names
+# /key instead, its /models being public.
+_DEFAULT_HEALTH_PATH = "/models"
 
 # Provider kinds that summarize, i.e. speak chat-completions rather than STT.
 # Derived from the one capability table rather than re-listed here - see
 # loreline.capabilities.kinds_for.
 LLM_KINDS = kinds_for(Interaction.SUMMARIZE)
-
-# OpenRouter credits the calling app on its public leaderboards through these
-# two optional headers; they are meaningless to every other endpoint, so they
-# only go out for that kind.
-_OPENROUTER_HEADERS = {
-    "HTTP-Referer": "https://github.com/LuckyType/loreline",
-    "X-Title": "Loreline",
-}
 
 # Built-in summary instructions. The settings UI exposes an editable copy of
 # this (kv `action_defaults.summarize_prompt`); a blank stored value falls back
@@ -90,11 +64,6 @@ ClientFactory = Callable[[], httpx.AsyncClient]
 
 class LLMError(Exception):
     """The upstream chat-completions call failed (bad model, bad key, rate limit, …)."""
-
-
-def default_base_url(kind: ProviderKind) -> str:
-    """Endpoint an LLM kind talks to when its config names no ``base_url``."""
-    return _BASE_URLS.get(kind, _DEFAULT_BASE_URL)
 
 
 def routing_payload(config: ProviderConfig) -> dict[str, object] | None:
@@ -157,16 +126,25 @@ def apply_reasoning_effort(
         payload["reasoning_effort"] = effort
 
 
+def _chat_surface(config: ProviderConfig) -> Endpoint:
+    """This row's chat endpoint: the kind's summarize surface, its base applied.
+
+    Gemini is the reason this is per surface and not per vendor: its chat
+    lives on Google's OpenAI-compatible shim (".../v1beta/openai", Bearer
+    auth), a sibling of the native base the transcription connector posts to,
+    and neither answers the other's requests.
+    """
+    return surface_for(config, Interaction.SUMMARIZE)
+
+
 def _client(
-    config: ProviderConfig, api_key: str | None, factory: ClientFactory | None
+    endpoint: Endpoint, api_key: str | None, factory: ClientFactory | None
 ) -> httpx.AsyncClient:
     if factory is not None:
         return factory()
-    base_url = config.base_url or default_base_url(config.kind)
-    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-    if config.kind is ProviderKind.OPENROUTER:
-        headers.update(_OPENROUTER_HEADERS)
-    return httpx.AsyncClient(base_url=base_url, headers=headers, timeout=_TIMEOUT_S)
+    return httpx.AsyncClient(
+        base_url=endpoint.url, headers=endpoint.request_headers(api_key), timeout=_TIMEOUT_S
+    )
 
 
 async def summarize_transcript(
@@ -212,7 +190,13 @@ async def summarize_transcript(
     routing = routing_payload(config)
     if routing is not None:
         payload["provider"] = routing
-    client = _client(config, api_key, client_factory)
+    try:
+        endpoint = _chat_surface(config)
+    except ValueError as exc:
+        # A self-hosted row with no base URL: nowhere to post, and the message
+        # says what to configure.
+        raise LLMError(str(exc)) from exc
+    client = _client(endpoint, api_key, client_factory)
     try:
         response = await _post_completion(client, payload)
         if _rejects_parameter(response, "temperature"):
@@ -268,7 +252,8 @@ async def chat_health(
     the exception: it serves its catalogue to anonymous callers (verified live,
     425 models with no ``Authorization`` header at all), so asking it proves
     only that openrouter.ai is up. ``GET /key`` there describes the calling key
-    itself and 401s without one, which is the question actually being asked.
+    itself and 401s without one, which is the question actually being asked;
+    its summarize surface in capabilities.yaml says so.
 
     This used to return a bool from ``status_code < 500``, and was wrong for
     every kind here: a corrupted Google key (400), a corrupted OpenAI key
@@ -276,16 +261,16 @@ async def chat_health(
     path (404) all came back healthy. See :mod:`loreline.health` for the
     grading that replaces it.
     """
-    client = _client(config, api_key, client_factory)
     try:
-        return await probe_endpoint(client, _health_path(config.kind))
+        endpoint = _chat_surface(config)
+    except ValueError as exc:
+        # Nothing was probed, and the message names the missing base URL.
+        return HealthReport(HealthStatus.UNKNOWN, str(exc))
+    client = _client(endpoint, api_key, client_factory)
+    try:
+        return await probe_endpoint(client, endpoint.health or _DEFAULT_HEALTH_PATH)
     finally:
         await client.aclose()
-
-
-def _health_path(kind: ProviderKind) -> str:
-    """The cheapest read that actually exercises this kind's credential."""
-    return _OPENROUTER_HEALTH_PATH if kind is ProviderKind.OPENROUTER else "/models"
 
 
 def _parse_completion(payload: object) -> str:

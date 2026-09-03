@@ -128,16 +128,50 @@ export interface ModelPattern {
 
 export type ModelAnnotation = ModelSpec | ModelPattern
 
+/** How a surface wants the credential spelled on the wire. */
+export type AuthScheme =
+	| 'bearer'
+	| 'token_header'
+	| 'raw_header'
+	| 'goog_header'
+	| 'query_key'
+	| 'none'
+
+/** How to reach a vendor for one interaction over one transport. A null url
+ *  (or a `{base_url}` template) is an address only the operator can supply,
+ *  through the provider row's base_url. */
+export interface Surface {
+	url: string | null
+	auth: AuthScheme
+	overridable: boolean
+	headers: Record<string, string>
+	health: string | null
+	public: boolean
+}
+
+export interface TranscribeSurfaces {
+	realtime: Surface | null
+	batch: Surface | null
+}
+
+export interface Surfaces {
+	transcribe: TranscribeSurfaces | null
+	summarize: Surface | null
+	video: Surface | null
+	/** One surface when it serves every interaction, a mapping when the
+	 *  vendor splits its catalogue, null when the config is the catalogue. */
+	catalog: Surface | Partial<Record<Interaction, Surface>> | null
+}
+
 export interface ProviderSpec {
 	label: string
 	hosting: Hosting
 	auth: AuthKind
 	key_url: string | null
-	/** Null means the operator must supply one (self-hosted). */
-	base_url: string | null
-	/** A string when one endpoint serves every interaction, a mapping when the
-	 *  vendor splits its catalogue, null when the config is the catalogue. */
-	catalog_endpoint: string | Partial<Record<Interaction, string>> | null
+	/** Environment variables a CI run finds the vendor's key in. */
+	key_env: string[]
+	/** Where the vendor is reached, per interaction and transport. */
+	surfaces: Surfaces
 	/** False for a provider allowed for stored audio but never a live session. */
 	live_capture: boolean
 	interactions: Interaction[]

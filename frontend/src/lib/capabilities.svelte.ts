@@ -96,6 +96,14 @@ class CapabilityStore {
 
 export const capabilities = new CapabilityStore()
 
+/** Whether a kind's connectors have no address of their own, so the provider
+ *  row must carry one: true for the self-hosted kind and nothing else. */
+export function requiresBaseUrl(spec: ProviderSpec): boolean {
+	const { transcribe, summarize, video } = spec.surfaces
+	const surfaces = [transcribe?.realtime, transcribe?.batch, summarize, video]
+	return surfaces.some((s) => s != null && s.url === null)
+}
+
 /** Kick off the one shared fetch; safe to call from anywhere, any number of times. */
 export function loadCapabilities(): Promise<void> {
 	return capabilities.load()

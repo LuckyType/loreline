@@ -1,9 +1,12 @@
 """List the models a provider offers, for the on-demand model pickers.
 
 OpenAI-compatible endpoints (OpenAI cloud, OpenRouter, Speaches, Ollama, LM Studio,
-…) expose ``GET /v1/models``; the others (Deepgram, AssemblyAI, Gemini) don't, so
-capabilities.yaml is the fallback catalogue. Best-effort: a failed live fetch
-falls back to the curated list (or an empty list).
+…) expose ``GET /v1/models`` in one shape, which is fetched live from the
+kind's ``catalog`` surface in capabilities.yaml; the other kinds' pickers are
+the curated lists. (Deepgram and Gemini publish catalogues too, and the
+staleness check reads them, but not in a shape this app offers models from.)
+Best-effort: a failed live fetch falls back to the curated list (or an empty
+list).
 
 This module decides *where* a list comes from, never *which models are in it*.
 That second question has exactly one answer, capabilities.yaml, read here through
@@ -23,6 +26,8 @@ from typing import cast
 import httpx
 
 from loreline.capabilities import (
+    Endpoint,
+    catalog_for,
     curated_models,
     filter_models,
     is_realtime_model,
@@ -33,22 +38,13 @@ from loreline.models import Interaction, ModelInfo, ModelPrice, ProviderKind
 
 log = get_logger(__name__)
 
-_OPENAI_BASE = "https://api.openai.com/v1"
-_OPENROUTER_BASE = "https://openrouter.ai/api/v1"
-_LIVE_KINDS = {
-    ProviderKind.OPENAI,
-    ProviderKind.OPENAI_COMPAT,
-    ProviderKind.OPENROUTER,
-}
-
-# OpenRouter serves a different catalogue per interaction, so the right one is
-# fetched rather than filtering a mixed list after the fact - its chat and
-# transcription model sets are disjoint, and video lives on its own endpoint
-# entirely (see loreline.video.client.list_video_models).
-_OPENROUTER_KINDS = {ProviderKind.OPENROUTER}
-_OPENROUTER_TRANSCRIBE_QUERY = "?output_modalities=transcription"
-# Kinds whose base URL is user-supplied (self-hostable), falling back to the kind's own cloud.
-_CUSTOM_BASE_KINDS = {ProviderKind.OPENAI_COMPAT}
+# Kinds whose catalogue body is OpenAI's ``{"data": [{"id": ...}]}`` shape,
+# which is the one :func:`_parse_models` reads. Wire behaviour, not an
+# address: where each catalogue lives, and how it is authenticated, is the
+# kind's ``catalog`` surface in capabilities.yaml.
+_OPENAI_SHAPED = frozenset(
+    {ProviderKind.OPENAI, ProviderKind.OPENAI_COMPAT, ProviderKind.OPENROUTER}
+)
 
 ClientFactory = Callable[[], httpx.AsyncClient]
 
@@ -75,13 +71,22 @@ async def list_models(
     (OpenRouter does; plain OpenAI ``/models`` and the curated lists do not) -
     everything past ``id`` is optional, so a caller can always just read ids.
     """
-    # Video has its own catalogue on a separate endpoint; the plain /models
-    # list is the chat one, so falling through to it here would offer chat
-    # models for video generation.
+    # Where the vendor publishes its list for this interaction: OpenRouter
+    # splits its catalogue three ways (its chat and transcription sets are
+    # disjoint, and video lives on its own endpoint entirely), OpenAI serves
+    # one list for everything, the self-hosted server's list sits beside
+    # whatever base the row names. None means nothing to fetch.
+    catalogue = catalog_for(kind, interaction, base_url=base_url)
     if interaction is Interaction.VIDEO:
-        return await _fetch_video_models(kind, base_url, api_key, client_factory)
-    if kind in _LIVE_KINDS:
-        live = await _fetch_openai_models(kind, base_url, api_key, interaction, client_factory)
+        # Bare ids for a picker; the rich per-model parameters come from
+        # loreline.video.client.list_video_models, which the generate dialog
+        # reads directly. No curated fallback: a kind with no video catalogue
+        # generates no video.
+        if catalogue is None:
+            return []
+        return await _fetch(catalogue, api_key, client_factory, event="models.video_fetch.failed")
+    if kind in _OPENAI_SHAPED and catalogue is not None:
+        live = await _fetch(catalogue, api_key, client_factory, event="models.fetch.failed")
         if live:
             narrowed = filter_models(
                 live, kind=kind, interaction=interaction, strict=strict_filtering
@@ -118,57 +123,22 @@ def _annotate(
     ]
 
 
-async def _fetch_video_models(
-    kind: ProviderKind,
-    base_url: str | None,
+async def _fetch(
+    catalogue: Endpoint,
     api_key: str | None,
     client_factory: ClientFactory | None,
+    *,
+    event: str,
 ) -> list[ModelInfo]:
-    """Video models, as bare ids for a picker.
-
-    The rich per-model capability data (durations, resolutions, whether it can
-    generate audio) comes from loreline.video.client.list_video_models, which
-    the generate dialog consumes directly. This is the id-only view the generic
-    models route serves, so a picker does not have to know about two endpoints.
-    """
-    if kind not in _OPENROUTER_KINDS:
-        return []
-    base = (base_url or _OPENROUTER_BASE).rstrip("/")
-    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    """One catalogue, read fail soft: a vendor that is down yields nothing."""
     factory = client_factory or (lambda: httpx.AsyncClient(timeout=15.0))
     try:
         async with factory() as client:
-            response = await client.get(f"{base}/videos/models", headers=headers)
+            response = await client.get(catalogue.url, headers=catalogue.request_headers(api_key))
             response.raise_for_status()
             return _parse_models(response.json())
     except (httpx.HTTPError, ValueError) as exc:
-        log.warning("models.video_fetch.failed", kind=kind.value, error=str(exc))
-        return []
-
-
-async def _fetch_openai_models(
-    kind: ProviderKind,
-    base_url: str | None,
-    api_key: str | None,
-    interaction: Interaction,
-    client_factory: ClientFactory | None,
-) -> list[ModelInfo]:
-    default = _OPENROUTER_BASE if kind in _OPENROUTER_KINDS else _OPENAI_BASE
-    base = (base_url or default) if kind in _CUSTOM_BASE_KINDS else default
-    # OpenRouter answers the transcription catalogue only when asked for it;
-    # its unfiltered /models is the (much larger, disjoint) chat catalogue.
-    query = ""
-    if kind in _OPENROUTER_KINDS and interaction is Interaction.TRANSCRIBE:
-        query = _OPENROUTER_TRANSCRIBE_QUERY
-    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-    factory = client_factory or (lambda: httpx.AsyncClient(timeout=15.0))
-    try:
-        async with factory() as client:
-            response = await client.get(f"{base.rstrip('/')}/models{query}", headers=headers)
-            response.raise_for_status()
-            return _parse_models(response.json())
-    except (httpx.HTTPError, ValueError) as exc:
-        log.warning("models.fetch.failed", kind=kind.value, error=str(exc))
+        log.warning(event, url=catalogue.url, error=str(exc))
         return []
 
 
