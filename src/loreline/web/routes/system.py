@@ -15,7 +15,8 @@ from pydantic import BaseModel
 from starlette.status import HTTP_404_NOT_FOUND, HTTP_503_SERVICE_UNAVAILABLE
 
 from loreline import __version__
-from loreline.diarization.remote import probe_health
+from loreline.diarization.remote import probe_diarizer
+from loreline.health import HealthReport, HealthStatus
 from loreline.llm import DEFAULT_SYSTEM_PROMPT
 from loreline.monitoring import (
     AlertChannel,
@@ -48,20 +49,20 @@ _auth = [Depends(require_auth)]
 # timeout). Cache the verdict briefly - a diarizer coming up or going away is
 # noticed within this window, which is plenty for a status badge.
 _DIARIZER_PROBE_TTL_S = 20.0
-_diarizer_probe: tuple[str, float, bool] | None = None
+_diarizer_probe: tuple[str, float, HealthReport] | None = None
 
 
-async def _diarizer_status(endpoint: str) -> bool:
-    """Reachability of ``endpoint``, cached for ``_DIARIZER_PROBE_TTL_S``."""
+async def _diarizer_status(endpoint: str) -> HealthReport:
+    """The graded probe of ``endpoint``, cached for ``_DIARIZER_PROBE_TTL_S``."""
     global _diarizer_probe  # noqa: PLW0603 - module-level memo, single event loop
     now = time.monotonic()
     if _diarizer_probe is not None:
-        cached_endpoint, checked_at, reachable = _diarizer_probe
+        cached_endpoint, checked_at, report = _diarizer_probe
         if cached_endpoint == endpoint and now - checked_at < _DIARIZER_PROBE_TTL_S:
-            return reachable
-    reachable = await probe_health(endpoint)
-    _diarizer_probe = (endpoint, now, reachable)
-    return reachable
+            return report
+    report = await probe_diarizer(endpoint)
+    _diarizer_probe = (endpoint, now, report)
+    return report
 
 
 class HealthResponse(BaseModel):
@@ -78,7 +79,15 @@ class HealthResponse(BaseModel):
     diarizer_endpoint: str | None = None
     """The configured remote-diarization endpoint, or null when none is set."""
     diarizer_reachable: bool | None = None
-    """Whether that endpoint answered; null when no endpoint is configured."""
+    """Whether something answered at that endpoint; null when no endpoint is
+    configured. Derived from ``diarizer_status``: everything but
+    ``unreachable`` answered, including a service that answered badly."""
+    diarizer_status: HealthStatus | None = None
+    """The probe's graded verdict on the endpoint, the same five states the
+    settings page renders for a provider; null when no endpoint is configured.
+    A bool cannot say that a service answered 503 while its model loads."""
+    diarizer_detail: str | None = None
+    """The service's own words on why it is not healthy, where it gave any."""
     stt_degraded_since: float | None = None
     """Epoch time the active session's live transcription started failing
     (primary and fallback both producing nothing); null when healthy or idle.
@@ -101,7 +110,7 @@ async def healthz(request: Request) -> HealthResponse:
 
     defaults = await load_action_defaults(state)
     endpoint = defaults.diar_endpoint or None
-    reachable = await _diarizer_status(endpoint) if endpoint else None
+    diarizer = await _diarizer_status(endpoint) if endpoint else None
 
     return HealthResponse(
         status=overall_status(
@@ -115,7 +124,11 @@ async def healthz(request: Request) -> HealthResponse:
         disk_total_bytes=total,
         alerts_enabled=any(c.enabled for c in alert_config.channels),
         diarizer_endpoint=endpoint,
-        diarizer_reachable=reachable,
+        diarizer_reachable=(
+            diarizer.status is not HealthStatus.UNREACHABLE if diarizer is not None else None
+        ),
+        diarizer_status=diarizer.status if diarizer is not None else None,
+        diarizer_detail=diarizer.detail if diarizer is not None else None,
         stt_degraded_since=state.manager.stt_degraded_since(),
         stt_error=state.manager.stt_error(),
     )

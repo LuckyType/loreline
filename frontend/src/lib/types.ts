@@ -437,7 +437,12 @@ export interface Health {
 	disk_total_bytes?: number
 	alerts_enabled?: boolean
 	diarizer_endpoint?: string | null
+	/** Something answered at the endpoint (any status but `unreachable`). */
 	diarizer_reachable?: boolean | null
+	/** The probe's graded verdict, the same states the provider Test button renders. */
+	diarizer_status?: HealthStatus | null
+	/** The service's own words on why it is not healthy, where it gave any. */
+	diarizer_detail?: string | null
 	/** Epoch seconds live transcription started failing; null when healthy/idle. */
 	stt_degraded_since?: number | null
 	/** Vendor's own reason live transcription stopped for good; null while any provider works. */
