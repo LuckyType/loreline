@@ -1,18 +1,11 @@
 <script lang="ts">
-import { ChevronDown, TriangleAlert } from '@lucide/svelte'
 import { onMount } from 'svelte'
 import { page } from '$app/state'
 import { actionSetup } from '$lib/actionSetup.svelte'
 import { ApiError, api } from '$lib/api'
-import {
-	featureBlockedReason,
-	glossaryDropsWarning,
-	reasoningEffortsFor,
-} from '$lib/capabilities.svelte'
-import { Badge } from '$lib/components/ui/badge'
+import { reasoningEffortsFor } from '$lib/capabilities.svelte'
 import { Button } from '$lib/components/ui/button'
 import { Card, CardContent } from '$lib/components/ui/card'
-import { Checkbox } from '$lib/components/ui/checkbox'
 import {
 	Dialog,
 	DialogContent,
@@ -23,24 +16,17 @@ import {
 } from '$lib/components/ui/dialog'
 import { Input } from '$lib/components/ui/input'
 import { Label } from '$lib/components/ui/label'
-import {
-	Table,
-	TableBody,
-	TableCell,
-	TableHead,
-	TableHeader,
-	TableRow,
-} from '$lib/components/ui/table'
 import { confirm } from '$lib/confirm.svelte'
 import Dropdown from '$lib/Dropdown.svelte'
 import Foldable from '$lib/Foldable.svelte'
 import GenerateVideoDialog from '$lib/GenerateVideoDialog.svelte'
-import LogLine from '$lib/LogLine.svelte'
+import { jsonFrame, LiveFeed } from '$lib/liveFeed.svelte'
 import { modelInfoFor } from '$lib/modelCatalog.svelte'
 import ModelPicker from '$lib/ModelPicker.svelte'
-import { providerName } from '$lib/stores'
+import SessionHeader from '$lib/SessionHeader.svelte'
+import { diarizerLabel, inFlight, providerName } from '$lib/stores'
 import TranscriptList from '$lib/TranscriptList.svelte'
-import type { ExportFormat } from '$lib/types'
+import TranscriptVersions from '$lib/TranscriptVersions.svelte'
 import type {
 	DiarizationModeKind,
 	ReprocessJob,
@@ -48,7 +34,6 @@ import type {
 	TranscriptEvent,
 	VideoJob,
 } from '$lib/wire'
-import { connect } from '$lib/ws'
 
 let detail = $state<SessionDetail | null>(null)
 let jobs = $state<ReprocessJob[]>([])
@@ -57,70 +42,14 @@ let rpDiarKind = $state<DiarizationModeKind>('remote')
 let rpDiarEndpoint = $state('')
 let rpDiarMin = $state('')
 let rpDiarMax = $state('')
-// On by default: re-processing always fed the campaign glossary to the
-// provider, and turning it off is the deliberate choice.
-let rpUseGlossary = $state(true)
 let rpBusy = $state(false)
 
 const id = $derived(page.params.id ?? '')
-const formats: ExportFormat[] = ['txt', 'md', 'srt', 'vtt', 'json']
-const formatLabels: Record<ExportFormat, string> = {
-	txt: 'Text (.txt)',
-	md: 'Markdown (.md)',
-	srt: 'Subtitles (.srt)',
-	vtt: 'Subtitles (.vtt)',
-	json: 'JSON (.json)',
-}
 const hasAudio = $derived(!!detail?.session.audio_path)
 
-/** Re-processing replays stored audio, so it accepts every transcribe-capable
- *  provider - including the ones excluded from live capture. */
-const reprocessProviders = $derived(actionSetup.providersFor('transcribe'))
-
-/** Which provider the re-process row comes up on. Seeded, not stored: a pick
- * overrides it.
- *
- * The stored transcription default wins: Settings promises it is pre-selected
- * "when starting or re-processing a session", and it is the only way to say
- * "re-run my sessions on the batch provider". Re-running whatever captured the
- * session is the fallback, not the rule - a capture provider is by definition
- * one that can drive a live session, so preferring it buried the batch
- * providers behind a manual switch every single time. A default naming a
- * provider that has since been deleted (or lost its transcribe ability) is
- * ignored rather than selected into a dead id. */
-let rpProvider = $derived(
-	actionSetup.preferredProvider('transcribe', detail?.session.primary_provider)?.id ?? '',
-)
-const rpSelectedProvider = $derived(actionSetup.provider(rpProvider))
-// The stored transcription default is a provider/model pair: its model half
-// only counts while its provider half is the one selected.
-const rpDefault = $derived(actionSetup.pairedDefault('transcribe', rpSelectedProvider))
-// Seeded, not stored: a pick overrides this until the provider changes, and a
-// provider switch starts over (see preferredModel).
-let rpModel = $derived(actionSetup.preferredModelFor('transcribe', rpSelectedProvider))
-// Not every model can take a glossary: OpenRouter's transcription API accepts
-// a prompt field and ignores it, so the checkbox there was a silent no-op.
-// Disabled with the reason, rather than left to do nothing.
-const rpGlossaryBlocked = $derived(
-	featureBlockedReason(rpSelectedProvider?.kind, rpModel, 'glossary'),
-)
-// A model that takes a glossary but refuses to combine it with word
-// timestamps is a different case: usable, and the backend keeps the terms and
-// drops the timestamps. It costs speaker attribution quality, so the toggle
-// carries a warning instead of being greyed out. This is the panel the
-// original report came from: every utterance of a Gemini re-process failed
-// with a 400 and the GM had no way to see why beforehand.
-const rpGlossaryWarning = $derived(glossaryDropsWarning(rpSelectedProvider?.kind, rpModel))
-
-$effect(() => {
-	if (rpUseGlossary && rpGlossaryBlocked) rpUseGlossary = false
-})
-
-let exportOpen = $state(false)
-
-function exportAs(fmt: ExportFormat) {
-	exportOpen = false
-	window.location.href = api.exportUrl(id, fmt)
+/** Every card reports what went wrong here: one banner, at the top. */
+function setError(message: string) {
+	error = message
 }
 
 // Fold state of the page's sections, kept across visits (best effort).
@@ -153,14 +82,26 @@ $effect(() => {
 // selects one and everything below (details band, transcript, diarize
 // target) follows it.
 let selectedVersion = $state('original')
-let versionEvents = $state<TranscriptEvent[] | null>(null)
 
-const transcribeJobs = $derived(
-	jobs.filter((j) => j.operation === 'transcribe').sort((a, b) => a.created_at - b.created_at),
-)
+/** The selected version's segments, live.
+ *
+ * A running job publishes every segment it persists, so the version fills up
+ * as it is written instead of appearing all at once when the job ends. The
+ * event's `source` names the version that produced it, which is what keeps a
+ * re-transcription's text out of the original and out of the other versions,
+ * and the feed is filtered to this session, so it carries this session's runs
+ * (and its live capture) and nothing else. */
+const versionFeed = new LiveFeed<TranscriptEvent>({
+	path: () => `/ws/transcript?session_id=${encodeURIComponent(id)}`,
+	parse: jsonFrame,
+	accept: (event, held) =>
+		event.source === `reprocess:${selectedVersion}` &&
+		// selectVersion's fetch and this socket can overlap by a segment.
+		!held.some((e) => e.start_ts === event.start_ts && e.text === event.text),
+})
 
 const shownEvents = $derived(
-	selectedVersion === 'original' ? (detail?.transcript ?? []) : (versionEvents ?? []),
+	selectedVersion === 'original' ? (detail?.transcript ?? []) : versionFeed.items,
 )
 
 // The diarize job whose relabeling the selected version currently shows.
@@ -176,180 +117,18 @@ const diarizeJob = $derived(
 		.sort((a, b) => (b.finished_at ?? 0) - (a.finished_at ?? 0))[0],
 )
 
-// The most recent failure, surfaced under the table (there is no error column).
-const lastJobError = $derived(
-	jobs.filter((j) => j.error).sort((a, b) => b.created_at - a.created_at)[0],
-)
-
 async function selectVersion(version: string) {
 	selectedVersion = version
 	try {
-		versionEvents = version === 'original' ? null : await api.getTranscriptVersion(id, version)
+		versionFeed.items = version === 'original' ? [] : await api.getTranscriptVersion(id, version)
 	} catch (err) {
 		error = err instanceof ApiError ? err.message : 'failed to load transcript version'
 	}
 }
 
-function inFlight(job: ReprocessJob): boolean {
-	return job.status === 'queued' || job.status === 'running'
-}
-
-/** Whether a row can be opened. A running job counts: it publishes each
- *  segment as it is written, so its version is worth watching while it fills
- *  up. A finished one with nothing in it is not (there is nothing to show). */
-function selectable(job: ReprocessJob): boolean {
-	return inFlight(job) || (job.status === 'done' && job.segments_added > 0)
-}
-
-// --- live re-processing ---
-// A running job publishes every segment it persists, so the selected version
-// fills up here instead of appearing all at once when the job ends. The
-// event's `source` names the version that produced it, which is what keeps a
-// re-transcription's text out of the original and out of the other versions.
-function onLiveEvent(data: string) {
-	let event: TranscriptEvent
-	try {
-		event = JSON.parse(data) as TranscriptEvent
-	} catch {
-		return // ignore a malformed frame
-	}
-	if (event.source !== `reprocess:${selectedVersion}`) return
-	const shown = versionEvents ?? []
-	// selectVersion's fetch and this socket can overlap by a segment.
-	if (shown.some((e) => e.start_ts === event.start_ts && e.text === event.text)) return
-	versionEvents = [...shown, event]
-}
-
-/** The socket is owned by an effect, and that is the whole point.
- *
- *  It used to be opened at the end of an `async` onMount, after five requests.
- *  Svelte only registers a teardown returned from a *synchronous* onMount (an
- *  async one returns a Promise), so the cleanup never existed, and leaving the
- *  page while those awaits were in flight opened a socket a moment later that
- *  nothing would ever close. `connect` reconnects forever, so one navigation
- *  left a socket reconnecting behind a page that was gone, and each repeat
- *  added another.
- *
- *  An effect has no gap to race: the socket is opened synchronously and the
- *  teardown is registered in the same breath, so unmounting closes it whenever
- *  it happens. Closing through the handle rather than the raw WebSocket is what
- *  stops the reconnect loop; `WebSocket.close()` on its own only triggers it.
- *  Keying on `id` also reconnects if the route's param changes under a reused
- *  page component, which onMount would have slept through.
- *
- *  Filtered to this session, so the socket carries its re-processing runs (and
- *  its live capture) and nothing else. */
-$effect(() => {
-	const sock = connect(`/ws/transcript?session_id=${encodeURIComponent(id)}`, onLiveEvent)
-	return () => sock.close()
-})
-
-// --- stored logs ---
-let logsOpen = $state(false)
-let logsVersion = $state('original')
-let logsLines = $state<string[]>([])
-let logsError = $state('')
-
-/** Show the log lines one version was produced by.
- *
- * Fetched on demand rather than with the version list: a whole session's log
- * is far larger than the row it belongs to, and nobody reads it until
- * something about that version looks wrong. */
-async function showLogs(version: string) {
-	logsVersion = version
-	logsLines = []
-	logsError = ''
-	logsOpen = true
-	try {
-		const stored = await api.getVersionLogs(id, version)
-		logsLines = stored.logs.split('\n').filter((line) => line !== '')
-	} catch (err) {
-		logsError =
-			err instanceof ApiError && err.status === 404
-				? 'No logs were stored for this version.'
-				: err instanceof ApiError
-					? err.message
-					: 'failed to load logs'
-	}
-}
-
-/** Delete one re-transcription version, its diarization, and its job rows.
- *
- * Only re-transcriptions are deletable: the original is the live capture and
- * nothing can produce it again, so it has no button (and the server refuses it
- * regardless). A version that is on screen is swapped back to the original,
- * which is the one version guaranteed to still be there. */
-async function deleteVersion(job: ReprocessJob) {
-	const segments = job.segments_added === 1 ? '1 segment' : `${job.segments_added} segments`
-	if (
-		!(await confirm({
-			title: 'Delete transcription',
-			description: `Delete version ${job.id.slice(0, 8)} and its ${segments}? Its diarization goes with it; the audio and the other versions are untouched.`,
-			confirmLabel: 'Delete',
-			destructive: true,
-		}))
-	)
-		return
-	try {
-		await api.deleteTranscriptVersion(id, job.id)
-		if (selectedVersion === job.id) await selectVersion('original')
-		await refreshJobs()
-	} catch (err) {
-		error = err instanceof ApiError ? err.message : 'delete failed'
-	}
-}
-
-function diarizerLabel(job: ReprocessJob): string {
-	if (job.diarization.mode === 'openai') return 'OpenAI · gpt-4o-transcribe-diarize'
-	if (job.diarization.mode === 'remote')
-		return `sherpa-onnx${job.diarization.endpoint ? ` · ${job.diarization.endpoint}` : ''}`
-	return job.diarization.mode
-}
-
-// What the table's Diarization column says about one version.
-function diarizeInfo(version: string): string {
-	const targeting = jobs.filter((j) => j.operation === 'diarize' && j.target === version)
-	// A running pass counts the segments it has relabeled so far, for the same
-	// reason a running transcription does: something has to move.
-	const running = targeting.find(inFlight)
-	if (running)
-		return running.segments_added > 0 ? `diarizing… ${running.segments_added}` : 'diarizing…'
-	const done = targeting
-		.filter((j) => j.status === 'done' && j.segments_added > 0)
-		.sort((a, b) => (b.finished_at ?? 0) - (a.finished_at ?? 0))[0]
-	return done ? diarizerLabel(done) : '-'
-}
-
-function fmtWhen(ts: number): string {
-	return new Date(ts * 1000).toLocaleString()
-}
-
-const durationText = $derived.by(() => {
-	const s = detail?.session
-	if (!s?.ended_at) return ''
-	const secs = Math.max(0, Math.floor(s.ended_at - s.started_at))
-	const h = Math.floor(secs / 3600)
-	const m = Math.floor((secs % 3600) / 60)
-	const sec = String(secs % 60).padStart(2, '0')
-	return h > 0 ? `${h}:${String(m).padStart(2, '0')}:${sec}` : `${m}:${sec}`
-})
-
-// Status of the "original" row. That version is the live capture itself, so
-// its state is the *session's*, not a job's: "live" is only true while the
-// capture is actually running (see SessionStatus in src/loreline/models.py) -
-// on a session that ended hours ago the badge read "live" forever, which is
-// exactly the wrong thing to say about a finished recording. Same variants the
-// session list uses, so the two badges agree at a glance.
-const originalStatus = $derived.by(() => {
-	const status = detail?.session.status
-	if (status === 'capturing' || status === 'stopping') {
-		return { label: 'live', variant: 'outline' } as const
-	}
-	if (status === 'error') return { label: 'error', variant: 'destructive' } as const
-	return { label: 'complete', variant: 'secondary' } as const
-})
-
-const selectedJob = $derived(transcribeJobs.find((j) => j.id === selectedVersion))
+const selectedJob = $derived(
+	jobs.find((j) => j.operation === 'transcribe' && j.id === selectedVersion),
+)
 const selectedProviderName = $derived(
 	selectedVersion === 'original'
 		? providerName(detail?.session.primary_provider, actionSetup.providers)
@@ -368,14 +147,15 @@ let nameForm = $state<Record<string, string>>({})
 // --- summarize ---
 const llmProviders = $derived(actionSetup.providersFor('summarize'))
 let summarizeOpen = $state(false)
-// Seeded, not stored, same rule as `rpProvider`: the saved default while it
-// still summarizes, else the first row that does.
+// Seeded, not stored, the same rule every picker follows: the saved default
+// while it still summarizes, else the first row that does.
 let sumProvider = $derived(actionSetup.preferredProvider('summarize')?.id ?? '')
 let sumEffort = $state('')
 let sumBusy = $state(false)
 let sumError = $state('')
 const selectedLlm = $derived(llmProviders.find((p) => p.id === sumProvider))
-// The summarize default as a pair, same rule as `rpDefault` above.
+// The summarize default as a pair: the model half only counts while its
+// provider half is the one selected.
 const sumDefault = $derived(actionSetup.pairedDefault('summarize', selectedLlm))
 let sumModel = $derived(actionSetup.preferredModelFor('summarize', selectedLlm))
 // The picked model's catalogue entry; the fallback for a model the capability
@@ -439,7 +219,7 @@ async function refreshJobs() {
 async function reloadAfterJobs() {
 	detail = await api.getSession(id)
 	if (selectedVersion !== 'original') {
-		versionEvents = await api.getTranscriptVersion(id, selectedVersion)
+		versionFeed.items = await api.getTranscriptVersion(id, selectedVersion)
 	}
 }
 
@@ -465,25 +245,6 @@ $effect(() => {
 	const timer = setInterval(refreshJobs, 1500)
 	return () => clearInterval(timer)
 })
-
-async function reprocess() {
-	if (!rpProvider || !rpModel) return
-	rpBusy = true
-	error = ''
-	try {
-		await api.enqueueReprocess({
-			session_id: id,
-			provider_id: rpProvider,
-			model: rpModel,
-			use_glossary: rpUseGlossary,
-		})
-		await refreshJobs()
-	} catch (err) {
-		error = err instanceof ApiError ? err.message : 'reprocess failed'
-	} finally {
-		rpBusy = false
-	}
-}
 
 async function diarizeSession() {
 	rpBusy = true
@@ -586,245 +347,20 @@ onMount(async () => {
 	<p class="text-muted-foreground">Loading…</p>
 {:else}
 	<Card>
-		<CardContent class="flex flex-wrap items-center justify-between gap-3">
-			<div class="flex flex-wrap items-center gap-3">
-				<h1 class="m-0 text-base font-semibold">Session</h1>
-				<Badge variant="outline">{detail.session.status}</Badge>
-				<span class="text-muted-foreground">
-					{fmtWhen(detail.session.started_at)}{durationText ? ` · ${durationText}` : ''}
-				</span>
-				<div class="relative">
-					<Button variant="outline" size="sm" onclick={() => (exportOpen = !exportOpen)}>
-						Export <ChevronDown class="size-4" />
-					</Button>
-					{#if exportOpen}
-						<button
-							class="fixed inset-0 z-20 cursor-default"
-							aria-label="Close export menu"
-							onclick={() => (exportOpen = false)}
-						></button>
-						<div
-							class="absolute top-full left-0 z-30 mt-1.5 flex w-44 flex-col rounded-lg border bg-popover p-1 shadow-lg"
-						>
-							{#each formats as fmt (fmt)}
-								<button
-									class="rounded px-3 py-1.5 text-left hover:bg-accent"
-									onclick={() => exportAs(fmt)}
-								>
-									{formatLabels[fmt]}
-								</button>
-							{/each}
-							{#if hasAudio}
-								<button
-									class="mt-1 rounded border-t px-3 py-1.5 pt-2 text-left hover:bg-accent"
-									onclick={() => {
-										exportOpen = false
-										window.location.href = api.audioUrl(id)
-									}}
-								>
-									Audio (.wav)
-								</button>
-							{/if}
-						</div>
-					{/if}
-				</div>
-			</div>
-			<a class="text-primary text-sm hover:underline" href="/sessions">← Back</a>
-		</CardContent>
+		<SessionHeader sessionId={id} session={detail.session} />
 
 		<div class="border-t"></div>
 
-		<CardContent class="flex flex-col gap-3">
-			<Foldable
-				title="Transcriptions"
-				meta="{transcribeJobs.length + 1} version{transcribeJobs.length === 0 ? '' : 's'}"
-				bind:open={sections.table}
-			>
-				<Table>
-					<TableHeader>
-						<TableRow>
-							<TableHead>Transcript</TableHead><TableHead>Provider</TableHead
-							><TableHead>Model</TableHead><TableHead>Diarization</TableHead
-							><TableHead>Segments</TableHead><TableHead>Created</TableHead
-							><TableHead>Status</TableHead><TableHead class="w-0"></TableHead>
-						</TableRow>
-					</TableHeader>
-					<TableBody>
-						<TableRow
-							class="cursor-pointer hover:bg-accent/30 {selectedVersion === 'original'
-              ? 'bg-accent/50 [box-shadow:inset_2px_0_0_var(--color-primary)]'
-              : ''}"
-							onclick={() => selectVersion('original')}
-						>
-							<TableCell><code>original</code></TableCell>
-							<TableCell
-								>{providerName(detail.session.primary_provider, actionSetup.providers)}</TableCell
-							>
-							<TableCell class="text-muted-foreground">-</TableCell>
-							<TableCell>{diarizeInfo('original')}</TableCell>
-							<TableCell>{detail.transcript.length}</TableCell>
-							<TableCell class="text-muted-foreground"
-								>{fmtWhen(detail.session.started_at)}</TableCell
-							>
-							<TableCell>
-								<Badge variant={originalStatus.variant}>{originalStatus.label}</Badge>
-							</TableCell>
-							<!-- No delete for the original: it is the live capture, and unlike
-							     every re-transcription there is no way to produce it again. Its
-							     log is the one worth keeping most, for the same reason. -->
-							<TableCell>
-								<Button
-									variant="ghost"
-									size="sm"
-									title="The log lines this capture was recorded and transcribed by"
-									onclick={(e: MouseEvent) => {
-										e.stopPropagation() // the row click selects the version
-										void showLogs('original')
-									}}
-								>
-									Show logs
-								</Button>
-							</TableCell>
-						</TableRow>
-						{#each transcribeJobs as j (j.id)}
-							<TableRow
-								class="{selectable(j) ? 'cursor-pointer hover:bg-accent/30' : ''} {selectedVersion ===
-							j.id
-                ? 'bg-accent/50 [box-shadow:inset_2px_0_0_var(--color-primary)]'
-                : ''}"
-								onclick={() => selectable(j) && selectVersion(j.id)}
-							>
-								<TableCell><code>{j.id.slice(0, 8)}</code></TableCell>
-								<TableCell>{providerName(j.provider_id, actionSetup.providers)}</TableCell>
-								<TableCell>{j.model ?? '-'}</TableCell>
-								<TableCell>{diarizeInfo(j.id)}</TableCell>
-								<TableCell>
-									{#if inFlight(j)}
-										<!-- Counts up as the run writes segments, next to the finished
-										     versions' counts. Not a percentage on purpose: models split the
-										     same audio differently, so there is no total to divide by, only
-										     a rough feel for how far along this run is. -->
-										<span
-											class="text-muted-foreground"
-											title="Segments written so far. Versions legitimately end on different counts, so this is a rough feel for progress, not a completion ratio."
-										>
-											{j.segments_added}
-											so far…
-										</span>
-									{:else}
-										{j.segments_added}
-									{/if}
-								</TableCell>
-								<TableCell class="text-muted-foreground">{fmtWhen(j.created_at)}</TableCell>
-								<TableCell>
-									<Badge
-										title={j.error ?? undefined}
-										variant={j.status === 'error'
-                    ? 'destructive'
-                    : j.status === 'done'
-                      ? 'secondary'
-                      : 'outline'}
-									>
-										{j.status}
-									</Badge>
-								</TableCell>
-								<TableCell>
-									<div class="flex gap-1">
-										<Button
-											variant="ghost"
-											size="sm"
-											title="The log lines this transcription was produced by"
-											onclick={(e: MouseEvent) => {
-												e.stopPropagation() // the row click selects the version
-												void showLogs(j.id)
-											}}
-										>
-											Show logs
-										</Button>
-										<Button
-											variant="ghost"
-											size="sm"
-											disabled={inFlight(j)}
-											title={inFlight(j)
-												? 'Wait for the job to finish'
-												: 'Delete this transcription and its diarization'}
-											onclick={(e: MouseEvent) => {
-												e.stopPropagation() // the row click selects the version
-												void deleteVersion(j)
-											}}
-										>
-											Delete
-										</Button>
-									</div>
-								</TableCell>
-							</TableRow>
-						{/each}
-					</TableBody>
-				</Table>
-				{#if lastJobError?.error}
-					<p class="text-xs text-destructive">
-						Last failed job ({lastJobError.operation}): {lastJobError.error}
-					</p>
-				{/if}
-				{#if hasAudio}
-					<div class="flex flex-wrap items-center justify-end gap-2">
-						<span class="text-muted-foreground">New transcription</span>
-						<Dropdown
-							class="max-w-52"
-							bind:value={rpProvider}
-							defaultValue={actionSetup.defaults.stt_provider}
-							options={reprocessProviders.map((p) => ({ value: p.id, label: p.name }))}
-							placeholder="Provider"
-						/>
-						<ModelPicker
-							provider={rpSelectedProvider}
-							bind:value={rpModel}
-							defaultModel={rpDefault}
-							interaction="transcribe"
-						/>
-						<label
-							class="flex items-center gap-2"
-							title={rpGlossaryBlocked ||
-								rpGlossaryWarning ||
-								"Sends the campaign's terms to the provider as keyterms or a prompt."}
-						>
-							<Checkbox
-								checked={rpUseGlossary}
-								disabled={!!rpGlossaryBlocked}
-								onCheckedChange={(v) => (rpUseGlossary = v === true)}
-							/>
-							<span class={rpGlossaryBlocked ? 'text-muted-foreground' : ''}>Use glossary</span>
-							{#if rpGlossaryWarning && !rpGlossaryBlocked}
-								<TriangleAlert
-									class="size-3.5 shrink-0 text-amber-500"
-									aria-label="Diarization quality warning"
-								/>
-							{/if}
-						</label>
-						<!-- A model is required: the provider row carries none, so
-						     there is nothing for the server to fall back to. -->
-						<Button
-							variant="outline"
-							onclick={reprocess}
-							disabled={rpBusy || !rpProvider || !rpModel}
-							title={rpProvider && !rpModel ? 'Pick a model to re-process with.' : ''}
-						>
-							{rpBusy ? 'Queuing…' : 'Re-process audio'}
-						</Button>
-					</div>
-					<!-- The icon alone is a tooltip, and the row is too narrow for the
-					     sentence: spelled out here so the trade is readable before the
-					     job is queued, not after the version comes back unlabelled. -->
-					{#if rpUseGlossary && rpGlossaryWarning}
-						<p class="text-right text-xs text-amber-500">{rpGlossaryWarning}</p>
-					{/if}
-				{:else}
-					<p class="text-muted-foreground">
-						No stored audio for this session - re-processing and diarization are unavailable.
-					</p>
-				{/if}
-			</Foldable>
-		</CardContent>
+		<TranscriptVersions
+			sessionId={id}
+			{detail}
+			{jobs}
+			selected={selectedVersion}
+			bind:open={sections.table}
+			onselect={selectVersion}
+			onchanged={refreshJobs}
+			onerror={setError}
+		/>
 
 		<div class="border-t"></div>
 
@@ -1004,38 +540,6 @@ onMount(async () => {
 	summary={detail?.session.summary ?? ''}
 	onqueued={refreshVideoJobs}
 />
-
-<Dialog bind:open={logsOpen}>
-	<DialogContent class="sm:max-w-3xl">
-		<DialogHeader>
-			<DialogTitle>
-				Logs · {logsVersion === 'original' ? 'original' : logsVersion.slice(0, 8)}
-			</DialogTitle>
-			<DialogDescription>
-				What this version was produced by, kept per version: the live view on the Dashboard only
-				holds the last few hundred lines of the running capture.
-			</DialogDescription>
-		</DialogHeader>
-		{#if logsError}
-			<p class="m-0 text-sm text-muted-foreground">{logsError}</p>
-		{:else}
-			<div
-				class="max-h-[60vh] overflow-auto rounded-md bg-accent/40 px-3 py-2 font-mono text-xs leading-relaxed"
-			>
-				{#each logsLines as line, i (i)}
-					<LogLine {line} wrap={false} />
-				{/each}
-				{#if logsLines.length === 0}
-					<span class="text-muted-foreground">Loading…</span>
-				{/if}
-			</div>
-		{/if}
-		<DialogFooter>
-			<Button variant="outline" onclick={() => (logsOpen = false)}>Close</Button>
-		</DialogFooter>
-	</DialogContent>
-</Dialog>
-
 <Dialog bind:open={renameOpen}>
 	<DialogContent class="sm:max-w-md">
 		<DialogHeader>
