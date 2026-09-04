@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -33,14 +33,14 @@ class ChattyBackend(FakeBackend):
 
     async def transcribe(
         self,
-        audio: AsyncIterator[Utterance],
+        utterance: Utterance,
         *,
         session_id: str,
         glossary: object = None,
-    ) -> AsyncIterator[TranscriptEvent]:
-        async for event in super().transcribe(audio, session_id=session_id, glossary=glossary):
-            log.info("test.backend.transcribed")
-            yield event
+    ) -> TranscriptEvent | None:
+        event = await super().transcribe(utterance, session_id=session_id, glossary=glossary)
+        log.info("test.backend.transcribed")
+        return event
 
 
 @pytest.fixture

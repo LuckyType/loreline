@@ -10,13 +10,12 @@ from __future__ import annotations
 import functools
 import json
 import time
-from collections.abc import AsyncIterator
 from typing import cast
 
 from websockets.asyncio.server import ServerConnection, serve
 
 from loreline.audio.chunker import Utterance
-from loreline.models import Glossary, ProviderConfig, ProviderKind, TranscriptEvent
+from loreline.models import Glossary, ProviderConfig, ProviderKind
 from loreline.stt.backends.gemini_live import (
     _RECV_TIMEOUT_S,  # pyright: ignore[reportPrivateUsage]
     GeminiLiveBackend,
@@ -29,13 +28,15 @@ from mocks.gemini_live_ws import gemini_live_handler
 _SAMPLES = 8000
 
 
-async def _one_utterance() -> AsyncIterator[Utterance]:
-    yield Utterance(pcm=b"\x01\x00" * _SAMPLES, start=10.0, end=10.5)
+def _one_utterance() -> Utterance:
+    return Utterance(pcm=b"\x01\x00" * _SAMPLES, start=10.0, end=10.5)
 
 
-async def _two_utterances() -> AsyncIterator[Utterance]:
-    yield Utterance(pcm=b"\x01\x00" * _SAMPLES, start=0.0, end=0.5)
-    yield Utterance(pcm=b"\x02\x00" * _SAMPLES, start=0.5, end=1.0)
+def _two_utterances() -> list[Utterance]:
+    return [
+        Utterance(pcm=b"\x01\x00" * _SAMPLES, start=0.0, end=0.5),
+        Utterance(pcm=b"\x02\x00" * _SAMPLES, start=0.5, end=1.0),
+    ]
 
 
 # The registry resolves the model and hands it over; the connector keeps none
@@ -60,13 +61,9 @@ async def test_gemini_live_streaming_transcribe() -> None:
         port = server.sockets[0].getsockname()[1]
         backend = GeminiLiveBackend(_config(port), model=MODEL, api_key="secret")
         glossary = Glossary(campaign_id="c1", terms=["Drakonia"])
-        events: list[TranscriptEvent] = [
-            e
-            async for e in backend.transcribe(_one_utterance(), session_id="s1", glossary=glossary)
-        ]
+        event = await backend.transcribe(_one_utterance(), session_id="s1", glossary=glossary)
 
-    assert len(events) == 1
-    event = events[0]
+    assert event is not None
     assert event.is_final
     assert event.source == "gem-live-1"
     # One final per turn, joined with a space: the finals carry no spacing of
@@ -95,10 +92,10 @@ async def test_session_ends_on_the_turn_end_not_on_the_timeout() -> None:
         port = server.sockets[0].getsockname()[1]
         backend = GeminiLiveBackend(_config(port), api_key="secret")
         started = time.perf_counter()
-        events = [e async for e in backend.transcribe(_one_utterance(), session_id="s1")]
+        event = await backend.transcribe(_one_utterance(), session_id="s1")
         elapsed = time.perf_counter() - started
 
-    assert len(events) == 1
+    assert event is not None
     # 0.5 s of paced audio plus the flush. The bound is deliberately loose:
     # anything near _RECV_TIMEOUT_S means the turn end was missed again.
     assert elapsed < _RECV_TIMEOUT_S / 2
@@ -130,7 +127,7 @@ async def test_gemini_live_setup_and_key_on_the_wire() -> None:
     async with serve(recording, "127.0.0.1", 0) as server:
         port = server.sockets[0].getsockname()[1]
         backend = GeminiLiveBackend(_config(port), model=MODEL, api_key="sekret")
-        _ = [e async for e in backend.transcribe(_one_utterance(), session_id="s1")]
+        _ = await backend.transcribe(_one_utterance(), session_id="s1")
 
     assert "key=sekret" in cast("str", seen["path"])
     setup = cast("dict[str, object]", seen["setup"])
@@ -156,7 +153,7 @@ async def _setup_frame(
     port: int, glossary: Glossary | None, setups: list[dict[str, object]]
 ) -> dict[str, object]:
     backend = GeminiLiveBackend(_config(port), model=MODEL, api_key="secret")
-    _ = [e async for e in backend.transcribe(_one_utterance(), session_id="s1", glossary=glossary)]
+    _ = await backend.transcribe(_one_utterance(), session_id="s1", glossary=glossary)
     return cast("dict[str, object]", setups[0]["inputAudioTranscription"])
 
 
@@ -218,9 +215,10 @@ async def test_gemini_live_one_session_per_utterance() -> None:
     async with serve(counting, "127.0.0.1", 0) as server:
         port = server.sockets[0].getsockname()[1]
         backend = GeminiLiveBackend(_config(port), model=MODEL, api_key="secret")
-        events = [e async for e in backend.transcribe(_two_utterances(), session_id="s1")]
+        events = [
+            await backend.transcribe(utterance, session_id="s1") for utterance in _two_utterances()
+        ]
         await backend.aclose()
 
-    assert len(events) == 2
-    assert events[0].text == events[1].text == f"gemini live mock {_SAMPLES} samples"
+    assert [e.text for e in events if e] == [f"gemini live mock {_SAMPLES} samples"] * 2
     assert connections == 2

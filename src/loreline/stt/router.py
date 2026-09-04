@@ -121,13 +121,12 @@ class SttRouter:
         for its kind of run.
         """
         async for utterance in utterances:
-            events = await self._transcribe_with_failover(utterance)
-            for event in events:
-                merged = await self._merge_diarization(event, utterance)
-                await self._bus.publish(merged)
+            event = await self._transcribe_with_failover(utterance)
+            if event is not None:
+                await self._bus.publish(await self._merge_diarization(event, utterance))
 
-    async def _transcribe_with_failover(self, utterance: Utterance) -> list[TranscriptEvent]:
-        """Try each provider still worth trying; [] when none produced a transcript.
+    async def _transcribe_with_failover(self, utterance: Utterance) -> TranscriptEvent | None:
+        """Try each provider still worth trying; None when none transcribed it.
 
         Failover runs before any of the terminal handling below, and that order
         is deliberate: a primary with no credits left is precisely when the
@@ -137,14 +136,21 @@ class SttRouter:
         last_error = ""
         for backend, role in self._viable():
             try:
-                events = await asyncio.wait_for(
-                    self._collect(backend, utterance), timeout=self._config.timeout_s
+                event = await asyncio.wait_for(
+                    backend.transcribe(
+                        utterance,
+                        session_id=self._config.session_id,
+                        glossary=self._config.glossary,
+                    ),
+                    timeout=self._config.timeout_s,
                 )
             except Exception as exc:  # resilience: any backend error triggers fallback
                 last_error = self._note_backend_failed(backend, role, exc)
             else:
+                # Answered, even with nothing to show for it: a vendor that
+                # heard silence is not a provider to fail over from.
                 self._note_transcribed()
-                return events
+                return event
         if not self._viable():
             # Every provider has answered in a way that will not change. Stop
             # rather than repeat it for every remaining utterance.
@@ -152,7 +158,7 @@ class SttRouter:
                 self._degraded_since = time.time()
             raise ProvidersExhaustedError(self._exhausted_message())
         await self._note_dropped(last_error)
-        return []
+        return None
 
     def _viable(self) -> list[tuple[STTBackend, str]]:
         """The backends still worth a request, primary first, with their role.
@@ -232,16 +238,6 @@ class SttRouter:
         with contextlib.suppress(Exception):
             await self._on_failover(message)
 
-    async def _collect(self, backend: STTBackend, utterance: Utterance) -> list[TranscriptEvent]:
-        events: list[TranscriptEvent] = []
-        async for event in backend.transcribe(
-            _single(utterance),
-            session_id=self._config.session_id,
-            glossary=self._config.glossary,
-        ):
-            events.append(event)
-        return events
-
     async def _merge_diarization(
         self, event: TranscriptEvent, utterance: Utterance
     ) -> TranscriptEvent:
@@ -267,7 +263,3 @@ class SttRouter:
         if mode == DiarizationMode.INLINE:
             return assign_speakers(event, segments_from_words(event.words))
         return event
-
-
-async def _single(utterance: Utterance) -> AsyncIterator[Utterance]:
-    yield utterance

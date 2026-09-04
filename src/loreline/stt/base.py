@@ -1,8 +1,8 @@
 """The STT backend contract and the Connector spine the connectors share.
 
-A backend consumes a stream of voiced ``Utterance`` chunks (from the audio
-pipeline) and yields ``TranscriptEvent`` objects, one final event per
-utterance. Two things in this module say what a backend is:
+A backend takes one voiced ``Utterance`` (from the audio pipeline) and answers
+with one final ``TranscriptEvent``, or with None when that utterance produced
+no transcript. Two things in this module say what a backend is:
 
 ``STTBackend``, the Protocol, is the contract the rest of the app consumes:
 ``SttRouter``, the session manager, the re-process jobs and every test fake
@@ -10,17 +10,25 @@ speak to it and nothing else. It is structural on purpose. Nothing subclasses
 it, the fakes in the tests satisfy it by shape, and it stays alongside the base
 class below so that a caller never has to know how a backend was built.
 
-``Connector`` is how the eight real connectors are built. Every one of them
-does the same thing per utterance: build the per-call setup once from the
-glossary, send each utterance to the vendor, turn the answer into text and
-words, and wrap that in a ``TranscriptEvent`` whose fields are the same eight
-whichever vendor answered. The base class owns that loop and the event; a
-connector supplies two hooks:
+One utterance per call, not a stream of them: every caller has always fed
+exactly one (the router drives the failover, the timeout and the diarization
+per utterance, so it could never hand over more), and a contract that promised
+a stream made eight connectors implement a loop that never ran twice. A
+connector that keeps something alive between utterances keeps it on the
+instance, as the OpenAI Realtime session's socket does.
 
-* ``prepare(glossary) -> P``: whatever one call to ``transcribe`` needs once
-  for all of its utterances (a URL with the query string built, a params tuple,
-  a capped term list, a prompt). The type ``P`` is the connector's own, and a
-  connector with nothing to prepare returns None.
+``Connector`` is how the eight real connectors are built. Every one of them
+does the same thing per utterance: build the setup from the glossary, send the
+utterance to the vendor, turn the answer into text and words, and wrap that in
+a ``TranscriptEvent`` whose fields are the same eight whichever vendor
+answered. The base class owns that shape and the event; a connector supplies
+two hooks:
+
+* ``prepare(glossary) -> P``: whatever one call to ``transcribe`` needs (a URL
+  with the query string built, a params tuple, a capped term list, a prompt).
+  The type ``P`` is the connector's own, and a connector with nothing to
+  prepare returns None. It is cheap on purpose: it shapes values already in
+  memory and talks to nobody.
 * ``transcribe_one(utterance, prepared) -> Transcription | None``: one
   utterance to the vendor and back. None means "no event for this one", which
   is what a connector says when the vendor answered but not with a transcript
@@ -56,7 +64,7 @@ connector and never the batch one, and the reverse).
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator, Iterable
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from typing import Protocol, runtime_checkable
@@ -101,14 +109,14 @@ class STTBackend(Protocol):
 
     config: ProviderConfig
 
-    def transcribe(
+    async def transcribe(
         self,
-        audio: AsyncIterator[Utterance],
+        utterance: Utterance,
         *,
         session_id: str,
         glossary: Glossary | None = None,
-    ) -> AsyncIterator[TranscriptEvent]:
-        """Transcribe a stream of utterances into transcript events."""
+    ) -> TranscriptEvent | None:
+        """Transcribe one utterance; None when it produced no transcript."""
         ...
 
     async def aclose(self) -> None:
@@ -152,9 +160,8 @@ def secret_for(config: ProviderConfig, secrets: SecretStore) -> str | None:
 class Connector[P](ABC):
     """The shared spine behind every connector: see the module docstring.
 
-    ``P`` is whatever :meth:`prepare` builds once per ``transcribe`` call and
-    :meth:`transcribe_one` reads per utterance. The base never looks inside
-    it.
+    ``P`` is whatever :meth:`prepare` builds for one ``transcribe`` call and
+    :meth:`transcribe_one` reads. The base never looks inside it.
     """
 
     config: ProviderConfig
@@ -164,7 +171,7 @@ class Connector[P](ABC):
 
     @abstractmethod
     def prepare(self, glossary: Glossary | None) -> P:
-        """Per-call setup, computed once for every utterance of one stream."""
+        """The setup one utterance's vendor call needs, from the glossary."""
 
     @abstractmethod
     async def transcribe_one(self, utterance: Utterance, prepared: P) -> Transcription | None:
@@ -172,26 +179,24 @@ class Connector[P](ABC):
 
     async def transcribe(
         self,
-        audio: AsyncIterator[Utterance],
+        utterance: Utterance,
         *,
         session_id: str,
         glossary: Glossary | None = None,
-    ) -> AsyncIterator[TranscriptEvent]:
-        prepared = self.prepare(glossary)
-        async for utterance in audio:
-            result = await self.transcribe_one(utterance, prepared)
-            if result is None or not result.text:
-                continue
-            yield TranscriptEvent(
-                session_id=session_id,
-                source=self.config.id,
-                text=result.text,
-                words=result.words,
-                speaker=first_labelled_speaker(result.words),
-                start_ts=utterance.start,
-                end_ts=utterance.end,
-                is_final=True,
-            )
+    ) -> TranscriptEvent | None:
+        result = await self.transcribe_one(utterance, self.prepare(glossary))
+        if result is None or not result.text:
+            return None
+        return TranscriptEvent(
+            session_id=session_id,
+            source=self.config.id,
+            text=result.text,
+            words=result.words,
+            speaker=first_labelled_speaker(result.words),
+            start_ts=utterance.start,
+            end_ts=utterance.end,
+            is_final=True,
+        )
 
     async def aclose(self) -> None:  # noqa: B027  (a real default, not a forgotten hook)
         """Release held resources. Nothing is held unless a connector says so."""

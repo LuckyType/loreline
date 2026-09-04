@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
@@ -122,8 +121,8 @@ def _backend(
     )
 
 
-async def _one(start: float = 0.0) -> AsyncIterator[Utterance]:
-    yield Utterance(pcm=b"\x01\x00" * 1600, start=start, end=start + 0.1)
+def _one(start: float = 0.0) -> Utterance:
+    return Utterance(pcm=b"\x01\x00" * 1600, start=start, end=start + 0.1)
 
 
 async def _run(
@@ -133,13 +132,10 @@ async def _run(
     glossary: Glossary | None = None,
     start: float = 0.0,
     job_timeout_s: float = 30.0,
-) -> list[TranscriptEvent]:
+) -> TranscriptEvent | None:
     backend = _backend(api, model=model, job_timeout_s=job_timeout_s)
     try:
-        return [
-            event
-            async for event in backend.transcribe(_one(start), session_id="s1", glossary=glossary)
-        ]
+        return await backend.transcribe(_one(start), session_id="s1", glossary=glossary)
     finally:
         await backend.aclose()
 
@@ -158,7 +154,7 @@ async def test_uploads_creates_and_polls_then_maps_words_onto_session_time() -> 
         ]
     )
 
-    events = await _run(api, start=12.0)
+    event = await _run(api, start=12.0)
 
     assert api.methods == [
         ("POST", "/v2/upload"),
@@ -183,8 +179,7 @@ async def test_uploads_creates_and_polls_then_maps_words_onto_session_time() -> 
     assert body["language_code"] == "de"
     assert body["speaker_labels"] is True
 
-    assert len(events) == 1
-    event = events[0]
+    assert event is not None
     assert event.source == "aai-1"
     assert event.is_final
     assert event.text == "Hallo Welt"
@@ -227,7 +222,7 @@ async def test_unset_model_and_language_omit_their_fields() -> None:
     )
     backend = AssemblyAIBatchBackend(config, client=client, poll_initial_s=0.001)
     try:
-        _ = [e async for e in backend.transcribe(_one(), session_id="s1")]
+        _ = await backend.transcribe(_one(), session_id="s1")
     finally:
         await backend.aclose()
 
@@ -239,7 +234,7 @@ async def test_unset_model_and_language_omit_their_fields() -> None:
 async def test_empty_transcript_yields_no_event() -> None:
     api = _Api(polls=[{"id": JOB_ID, "status": "completed", "text": "", "words": []}])
 
-    assert await _run(api) == []
+    assert await _run(api) is None
 
 
 async def test_error_status_raises_with_the_vendor_message_and_deletes_the_job() -> None:
@@ -274,13 +269,9 @@ async def test_cancelling_mid_poll_deletes_the_job() -> None:
     backend = _backend(api)
     started = asyncio.Event()
 
-    async def consume() -> None:
-        async for _event in backend.transcribe(_one(), session_id="s1"):
-            pass
-
     async def run() -> None:
         started.set()
-        await consume()
+        _ = await backend.transcribe(_one(), session_id="s1")
 
     task = asyncio.create_task(run())
     await started.wait()

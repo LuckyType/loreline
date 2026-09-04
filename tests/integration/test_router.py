@@ -40,22 +40,21 @@ class FakeBackend:
 
     async def transcribe(
         self,
-        audio: AsyncIterator[Utterance],
+        utterance: Utterance,
         *,
         session_id: str,
         glossary: object = None,
-    ) -> AsyncIterator[TranscriptEvent]:
+    ) -> TranscriptEvent | None:
         _ = glossary
-        async for utt in audio:
-            yield TranscriptEvent(
-                session_id=session_id,
-                source=self.config.id,
-                text=self._text,
-                words=self._words,
-                start_ts=utt.start,
-                end_ts=utt.end,
-                is_final=True,
-            )
+        return TranscriptEvent(
+            session_id=session_id,
+            source=self.config.id,
+            text=self._text,
+            words=self._words,
+            start_ts=utterance.start,
+            end_ts=utterance.end,
+            is_final=True,
+        )
 
     async def aclose(self) -> None:
         return None
@@ -64,49 +63,35 @@ class FakeBackend:
 class FailingBackend(FakeBackend):
     async def transcribe(
         self,
-        audio: AsyncIterator[Utterance],
+        utterance: Utterance,
         *,
         session_id: str,
         glossary: object = None,
-    ) -> AsyncIterator[TranscriptEvent]:
-        _ = (session_id, glossary)
-        async for _utt in audio:
-            msg = "backend unavailable"
-            raise RuntimeError(msg)
-        if False:  # pragma: no cover - marks this as an async generator
-            yield TranscriptEvent(
-                session_id=session_id, source=self.config.id, text="", start_ts=0.0, end_ts=0.0
-            )
+    ) -> TranscriptEvent | None:
+        _ = (utterance, session_id, glossary)
+        msg = "backend unavailable"
+        raise RuntimeError(msg)
 
 
 class FlakyBackend(FakeBackend):
     """Fails the first ``fail_first`` utterances, then transcribes normally."""
 
     def __init__(self, provider_id: str, *, fail_first: int) -> None:
-        super().__init__(provider_id)
+        super().__init__(provider_id, text="recovered")
         self._remaining_failures = fail_first
 
     async def transcribe(
         self,
-        audio: AsyncIterator[Utterance],
+        utterance: Utterance,
         *,
         session_id: str,
         glossary: object = None,
-    ) -> AsyncIterator[TranscriptEvent]:
-        _ = glossary
-        async for utt in audio:
-            if self._remaining_failures > 0:
-                self._remaining_failures -= 1
-                msg = "still flaky"
-                raise RuntimeError(msg)
-            yield TranscriptEvent(
-                session_id=session_id,
-                source=self.config.id,
-                text="recovered",
-                start_ts=utt.start,
-                end_ts=utt.end,
-                is_final=True,
-            )
+    ) -> TranscriptEvent | None:
+        if self._remaining_failures > 0:
+            self._remaining_failures -= 1
+            msg = "still flaky"
+            raise RuntimeError(msg)
+        return await super().transcribe(utterance, session_id=session_id, glossary=glossary)
 
 
 class FakeDiarizer:
@@ -379,23 +364,18 @@ class RejectingBackend(FakeBackend):
 
     async def transcribe(
         self,
-        audio: AsyncIterator[Utterance],
+        utterance: Utterance,
         *,
         session_id: str,
         glossary: object = None,
-    ) -> AsyncIterator[TranscriptEvent]:
-        _ = glossary
-        async for _utt in audio:
-            self.calls += 1
-            request = httpx.Request("POST", "https://api.example.test/v1/audio/transcriptions")
-            response = httpx.Response(self._status, json=self._body, request=request)
-            raise httpx.HTTPStatusError(
-                f"{self._status} from {request.url}", request=request, response=response
-            )
-        if False:  # pragma: no cover - marks this as an async generator
-            yield TranscriptEvent(
-                session_id=session_id, source=self.config.id, text="", start_ts=0.0, end_ts=0.0
-            )
+    ) -> TranscriptEvent | None:
+        _ = (utterance, session_id, glossary)
+        self.calls += 1
+        request = httpx.Request("POST", "https://api.example.test/v1/audio/transcriptions")
+        response = httpx.Response(self._status, json=self._body, request=request)
+        raise httpx.HTTPStatusError(
+            f"{self._status} from {request.url}", request=request, response=response
+        )
 
 
 async def test_router_stops_when_the_only_provider_is_out_of_credit() -> None:
