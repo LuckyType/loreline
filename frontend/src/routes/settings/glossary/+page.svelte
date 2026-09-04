@@ -16,6 +16,7 @@ async function saveDefault() {
 	try {
 		await api.putDefaultGlossary(terms)
 		defaultMsg = 'Saved'
+		setTimeout(() => (defaultMsg = ''), 2500)
 	} catch (err) {
 		defaultMsg = err instanceof ApiError ? err.message : 'save failed'
 	}
