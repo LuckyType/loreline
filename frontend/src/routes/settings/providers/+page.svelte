@@ -46,11 +46,11 @@ import {
 } from '$lib/components/ui/table'
 import { confirm } from '$lib/confirm.svelte'
 import Dropdown from '$lib/Dropdown.svelte'
-import { hintFor, priceTitle } from '$lib/modelInfo'
+import { modelInfoFor } from '$lib/modelCatalog.svelte'
+import { optionFor } from '$lib/modelInfo'
 import ModelPicker from '$lib/ModelPicker.svelte'
 import {
 	capabilities,
-	deprecationFor,
 	inlineDiarizationFor,
 	interactionsFor,
 	isHiddenModel,
@@ -235,6 +235,19 @@ const videoProviders = $derived(providersFor(providers, 'video'))
 const sttSrcProvider = $derived(providers.find((p) => p.id === defaults.stt_provider))
 const llmSrcProvider = $derived(providers.find((p) => p.id === defaults.summarize_provider))
 const videoSrcProvider = $derived(providers.find((p) => p.id === defaults.video_provider))
+// A saved default is a provider/model pair: its model half earns the "default"
+// tag only while its provider half is the row currently selected above it.
+const sttSavedModel = $derived(
+	defaults.stt_provider === savedDefaults.stt_provider ? savedDefaults.stt_model : '',
+)
+const llmSavedModel = $derived(
+	defaults.summarize_provider === savedDefaults.summarize_provider
+		? savedDefaults.summarize_model
+		: '',
+)
+const videoSavedModel = $derived(
+	defaults.video_provider === savedDefaults.video_provider ? savedDefaults.video_model : '',
+)
 // The name field's placeholder is a real default, not a hint: leaving it blank
 // names the provider after its type ("OpenRouter"), which is what most people
 // want for their first one. Save stays enabled accordingly.
@@ -246,11 +259,21 @@ const apiKeyLabel = $derived(
 		editing ? ' - blank = keep current' : ''
 	}`,
 )
-// Set by the summary model picker when the chosen model advertises reasoning.
-let llmModelInfo = $state<ModelInfo | undefined>(undefined)
-// Set by the STT model picker: inline diarization only yields speakers for
-// some provider+model pairs, so the default must not be settable otherwise.
-let sttModelInfo = $state<ModelInfo | undefined>(undefined)
+// The chosen models' catalogue entries, read from the shared catalogue once
+// the pickers have loaded their lists. The summary one says whether the model
+// advertises reasoning; the STT one whether inline diarization yields
+// speakers, since the default must not be settable otherwise.
+const llmModelInfo = $derived(
+	modelInfoFor(
+		llmSrcProvider,
+		'summarize',
+		defaults.strict_model_filtering,
+		defaults.summarize_model,
+	),
+)
+const sttModelInfo = $derived(
+	modelInfoFor(sttSrcProvider, 'transcribe', defaults.strict_model_filtering, defaults.stt_model),
+)
 const inlineDiarizationAvailable = $derived(
 	inlineDiarizationFor(sttSrcProvider?.kind, defaults.stt_model, sttModelInfo?.inline_diarization),
 )
@@ -621,11 +644,8 @@ onMount(async () => {
 					refreshToken={defaults.strict_model_filtering}
 					interaction="transcribe"
 					provider={sttSrcProvider}
-					onselect={(m) => (sttModelInfo = m)}
 					bind:value={defaults.stt_model}
-					defaultModel={savedDefaults.stt_model}
-					defaultProvider={savedDefaults.stt_provider ?? ''}
-					autoseed={false}
+					defaultModel={sttSavedModel}
 				/>
 			</div>
 
@@ -677,10 +697,7 @@ onMount(async () => {
 						interaction="summarize"
 						provider={llmSrcProvider}
 						bind:value={defaults.summarize_model}
-						defaultModel={savedDefaults.summarize_model}
-						defaultProvider={savedDefaults.summarize_provider ?? ''}
-						autoseed={false}
-						onselect={(m) => (llmModelInfo = m)}
+						defaultModel={llmSavedModel}
 					/>
 					{#if llmEfforts.length}
 						<Label class="text-xs text-muted-foreground" for="def-llm-effort">
@@ -723,9 +740,7 @@ onMount(async () => {
 						interaction="video"
 						provider={videoSrcProvider}
 						bind:value={defaults.video_model}
-						defaultModel={savedDefaults.video_model}
-						defaultProvider={savedDefaults.video_provider ?? ''}
-						autoseed={false}
+						defaultModel={videoSavedModel}
 					/>
 				{:else}
 					<p class="m-0 text-sm text-muted-foreground">
@@ -860,24 +875,24 @@ onMount(async () => {
 						<Input placeholder="filter…" bind:value={modelFilter} />
 						<div class="max-h-45 overflow-auto rounded-md border p-1.5">
 							{#each filteredModels as m (m.id)}
-								{@const sunset = deprecationFor(form.kind, m.id)}
-								<label class="flex items-center gap-2 px-1 py-0.5" title={priceTitle(m)}>
+								{@const opt = optionFor(form.kind, m.id, m)}
+								<label class="flex items-center gap-2 px-1 py-0.5" title={opt.title}>
 									<Checkbox
 										checked={(form.favorite_models ?? []).includes(m.id)}
 										onCheckedChange={() => toggleFavorite(m.id)}
 									/>
-									<span class="min-w-0 flex-1 truncate">{m.id}</span>
-									{#if sunset}
+									<span class="min-w-0 flex-1 truncate">{opt.label}</span>
+									{#if opt.sunset}
 										<span
 											class="shrink-0 text-xs whitespace-nowrap text-amber-500"
-											title="The vendor is retiring this model on {sunset}."
+											title="The vendor is retiring this model on {opt.sunset}."
 										>
-											retiring {sunset}
+											retiring {opt.sunset}
 										</span>
 									{/if}
-									{#if hintFor(m)}
+									{#if opt.detail}
 										<span class="shrink-0 text-xs whitespace-nowrap text-muted-foreground">
-											{hintFor(m)}
+											{opt.detail}
 										</span>
 									{/if}
 								</label>

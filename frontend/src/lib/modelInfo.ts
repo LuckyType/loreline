@@ -1,4 +1,6 @@
-import type { ModelInfo, ModelPrice } from '$lib/types'
+import { deprecationFor, deprecationNote } from '$lib/capabilities.svelte'
+import type { DropdownOption } from '$lib/Dropdown.svelte'
+import type { ModelInfo, ModelPrice, ProviderKind } from '$lib/types'
 
 /**
  * Formatting for the model pickers' price/context hints.
@@ -68,4 +70,34 @@ export function tierNote(model: ModelInfo | undefined): string {
 export function priceTitle(model: ModelInfo | undefined): string {
 	if (!model?.pricing) return ''
 	return tierNote(model) || 'Price per 1M tokens (input / output).'
+}
+
+export type ModelOption = DropdownOption & {
+	/** The vendor's announced sunset date, or null for a current model. */
+	sunset: string | null
+	/** The price/context hint on its own, without the retirement note. */
+	detail: string
+}
+
+/** One picker row for a model: the id as its label, the price/context hint
+ *  and the retirement note as the muted detail, the price ladder and the
+ *  retirement sentence as the tooltip. `model` is the live catalogue's entry
+ *  when it has one; a favourite or stored default the list has not confirmed
+ *  renders without a hint. Shared by the pickers and the wizard's favourites
+ *  list, so a model reads the same everywhere it appears. */
+export function optionFor(
+	kind: ProviderKind | undefined,
+	id: string,
+	model: ModelInfo | undefined,
+): ModelOption {
+	const sunset = deprecationFor(kind, id)
+	const detail = hintFor(model)
+	return {
+		value: id,
+		label: id,
+		sunset,
+		detail,
+		hint: [detail, sunset ? `retiring ${sunset}` : ''].filter(Boolean).join(' · '),
+		title: [priceTitle(model), deprecationNote(kind, id)].filter(Boolean).join(' '),
+	}
 }

@@ -28,6 +28,7 @@ import type {
 	LlmCapabilities,
 	ModelAnnotation,
 	ModelSpec,
+	ProviderConfig,
 	ProviderKind,
 	ProviderSpec,
 	TranscribeCapabilities,
@@ -206,6 +207,40 @@ export function withoutHidden(kind: ProviderKind | undefined, ids: string[]): st
 	if (!spec) return ids
 	const hidden = new Set(spec.models.filter((m) => m.hidden).map((m) => m.id))
 	return hidden.size ? ids.filter((id) => !hidden.has(id)) : ids
+}
+
+/** The row-shaped twin of `withoutHidden`, for a catalogue list. */
+export function withoutHiddenRows<T extends { id: string }>(
+	kind: ProviderKind | undefined,
+	rows: T[],
+): T[] {
+	const spec = capabilities.provider(kind)
+	if (!spec) return rows
+	const hidden = new Set(spec.models.filter((m) => m.hidden).map((m) => m.id))
+	return hidden.size ? rows.filter((m) => !hidden.has(m.id)) : rows
+}
+
+/**
+ * Which model a picker starts on: the action default when it belongs to this
+ * provider row, else the row's first favourite, hidden models excluded, and
+ * '' when there is neither. `pairedDefault` is the stored default already
+ * attributed by the caller: action defaults are stored as provider/model
+ * pairs, so it is the model half only while the provider half names this row.
+ *
+ * Pure, so a parent seeds with `let model = $derived(preferredModel(...))`
+ * and binds the picker to it: a user pick overrides the derived, and a
+ * provider switch re-evaluates it and drops the pick, which the new provider
+ * could not serve anyway.
+ */
+export function preferredModel(
+	provider: ProviderConfig | undefined,
+	pairedDefault: string,
+): string {
+	// No provider, no model: the filter below would otherwise wave a stored
+	// default through, since an unknown kind hides nothing.
+	if (!provider) return ''
+	const prefs = withoutHidden(provider.kind, [pairedDefault, ...provider.favorite_models])
+	return prefs.filter(Boolean)[0] ?? ''
 }
 
 /** Vendor-announced sunset date, or null. The model stays selectable: a GM

@@ -13,6 +13,7 @@ import {
 	featureBlockedReason,
 	glossaryDropsWarning,
 	inlineDiarizationFor,
+	preferredModel,
 } from '$lib/capabilities.svelte'
 import { Button } from '$lib/components/ui/button'
 import { Card, CardContent } from '$lib/components/ui/card'
@@ -22,13 +23,13 @@ import { Label } from '$lib/components/ui/label'
 import { confirm } from '$lib/confirm.svelte'
 import Dropdown from '$lib/Dropdown.svelte'
 import LogLine from '$lib/LogLine.svelte'
+import { modelInfoFor } from '$lib/modelCatalog.svelte'
 import ModelPicker from '$lib/ModelPicker.svelte'
 import { formatTime, health, logsWs, speakerColor, transcriptWs } from '$lib/stores'
 import {
 	liveSttProviders,
 	type ActionDefaults,
 	type DiarizationModeKind,
-	type ModelInfo,
 	type ProviderConfig,
 	type TranscriptEvent,
 } from '$lib/types'
@@ -38,9 +39,7 @@ import { connect, type LiveSocket } from '$lib/ws'
 // --- session controls ---
 let providers = $state<ProviderConfig[]>([])
 let primary = $state('')
-let model = $state('')
 let fallback = $state('')
-let fallbackModel = $state('')
 let defaults = $state<ActionDefaults>({
 	stt_model: '',
 	diar_mode: '',
@@ -53,10 +52,19 @@ let defaults = $state<ActionDefaults>({
 const sttProviders = $derived(liveSttProviders(providers))
 const primaryProvider = $derived(providers.find((p) => p.id === primary))
 const fallbackProvider = $derived(providers.find((p) => p.id === fallback))
+// The stored transcription default is a provider/model pair: its model half
+// only counts while its provider half is the one selected.
+const sttDefault = $derived(primary === defaults.stt_provider ? defaults.stt_model : '')
+// Seeded, not stored: a pick in the picker overrides these until the provider
+// changes, and a provider switch starts over (see preferredModel).
+let model = $derived(preferredModel(primaryProvider, sttDefault))
+let fallbackModel = $derived(preferredModel(fallbackProvider, ''))
 let diarMode = $state<DiarizationModeKind>('none')
-// Set by the primary model picker, and used only as the fallback for a model
-// the capability config does not annotate.
-let primaryModelInfo = $state<ModelInfo | undefined>(undefined)
+// The picked model's catalogue entry, used only as the fallback for a model
+// the capability config does not annotate. Read from the shared catalogue, so
+// it is known as soon as the picker's list has loaded and stays known whether
+// or not that picker is still mounted.
+const primaryModelInfo = $derived(modelInfoFor(primaryProvider, 'transcribe', '', model))
 const primaryKind = $derived(primaryProvider?.kind)
 // Inline diarization only yields speakers for some provider+model pairs, so
 // the option is offered only when the chosen model actually returns them.
@@ -444,9 +452,7 @@ onDestroy(() => {
 							id="model"
 							provider={primaryProvider}
 							bind:value={model}
-							defaultModel={defaults.stt_model}
-							defaultProvider={defaults.stt_provider ?? ''}
-							onselect={(m) => (primaryModelInfo = m)}
+							defaultModel={sttDefault}
 						/>
 					</div>
 					<Button onclick={start} disabled={busy || !primary || !model || startBlocked}>
