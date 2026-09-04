@@ -9,12 +9,11 @@ from fastapi.exceptions import HTTPException
 from pydantic import BaseModel
 from starlette.status import HTTP_404_NOT_FOUND
 
-from loreline.health import HealthReport, HealthStatus, missing_credential
-from loreline.llm import LLM_KINDS, chat_health
+from loreline.health import HealthReport, HealthStatus
+from loreline.health_probe import probe_provider
 from loreline.models import Interaction, ModelInfo, ProviderConfig, ProviderKind
 from loreline.secrets import SecretStore
 from loreline.stt.catalog import list_models
-from loreline.stt.registry import create_backend
 from loreline.web.auth import require_auth
 from loreline.web.deps import get_state, load_action_defaults
 from loreline.web.schemas import OkResponse, ProviderCreate, SecretWrite
@@ -144,43 +143,18 @@ async def test_provider(request: Request, provider_id: str) -> TestResult:
     """Probe the provider's endpoint and credential, and grade the answer.
 
     Only a missing *provider* is an HTTP error here. Everything the probe can
-    run into - a rejected key, a dead host, a config this app cannot build a
-    connector for - comes back as a graded :class:`TestResult`, because the
+    run into - a rejected key, a dead host, a row this app cannot locate a
+    surface for - comes back as a graded :class:`TestResult`, because the
     button's job is to report a state, and an error status just makes the page
-    render "down" with no explanation attached.
+    render "down" with no explanation attached. Which surface is asked, and
+    how, is :mod:`loreline.health_probe`'s decision, not this route's.
     """
     state = get_state(request)
     provider = await state.providers.get(provider_id)
     if provider is None:
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="provider not found")
     api_key = state.secrets.get(provider.auth_ref) if provider.auth_ref else None
-    # Answered without a network call, and not merely as an optimisation: see
-    # missing_credential on the keyless 404 that would otherwise read as a bad
-    # base URL.
-    report = missing_credential(provider.kind, api_key)
-    if report is not None:
-        return _result(report)
-    if provider.kind in LLM_KINDS:
-        # One probe per row, and for a kind that both summarizes and
-        # transcribes (Gemini, OpenAI, OpenRouter) the chat surface is the one
-        # asked. The key is the same credential either way, so a second probe
-        # against the STT surface would cost a round trip to learn nothing -
-        # and for Gemini the two surfaces are sibling URLs with different auth
-        # headers, so it would have to build a second client to ask.
-        return _result(await chat_health(config=provider, api_key=api_key))
-    try:
-        backend = create_backend(provider, state.secrets)
-    except ValueError as exc:
-        # capabilities.yaml offers this kind no transcription model, or the
-        # resolved model needs a transport we have no connector for. Nothing
-        # was probed, so nothing is known about the provider itself - but the
-        # message says exactly what to change, so it goes to the GM rather
-        # than into a 400 the page turns into a bare red badge.
-        return TestResult(status=HealthStatus.UNKNOWN, detail=str(exc))
-    try:
-        return _result(await backend.health())
-    finally:
-        await backend.aclose()
+    return _result(await probe_provider(provider, api_key))
 
 
 def _result(report: HealthReport) -> TestResult:

@@ -15,7 +15,6 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from loreline.audio.chunker import SpeechDetector, Utterance
-from loreline.health import HealthReport, HealthStatus
 from loreline.models import (
     ProviderConfig,
     Session,
@@ -65,9 +64,6 @@ class FakeBackend:
                 end_ts=utt.end,
                 is_final=True,
             )
-
-    async def health(self) -> HealthReport:
-        return HealthReport(HealthStatus.HEALTHY)
 
     async def aclose(self) -> None:
         return None

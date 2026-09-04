@@ -27,7 +27,6 @@ import httpx
 import pytest
 
 from loreline.audio.chunker import Utterance
-from loreline.health import HealthStatus
 from loreline.models import Glossary, Protocol, ProviderConfig, ProviderKind, TranscriptEvent
 from loreline.stt.backends.assemblyai_batch import AssemblyAIBatchBackend
 
@@ -320,29 +319,3 @@ async def test_a_streaming_base_url_is_not_handed_to_the_http_client() -> None:
         assert str(backend._client.base_url) == BASE_URL  # pyright: ignore[reportPrivateUsage]
     finally:
         await backend.aclose()
-
-
-async def test_health_lists_one_transcript() -> None:
-    def ok(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == "/v2/transcript"
-        assert request.url.params["limit"] == "1"
-        return httpx.Response(200, json={"transcripts": []})
-
-    client = httpx.AsyncClient(transport=httpx.MockTransport(ok), base_url=BASE_URL, headers={})
-    async with client:
-        report = await AssemblyAIBatchBackend(_config(), client=client).health()
-    assert report.status is HealthStatus.HEALTHY
-
-    # Pinned from a live call with a bogus token.
-    def unauthorized(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            401, json={"error": "Authentication error, API token missing/invalid"}
-        )
-
-    client = httpx.AsyncClient(
-        transport=httpx.MockTransport(unauthorized), base_url=BASE_URL, headers={}
-    )
-    async with client:
-        report = await AssemblyAIBatchBackend(_config(), client=client).health()
-    assert report.status is HealthStatus.UNAUTHORIZED
-    assert report.detail == "Authentication error, API token missing/invalid"

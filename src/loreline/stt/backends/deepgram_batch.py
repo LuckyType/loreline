@@ -33,7 +33,6 @@ import httpx
 from loreline.audio.chunker import Utterance
 from loreline.audio.wav import pcm_to_wav
 from loreline.capabilities import surface_for
-from loreline.health import HealthReport, probe_endpoint
 from loreline.logging import get_logger
 from loreline.models import Glossary, Interaction, ProviderConfig, ProviderKind
 from loreline.secrets import SecretStore
@@ -47,8 +46,6 @@ log = get_logger(__name__)
 # The batch surface in capabilities.yaml is the bare host: the pre-recorded
 # and streaming endpoints share this path and differ in scheme.
 _LISTEN_PATH = "/v1/listen"
-# The health probe. See ``health`` for why it is not the model list.
-_AUTH_PROBE_PATH = "/v1/auth/token"
 # An utterance is at most VadChunker.max_utterance_s of audio (30 s by default),
 # so a minute is already generous. Whisper Cloud is the slow case: Deepgram
 # warns it is "less scalable than all other Deepgram models".
@@ -133,27 +130,6 @@ class DeepgramBatchBackend(HttpConnector[_Params]):
             return None
         text, words = parse_alternative(as_obj_dict(alternatives[0]), offset=utterance.start)
         return Transcription(text=text, words=words)
-
-    async def health(self) -> HealthReport:
-        """Ask what the calling key is, which is the only thing that tests it.
-
-        Not the model list, which is what this connector shipped with: verified
-        live, ``GET /v1/models`` answers **200 with the full catalogue and no
-        Authorization header at all**, so grading it proved that api.deepgram.com
-        was up and nothing whatsoever about the credential. Every key, valid or
-        garbage, came back healthy - the same defect the LLM probe had.
-
-        ``/v1/auth/token`` describes the key that called it and answers **401
-        "Invalid credentials."** (as plain text, which the grading falls back to
-        reading) for a bad or absent one. Verified live for the failure half;
-        the 200 half is UNVERIFIED, in keeping with this connector's banner,
-        since this environment has no Deepgram key. If that endpoint turns out
-        to need a scope a plain key lacks, the answer grades as UNAUTHORIZED or
-        UNKNOWN rather than as a false "down", and swapping the path is a
-        one-line fix.
-        https://developers.deepgram.com/reference/token-based-auth-api/grant-token
-        """
-        return await probe_endpoint(self._client, _AUTH_PROBE_PATH)
 
 
 @register(ProviderKind.DEEPGRAM)

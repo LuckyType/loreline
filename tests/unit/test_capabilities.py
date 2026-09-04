@@ -74,11 +74,11 @@ class TestCapabilityTable:
 
 
 class TestDefaultModel:
-    """The one default left: what a connector names when nobody chose.
+    """The one default left: the model this file vouches for on a kind.
 
-    Every action route now requires a model, so this answers for the health
-    probe alone (POST /providers/{id}/test), whose websocket kinds name a model
-    in the handshake.
+    Every action route requires a model and the health probe asks a surface,
+    so nobody is handed this unasked; it decides the kind's house transport
+    and which model a diarizing pass runs.
     """
 
     def test_the_default_is_scoped_to_the_interaction(self) -> None:
@@ -221,11 +221,11 @@ class TestRealtimeModelResolution:
         assert not is_realtime_model(ProviderKind.GEMINI, "some-future-model")
 
     def test_an_unset_model_answers_with_the_kinds_default_transport(self) -> None:
-        """None is answered by the model this kind would resolve to. In
-        practice only a kind that curates no catalogue reaches this, since
-        create_backend resolves the declared default first, but the answer must
-        stay defined: a lookup that raised here would break the health probe
-        rather than the pick.
+        """None is answered by the model this kind would resolve to. The
+        self-hosted kind's connector runs with none, and the health probe asks
+        this to pick the surface a kind is probed at, so the answer must stay
+        defined: a lookup that raised here would break the probe rather than
+        the pick.
 
         It has to agree with the model that would actually run, which is why
         this is the default's transport rather than "can this kind stream at
@@ -596,7 +596,7 @@ class TestSurfaces:
         """OpenRouter serves its catalogue to anonymous callers, so a /models
         probe would call any key healthy; /key describes the calling key."""
         chat = surface_for(_row(ProviderKind.OPENROUTER), Interaction.SUMMARIZE)
-        assert chat.health == "/key"
+        assert chat.health is not None and chat.health.path == "/key"
         assert surface_for(_row(ProviderKind.OPENAI), Interaction.SUMMARIZE).health is None
 
     def test_a_row_address_reaches_the_surface_of_its_own_transport(self) -> None:
@@ -670,7 +670,8 @@ class TestSurfaces:
         """Surfaces are read from the file like everything else in it."""
         shipped = capability_config.CONFIG_PATH.read_text(encoding="utf-8")
         moved = shipped.replace(
-            'batch: {url: "https://api.deepgram.com", auth: token_header, overridable: true}',
+            'batch: {url: "https://api.deepgram.com", auth: token_header, overridable: true, '
+            "health: /v1/auth/token}",
             'batch: {url: "https://dg.example.invalid", auth: token_header, overridable: true}',
         )
         assert moved != shipped

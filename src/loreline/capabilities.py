@@ -35,6 +35,7 @@ from urllib.parse import urlencode
 
 from loreline.capability_config import (
     CapabilityConfig,
+    HealthProbe,
     ModelPattern,
     ModelSpec,
     ProviderSpec,
@@ -78,8 +79,8 @@ class Endpoint:
     surface: Surface
 
     @property
-    def health(self) -> str | None:
-        """The probe path the surface declares, if it declares one."""
+    def health(self) -> HealthProbe | None:
+        """What the health probe asks here, if the surface says; see HealthProbe."""
         return self.surface.health
 
     def request_headers(self, api_key: str | None) -> dict[str, str]:
@@ -186,29 +187,16 @@ def default_model(kind: ProviderKind, interaction: Interaction) -> str | None:
     transcription provider. This asks the narrower question the yaml can
     actually answer, next to the deprecation date that invalidates it.
 
-    Only one caller has no model from anyone: the health probe behind
-    POST /providers/{id}/test, whose websocket kinds name a model in the
-    handshake. Every action route requires the GM to choose. None means this
-    kind curates no catalogue (the self-hosted one), and the connector then
-    sends no model at all.
+    No connector is handed this any more: every action route requires the GM
+    to choose, and the health probe asks a surface rather than a model. What
+    the marker still decides is the kind's house transport (the surface the
+    probe asks, the connector an unannotated model is routed to; see
+    :func:`is_realtime_model`) and, through :func:`default_diarizing_model`,
+    which model a diarizing pass runs. None means this kind curates no
+    catalogue (the self-hosted one).
     """
     spec = _provider(kind)
     return spec.default_model(interaction) if spec else None
-
-
-def curates_a_catalogue(kind: ProviderKind) -> bool:
-    """Whether this file lists models for a kind at all (any interaction).
-
-    The difference between "we vouch for nothing here on purpose" and "we have
-    nothing left". The self-hosted kind curates nothing by design, since its
-    catalogue is whatever the operator installed, and a connector for it works
-    perfectly well naming no model. A kind that does curate must always leave
-    a default behind; if it does not, something is wrong with the file rather
-    than with the request, and the caller should hear that instead of the
-    vendor's complaint about a missing field.
-    """
-    spec = _provider(kind)
-    return bool(spec and spec.models)
 
 
 def default_diarizing_model(kind: ProviderKind) -> str | None:
@@ -318,9 +306,8 @@ def is_realtime_model(kind: ProviderKind, model: str | None) -> bool:
     """Whether this provider+model pair transcribes over a streaming transport.
 
     This picks the connector for kinds that offer both transports, so it must
-    answer for any model string, curated or not. None reaches here only for a
-    kind that curates no catalogue, since :func:`default_model` has already
-    answered for every other one.
+    answer for any model string, curated or not, and for None, which is the
+    kind's own default transport.
 
     A curated model answers for itself: its single transport, or, when it
     serves both, the ``prefer`` written beside them. Nothing consults the
@@ -331,12 +318,11 @@ def is_realtime_model(kind: ProviderKind, model: str | None) -> bool:
     if spec is None:
         return False
     if model is None:
-        # No model to resolve against: the caller named none and, in practice,
-        # the kind lists none of its own either, since create_backend resolves
-        # the declared default first for every kind that curates a catalogue.
-        # Answer with the kind's own default transport rather than "can this
-        # kind stream at all", so an unset model and the model that would
-        # actually run cannot disagree.
+        # No model to resolve against: the self-hosted kind's connector runs
+        # with none, and the health probe asks which transport a kind's own
+        # default runs on. Answer with that default's transport rather than
+        # "can this kind stream at all", so an unset model and the model that
+        # would actually run cannot disagree.
         return _default_transport(kind)
     entry = spec.find(model)
     caps = entry.transcribe if entry else None

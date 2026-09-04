@@ -45,7 +45,6 @@ import httpx
 from loreline.audio.chunker import Utterance
 from loreline.audio.wav import pcm_to_wav
 from loreline.capabilities import surface_for
-from loreline.health import HealthReport, probe_endpoint
 from loreline.logging import get_logger
 from loreline.models import Glossary, Interaction, ProviderConfig, ProviderKind
 from loreline.secrets import SecretStore
@@ -245,19 +244,6 @@ class AssemblyAIBatchBackend(HttpConnector[list[str]]):
                 transcript_id=transcript_id,
                 error=str(exc),
             )
-
-    async def health(self) -> HealthReport:
-        """List one transcript, which exercises the credential.
-
-        There is no model-list endpoint to ask instead: AssemblyAI's only
-        /models route serves its LLM gateway.
-        https://www.assemblyai.com/docs/api-reference/transcripts/list
-
-        Verified live: a bad or absent key is **401** with
-        ``{"error": "Authentication error, API token missing/invalid"}``, which
-        the grading reads straight out of the body and shows the GM.
-        """
-        return await probe_endpoint(self._client, _TRANSCRIPT_PATH, params={"limit": 1})
 
 
 @register(ProviderKind.ASSEMBLYAI)

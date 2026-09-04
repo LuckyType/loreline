@@ -596,6 +596,17 @@ onDestroy(() => {
 								{:else if $health?.diarizer_endpoint && $health.diarizer_reachable === false}
 									<span class="text-xs text-amber-500">
 										No diarization service answered at {$health.diarizer_endpoint}.
+										{#if $health.diarizer_detail}
+											({$health.diarizer_detail})
+										{/if}
+									</span>
+								{:else if $health?.diarizer_endpoint && $health.diarizer_status === 'degraded'}
+									<span class="text-xs text-amber-500">
+										The diarization service at {$health.diarizer_endpoint} answered but cannot serve
+										right now.
+										{#if $health.diarizer_detail}
+											({$health.diarizer_detail})
+										{/if}
 									</span>
 								{/if}
 							</div>

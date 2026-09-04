@@ -7,7 +7,8 @@ import httpx
 from loreline.audio import pcm_to_wav
 from loreline.diarization import assign_speakers
 from loreline.diarization.provider import create_diarizer
-from loreline.diarization.remote import RemoteDiarizer
+from loreline.diarization.remote import RemoteDiarizer, probe_diarizer
+from loreline.health import HealthStatus
 from loreline.models import DiarizationConfig, DiarizationMode, TranscriptEvent, Word
 from mocks.diarization import create_app
 
@@ -49,11 +50,23 @@ async def test_remote_diarization_merges_onto_transcript() -> None:
     assert merged.words[1].speaker == "Speaker 1"
 
 
-async def test_health_ok() -> None:
+async def test_probe_grades_the_service_like_a_provider() -> None:
+    """The same five states the settings page renders, not a bool: a 404 on a
+    live host is a wrong URL and reads as unreachable, where ``< 500`` called
+    it fine."""
     transport = httpx.ASGITransport(app=create_app())
     async with httpx.AsyncClient(transport=transport, base_url="http://diar") as client:
-        diarizer = RemoteDiarizer("http://diar", client=client)
-        assert await diarizer.health() is True
+        report = await probe_diarizer("http://diar", client=client)
+    assert report.status is HealthStatus.HEALTHY
+
+    def gone(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, text="")
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(gone), base_url="http://diar"
+    ) as client:
+        report = await probe_diarizer("http://diar", client=client)
+    assert report.status is HealthStatus.UNREACHABLE
 
 
 def test_create_diarizer_remote_requires_endpoint() -> None:

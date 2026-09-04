@@ -18,18 +18,13 @@ from openrouter.components.chatrequest import ChatRequestReasoning
 from openrouter.components.providerpreferences import ProviderPreferences
 
 from loreline.capabilities import Endpoint, kinds_for, surface_for
-from loreline.health import HealthReport, HealthStatus, error_body, error_detail, probe_endpoint
+from loreline.health import error_body, error_detail
 from loreline.logging import get_logger
 from loreline.models import Interaction, OpenRouterRouting, ProviderConfig, ProviderKind
 
 log = get_logger(__name__)
 
 _TIMEOUT_S = 120.0
-# The health probe where the surface names none: free, exercises the key and
-# implemented by every OpenAI-compatible server. OpenRouter's surface names
-# /key instead, its /models being public.
-_DEFAULT_HEALTH_PATH = "/models"
-
 # Provider kinds that summarize, i.e. speak chat-completions rather than STT.
 # Derived from the one capability table rather than re-listed here - see
 # loreline.capabilities.kinds_for.
@@ -237,40 +232,6 @@ def _rejects_parameter(response: httpx.Response, name: str) -> bool:
     if not isinstance(error, dict):
         return False
     return cast("dict[str, object]", error).get("param") == name
-
-
-async def chat_health(
-    *,
-    config: ProviderConfig,
-    api_key: str | None,
-    client_factory: ClientFactory | None = None,
-) -> HealthReport:
-    """Probe an LLM provider's credential and endpoint. Never raises.
-
-    ``GET /models`` for most kinds, because it is free, exercises the key and
-    is the one route every OpenAI-compatible server implements. OpenRouter is
-    the exception: it serves its catalogue to anonymous callers (verified live,
-    425 models with no ``Authorization`` header at all), so asking it proves
-    only that openrouter.ai is up. ``GET /key`` there describes the calling key
-    itself and 401s without one, which is the question actually being asked;
-    its summarize surface in capabilities.yaml says so.
-
-    This used to return a bool from ``status_code < 500``, and was wrong for
-    every kind here: a corrupted Google key (400), a corrupted OpenAI key
-    (401), no key at all, and even a base_url pointing at a live host's wrong
-    path (404) all came back healthy. See :mod:`loreline.health` for the
-    grading that replaces it.
-    """
-    try:
-        endpoint = _chat_surface(config)
-    except ValueError as exc:
-        # Nothing was probed, and the message names the missing base URL.
-        return HealthReport(HealthStatus.UNKNOWN, str(exc))
-    client = _client(endpoint, api_key, client_factory)
-    try:
-        return await probe_endpoint(client, endpoint.health or _DEFAULT_HEALTH_PATH)
-    finally:
-        await client.aclose()
 
 
 def _parse_completion(payload: object) -> str:

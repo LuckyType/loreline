@@ -38,7 +38,7 @@ from pathlib import Path
 from typing import Literal, Self
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from loreline.models import Interaction, ProviderKind
 
@@ -357,9 +357,10 @@ class ModelSpec(_Strict):
     # connector that is written but unverified against the real API: flipping
     # one flag here is the whole release step.
     hidden: bool = False
-    # The model this file vouches for when a connector must name one and
-    # nobody chose: the health probe in POST /providers/{id}/test is the only
-    # caller left, since every action route now requires a model. Marked here,
+    # The model this file vouches for on this kind: what decides the kind's
+    # house transport (which surface the health probe asks, where an
+    # unannotated model is routed) and which model a diarizing pass runs, now
+    # that every action route requires a chosen model. Marked here,
     # per model, rather than derived from list order, because "first entry
     # wins" is silently wrong the moment someone reorders the list, and it is
     # scoped by interaction because one provider row serves several: an
@@ -505,6 +506,39 @@ class AuthScheme(StrEnum):
         return {}
 
 
+class HealthProbe(_Strict):
+    """The cheap question a health probe asks of one surface, as data.
+
+    For an HTTP surface, ``path`` (and ``params``): a read that exercises the
+    credential and costs nothing. Declared only where the obvious ``/models``
+    is the wrong question: it is public on OpenRouter and Deepgram, so grading
+    it would call any key healthy, and AssemblyAI has no such route at all. A
+    surface that declares none is asked ``/models``.
+
+    For a socket surface, ``frame``: the first message to send once the
+    socket is open, for a vendor that waits for the client to speak
+    (Deepgram, whose ``CloseStream`` makes it answer and hang up at once). A
+    vendor that greets first (AssemblyAI) declares none, and the probe reads
+    the greeting. Static data only: a frame that needs a model or a session's
+    settings is a session question, not a health one, and the handshake has
+    already tested the credential by the time it would be sent.
+    """
+
+    path: str | None = None
+    params: dict[str, str] = Field(default_factory=dict[str, str])
+    frame: dict[str, object] | None = None
+
+    @model_validator(mode="after")
+    def _asks_something(self) -> Self:
+        if self.path is None and self.frame is None:
+            raise ValueError("a health block must name a path or a frame")
+        if self.path is not None and not self.path.startswith("/"):
+            raise ValueError(f"health path {self.path!r} must be relative to the surface url")
+        if self.params and self.path is None:
+            raise ValueError("health params need a path to go with")
+        return self
+
+
 class Surface(_Strict):
     """How to reach one vendor for one interaction over one transport.
 
@@ -527,10 +561,9 @@ class Surface(_Strict):
     # Headers every request to this surface carries besides the credential:
     # OpenRouter's leaderboard attribution is the one case.
     headers: dict[str, str] = Field(default_factory=dict[str, str])
-    # The cheap authenticated read a health probe asks of this surface, for the
-    # OpenAI-compatible family whose default ``/models`` is public on some
-    # gateways. Connectors with their own vendor probe do not read it.
-    health: str | None = None
+    # What the health probe asks of this surface (see HealthProbe). A bare
+    # string is the HTTP path, which is the common case in the yaml.
+    health: HealthProbe | None = None
     # A catalogue that answers without a credential, so a CI run with no
     # secrets can still read it. A key is still sent when one is around.
     public: bool = False
@@ -550,8 +583,22 @@ class Surface(_Strict):
                 )
         elif not self.url.lower().startswith(_SOCKET_SCHEMES + _HTTP_SCHEMES):
             raise ValueError(f"surface url {self.url!r} must be absolute (http(s) or ws(s))")
-        if self.health is not None and not self.health.startswith("/"):
-            raise ValueError(f"health path {self.health!r} must be relative to the surface url")
+        return self
+
+    @field_validator("health", mode="before")
+    @classmethod
+    def _path_shorthand(cls, value: object) -> object:
+        return {"path": value} if isinstance(value, str) else value
+
+    @model_validator(mode="after")
+    def _health_matches_the_transport(self) -> Self:
+        """A frame is a socket's question and a path an HTTP surface's."""
+        if self.health is None:
+            return self
+        if self.socket and self.health.path is not None:
+            raise ValueError("a socket surface is probed with a frame, not a path")
+        if not self.socket and self.health.frame is not None:
+            raise ValueError("an HTTP surface is probed at a path, not with a frame")
         return self
 
     @property
@@ -726,12 +773,12 @@ class ProviderSpec(_Strict):
         """Exactly one default wherever this provider offers models at all.
 
         Two would make the answer depend on list order, which is the failure
-        the marker exists to avoid; none would leave a connector with no model
-        to name. A kind whose catalogue is discovered at runtime lists no
+        the marker exists to avoid; none would leave the kind with no house
+        transport. A kind whose catalogue is discovered at runtime lists no
         models and therefore marks none: the self-hosted one is the case where
         any default we could write down would be a guess about someone else's
-        server, and its connector needs none (its health probe is
-        ``GET /models``, and every action route now carries a chosen model).
+        server, and its connector needs none (every action route carries a
+        chosen model, and the health probe names none).
         """
         for interaction in self.interactions:
             offered = self.models_for(interaction)

@@ -7,7 +7,7 @@ from httpx import AsyncClient
 
 from loreline.capabilities import filter_models
 from loreline.health import HealthReport, HealthStatus
-from loreline.models import Interaction, ModelInfo, ProviderKind
+from loreline.models import Interaction, ModelInfo, ProviderConfig, ProviderKind
 
 
 def _provider_body() -> dict[str, object]:
@@ -164,72 +164,28 @@ async def test_test_route_reports_a_missing_key_without_calling_out(
     }
 
 
-async def test_test_route_surfaces_the_vendors_own_message(
+async def test_test_route_hands_the_row_and_its_key_to_the_probe_and_renders_the_report(
     client: AsyncClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """ "API key not valid" is worth vastly more to a GM than "down"."""
+    """The route builds nothing and decides nothing: it looks the row up, hands
+    the probe the stored key, and renders whatever came back. "API key not
+    valid" is worth vastly more to a GM than "down", so the detail travels
+    untouched."""
+    seen: list[tuple[ProviderKind, str | None]] = []
 
-    async def fake_chat_health(**_kwargs: object) -> HealthReport:
+    async def fake_probe(config: ProviderConfig, api_key: str | None) -> HealthReport:
+        seen.append((config.kind, api_key))
         return HealthReport(HealthStatus.UNAUTHORIZED, "API key not valid.")
 
-    monkeypatch.setattr("loreline.web.routes.providers.chat_health", fake_chat_health)
+    monkeypatch.setattr("loreline.web.routes.providers.probe_provider", fake_probe)
     body = {"name": "Gemini", "kind": "gemini", "protocol": "http_batch", "api_key": "bad"}
     pid = (await client.post("/api/providers", json=body)).json()["id"]
 
     resp = await client.post(f"/api/providers/{pid}/test")
 
-    assert resp.json() == {"status": "unauthorized", "detail": "API key not valid."}
-
-
-async def test_test_route_reports_an_unbuildable_backend_as_unknown(
-    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A config this app cannot build a connector for is not a broken provider.
-
-    Nothing was probed, so nothing is known about the endpoint or the key. The
-    message names what to change, which is why it goes into the result rather
-    than into a 400 the settings page would render as a bare red badge.
-    """
-
-    def refuse(*_args: object, **_kwargs: object) -> object:
-        raise ValueError("capabilities.yaml offers no transcription model for kind 'deepgram'")
-
-    monkeypatch.setattr("loreline.web.routes.providers.create_backend", refuse)
-    body = {"name": "DG", "kind": "deepgram", "protocol": "ws", "api_key": "k"}
-    pid = (await client.post("/api/providers", json=body)).json()["id"]
-
-    resp = await client.post(f"/api/providers/{pid}/test")
-
     assert resp.status_code == 200
-    assert resp.json()["status"] == "unknown"
-    assert "no transcription model" in resp.json()["detail"]
-
-
-async def test_test_route_closes_the_backend_it_opened(
-    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The probe holds a client; a fan-out across every provider must not leak
-    one per click."""
-    closed: list[bool] = []
-
-    class _Backend:
-        async def health(self) -> HealthReport:
-            return HealthReport(HealthStatus.HEALTHY)
-
-        async def aclose(self) -> None:
-            closed.append(True)
-
-    def build(*_args: object, **_kwargs: object) -> _Backend:
-        return _Backend()
-
-    monkeypatch.setattr("loreline.web.routes.providers.create_backend", build)
-    body = {"name": "DG", "kind": "deepgram", "protocol": "ws", "api_key": "k"}
-    pid = (await client.post("/api/providers", json=body)).json()["id"]
-
-    resp = await client.post(f"/api/providers/{pid}/test")
-
-    assert resp.json() == {"status": "healthy", "detail": None}
-    assert closed == [True]
+    assert resp.json() == {"status": "unauthorized", "detail": "API key not valid."}
+    assert seen == [(ProviderKind.GEMINI, "bad")]
 
 
 async def test_test_route_404s_only_for_a_missing_provider(client: AsyncClient) -> None:

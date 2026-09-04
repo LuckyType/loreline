@@ -373,7 +373,7 @@ def test_two_defaults_for_one_interaction_are_rejected() -> None:
 
 
 def test_offered_models_without_a_default_are_rejected() -> None:
-    """None leaves the health probe with no model to name for the kind."""
+    """None leaves the kind with no house transport to route by."""
     with pytest.raises(ValidationError, match="exactly one transcribe model as default"):
         ProviderSpec.model_validate(_provider(models=[_transcriber(default=False)]))
 
@@ -752,6 +752,28 @@ def test_a_surface_url_must_be_absolute(url: str) -> None:
 def test_a_health_path_is_relative_to_its_surface() -> None:
     with pytest.raises(ValidationError, match="relative to the surface url"):
         Surface.model_validate({"url": "https://vendor.invalid/v1", "health": "models"})
+
+
+def test_a_bare_health_path_is_the_shorthand_for_a_probe_block() -> None:
+    """The yaml writes ``health: /key``; what it means is a probe asking that path."""
+    surface = Surface.model_validate({"url": "https://vendor.invalid/v1", "health": "/key"})
+    assert surface.health is not None
+    assert surface.health.path == "/key"
+    assert surface.health.frame is None
+
+
+def test_a_health_question_matches_the_surfaces_transport() -> None:
+    """A socket is asked with a frame and an HTTP surface at a path; a block
+    declaring the other is a mistake the loader should name, not something a
+    probe should quietly ignore."""
+    with pytest.raises(ValidationError, match="frame, not a path"):
+        Surface.model_validate({"url": "wss://vendor.invalid/v1", "health": "/models"})
+    with pytest.raises(ValidationError, match="path, not with a frame"):
+        Surface.model_validate(
+            {"url": "https://vendor.invalid/v1", "health": {"frame": {"type": "Hello"}}}
+        )
+    with pytest.raises(ValidationError, match="path or a frame"):
+        Surface.model_validate({"url": "https://vendor.invalid/v1", "health": {}})
 
 
 class TestOverride:

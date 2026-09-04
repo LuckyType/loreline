@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from http import HTTPStatus
 from typing import cast
 
 import httpx
 
+from loreline.health import HealthReport, probe_endpoint
 from loreline.httpclient import ClientHandle
 from loreline.logging import get_logger
 from loreline.models import SpeakerSegment
@@ -50,13 +50,6 @@ class RemoteDiarizer:
         response.raise_for_status()
         return _parse_segments(response.json())
 
-    async def health(self) -> bool:
-        try:
-            response = await self._client.get("/healthz")
-        except httpx.HTTPError:
-            return False
-        return response.status_code < HTTPStatus.INTERNAL_SERVER_ERROR
-
     async def aclose(self) -> None:
         await self._http.aclose()
 
@@ -80,25 +73,25 @@ def _parse_segments(payload: object) -> list[SpeakerSegment]:
     return segments
 
 
+# Much shorter than a diarization request's own timeout: ``/api/system/healthz``
+# calls this while the UI polls it every few seconds, and a hung diarizer must
+# not stall the whole health response.
 _PROBE_TIMEOUT_S = 2.0
 
 
-async def probe_health(endpoint: str, *, client: httpx.AsyncClient | None = None) -> bool:
-    """Return True if a diarization service is reachable at ``endpoint``.
+async def probe_diarizer(endpoint: str, *, client: httpx.AsyncClient | None = None) -> HealthReport:
+    """Whether a diarization service answers at ``endpoint``, graded like a provider.
 
-    Hits the service's ``GET /healthz`` (see ``services/diarization``). Kept on
-    a short timeout because ``/api/system/healthz`` calls this while the UI
-    polls it every few seconds - a hung diarizer must not stall the whole
-    health response.
+    Hits the service's ``GET /healthz`` (see ``services/diarization``) and
+    grades the answer through :mod:`loreline.health`, the same five states the
+    settings page renders for a provider row. This used to return a bool from
+    ``status_code < 500``, the exact defect that grading replaced everywhere
+    else: a mistyped endpoint on a live host answered 404 and read as
+    reachable, while a service that answered 503 during model loading read the
+    same as one that was not there at all. Never raises.
     """
-    owns = client is None
-    http = client or httpx.AsyncClient(base_url=endpoint, timeout=_PROBE_TIMEOUT_S)
+    http = ClientHandle(client, base_url=endpoint, timeout=_PROBE_TIMEOUT_S)
     try:
-        response = await http.get("/healthz")
-    except httpx.HTTPError:
-        return False
-    else:
-        return response.status_code < HTTPStatus.INTERNAL_SERVER_ERROR
+        return await probe_endpoint(http.client, "/healthz", timeout_s=_PROBE_TIMEOUT_S)
     finally:
-        if owns:
-            await http.aclose()
+        await http.aclose()

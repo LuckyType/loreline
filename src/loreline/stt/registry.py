@@ -11,22 +11,22 @@ only over ``/audio/transcriptions``. The model decides which transport applies
 (see :func:`loreline.capabilities.is_realtime_model`).
 
 The model is passed in rather than read off the config: a provider row serves
-several interactions at once, so it cannot carry one model, and every action
-route now requires the caller to choose. What is left is the health probe in
-POST /providers/{id}/test, which has no caller to ask - it gets the model
-capabilities.yaml marks as this kind's transcription default.
+several interactions at once, so it cannot carry one model, and every caller
+(a session, a re-processing job) has chosen one. Nothing here resolves a
+default: the one caller that used to arrive without a model, the health probe,
+no longer builds a connector at all (see :mod:`loreline.health_probe`).
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
 
-from loreline.capabilities import curates_a_catalogue, default_model, is_realtime_model
-from loreline.models import Interaction, ProviderConfig, ProviderKind
+from loreline.capabilities import is_realtime_model
+from loreline.models import ProviderConfig, ProviderKind
 from loreline.secrets import SecretStore
 from loreline.stt.base import STTBackend
 
-# The third argument is the resolved model, or None for a kind whose catalogue
+# The third argument is the chosen model, or None for a kind whose catalogue
 # this repo does not curate (the self-hosted one) - see ``create_backend``. It
 # is passed alongside the config rather than stamped onto a copy of it: a
 # provider row has no model field to stamp, and the connector and the transport
@@ -62,40 +62,24 @@ def register(
     return decorator
 
 
-def create_backend(
-    config: ProviderConfig, secrets: SecretStore, model: str | None = None
-) -> STTBackend:
+def create_backend(config: ProviderConfig, secrets: SecretStore, model: str | None) -> STTBackend:
     """Instantiate a backend for ``config``, resolved by kind *and* model.
 
-    ``model`` is what the session, the re-processing job or the picker chose.
-    None means nobody chose - only the health probe - and falls back to the
-    kind's declared transcription default. That resolution happens here, once,
-    so the transport lookup and the connector always agree on which model is
-    running; passing it through the config was how they could disagree.
+    ``model`` is what the session, the re-processing job or the picker chose,
+    and choosing is the caller's job: nothing is resolved here, so the
+    transport lookup and the connector always agree on which model is
+    running, which passing it through the config was how they could disagree.
 
-    The resolved model can still be None, for a kind whose models are whatever
-    the operator installed. Connectors handle that by naming no model and
-    letting the endpoint apply its own default. A kind that *does* curate a
-    catalogue and still resolves nothing is a different matter, and raises.
+    None is allowed for one reason only, a kind whose models are whatever the
+    operator installed (the self-hosted one): its connector then names no
+    model and lets the server apply its own default. Every other kind's
+    callers name one, because their request schemas require it.
     """
     _load_backends()
-    resolved = model or default_model(config.kind, Interaction.TRANSCRIBE)
-    if resolved is None and curates_a_catalogue(config.kind):
-        # The catalogue exists but has nothing left to offer for transcription
-        # - every model retired and was removed, say. OpenAI is the plausible
-        # case: whisper-1 and the whole gpt-4o-transcribe family share a
-        # removal date. Left to fall through, this would post a request with no
-        # model and surface as the vendor complaining about a missing field,
-        # which points at the wrong file entirely.
-        msg = (
-            f"capabilities.yaml offers no transcription model for kind "
-            f"{config.kind.value!r}; choose a model explicitly or add one to the file"
-        )
-        raise ValueError(msg)
-    realtime = is_realtime_model(config.kind, resolved)
+    realtime = is_realtime_model(config.kind, model)
     factory = _REGISTRY.get((config.kind, realtime))
     if factory is not None:
-        return factory(config, secrets, resolved)
+        return factory(config, secrets, model)
     if (config.kind, not realtime) in _REGISTRY:
         # The kind exists but this model needs the transport we lack: say so,
         # rather than letting the wrong connector produce a provider-side
@@ -104,7 +88,7 @@ def create_backend(
         # next vendor to split its catalogue across transports will.
         transport = "streaming" if realtime else "batch"
         msg = (
-            f"model {resolved!r} needs a {transport} connector, which this app "
+            f"model {model!r} needs a {transport} connector, which this app "
             f"does not have for kind {config.kind.value!r}"
         )
         raise ValueError(msg)

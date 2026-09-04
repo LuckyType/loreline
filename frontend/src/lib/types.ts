@@ -140,12 +140,21 @@ export type AuthScheme =
 /** How to reach a vendor for one interaction over one transport. A null url
  *  (or a `{base_url}` template) is an address only the operator can supply,
  *  through the provider row's base_url. */
+/** The cheap question the health probe asks of a surface: a path (and query)
+ *  for an HTTP surface, the first frame to send for a socket one. Null means
+ *  the default question (GET /models, or read the socket's greeting). */
+export interface HealthProbe {
+	path: string | null
+	params: Record<string, string>
+	frame: Record<string, unknown> | null
+}
+
 export interface Surface {
 	url: string | null
 	auth: AuthScheme
 	overridable: boolean
 	headers: Record<string, string>
-	health: string | null
+	health: HealthProbe | null
 	public: boolean
 }
 
@@ -428,7 +437,12 @@ export interface Health {
 	disk_total_bytes?: number
 	alerts_enabled?: boolean
 	diarizer_endpoint?: string | null
+	/** Something answered at the endpoint (any status but `unreachable`). */
 	diarizer_reachable?: boolean | null
+	/** The probe's graded verdict, the same states the provider Test button renders. */
+	diarizer_status?: HealthStatus | null
+	/** The service's own words on why it is not healthy, where it gave any. */
+	diarizer_detail?: string | null
 	/** Epoch seconds live transcription started failing; null when healthy/idle. */
 	stt_degraded_since?: number | null
 	/** Vendor's own reason live transcription stopped for good; null while any provider works. */

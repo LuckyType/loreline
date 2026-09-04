@@ -15,7 +15,6 @@ import httpx
 import pytest
 
 from loreline.audio.chunker import Utterance
-from loreline.health import HealthReport, HealthStatus
 from loreline.models import (
     Glossary,
     Protocol,
@@ -71,9 +70,6 @@ class _FakeConnector(Connector[str]):
     async def transcribe_one(self, utterance: Utterance, prepared: str) -> Transcription | None:
         self.seen.append((utterance, prepared))
         return self._results.pop(0)
-
-    async def health(self) -> HealthReport:
-        return HealthReport(HealthStatus.HEALTHY)
 
 
 async def _run(
@@ -182,9 +178,6 @@ class _FakeHttpConnector(HttpConnector[None]):
         response = await self._client.post("/transcribe", content=utterance.pcm)
         self._raise_for_status(response)
         return Transcription(str(response.json()["text"]))
-
-    async def health(self) -> HealthReport:
-        return HealthReport(HealthStatus.HEALTHY)
 
 
 def _mock_client(handler: Callable[[httpx.Request], httpx.Response]) -> httpx.AsyncClient:

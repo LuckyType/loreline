@@ -16,11 +16,10 @@ import json
 from urllib.parse import urlencode
 
 from websockets.asyncio.client import connect
-from websockets.exceptions import ConnectionClosedOK, WebSocketException
+from websockets.exceptions import ConnectionClosedOK
 
 from loreline.audio.chunker import Utterance
 from loreline.capabilities import surface_for
-from loreline.health import PROBE_TIMEOUT_S, HealthReport, HealthStatus
 from loreline.logging import get_logger
 from loreline.models import Glossary, Interaction, ProviderConfig, ProviderKind, Word
 from loreline.secrets import SecretStore
@@ -29,10 +28,8 @@ from loreline.stt.backends._ws import (
     as_dict,
     as_list,
     as_obj_dict,
-    classify_handshake_error,
     get_bool,
     get_str,
-    probe_health,
 )
 from loreline.stt.base import Connector, Transcription, glossary_terms, secret_for
 from loreline.stt.registry import register
@@ -118,23 +115,6 @@ class DeepgramBackend(Connector[str]):
                 elif kind in {"Metadata", "Close"}:
                     break
         return Transcription(text=" ".join(parts), words=words)
-
-    async def health(self) -> HealthReport:
-        """Open the socket and read one frame, without raising.
-
-        A rejected upgrade is a plain HTTP response, so a bad key surfaces as a
-        status code on the handshake and grades exactly like an HTTP probe -
-        which is what makes "wrong key" distinguishable from "wrong host" here
-        at all. Before, both were a bare False.
-        """
-        try:
-            async with asyncio.timeout(PROBE_TIMEOUT_S):
-                async with connect(self._url, additional_headers=self._headers) as ws:
-                    return await probe_health(ws, json.dumps({"type": "CloseStream"}))
-        except TimeoutError:
-            return HealthReport(HealthStatus.UNREACHABLE, "the socket did not open in time")
-        except (OSError, WebSocketException) as exc:
-            return classify_handshake_error(exc)
 
 
 def _parse_results(message: dict[str, object], *, offset: float) -> tuple[str, list[Word]]:
