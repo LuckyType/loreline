@@ -8,7 +8,7 @@ import httpx
 import pytest
 
 from loreline.audio.chunker import Utterance
-from loreline.models import Glossary, Protocol, ProviderConfig, ProviderKind, TranscriptEvent
+from loreline.models import Glossary, ProviderConfig, ProviderKind, TranscriptEvent
 from loreline.stt.backends.openai_compat import OpenAICompatBackend
 from mocks.openai_compat import create_app
 
@@ -19,7 +19,6 @@ def _backend(client: httpx.AsyncClient) -> OpenAICompatBackend:
         name="Speaches LAN",
         kind=ProviderKind.OPENAI_COMPAT,
         base_url="http://mock/v1",
-        protocol=Protocol.HTTP_BATCH,
     )
     return OpenAICompatBackend(config, model="whisper-1", client=client, language="de")
 
@@ -79,7 +78,6 @@ def _verbose_config() -> ProviderConfig:
         id="c1",
         name="Compat",
         kind=ProviderKind.OPENAI_COMPAT,
-        protocol=Protocol.HTTP_BATCH,
         base_url="http://stt:8000/v1",
         sample_rate=_SAMPLE_RATE,
     )

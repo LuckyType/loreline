@@ -247,15 +247,7 @@ export function isLlmProvider(p: { kind: ProviderKind }): boolean {
 	return supportsInteraction(p, 'summarize')
 }
 
-export type ProtocolKind = 'ws' | 'grpc' | 'http_sse' | 'http_batch'
-
 export type DiarizationModeKind = 'inline' | 'remote' | 'openai' | 'none'
-
-export interface ProviderCaps {
-	streaming: boolean
-	inline_diarization: boolean
-	vocab_param: string | null
-}
 
 /** A model's price, in USD per **million** tokens (the backend scales
  *  OpenRouter's per-token figures - see ModelPrice in src/loreline/models.py). */
@@ -307,14 +299,12 @@ export interface ProviderConfig {
 	kind: ProviderKind
 	base_url: string | null
 	auth_ref: string | null
-	protocol: ProtocolKind
 	/** No `model`: a row serves every interaction its kind declares, so one
 	 *  stored model cannot be right for all of them. Each picker chooses per
 	 *  request; `favorite_models` is the row's shortlist, not its choice. */
 	favorite_models: string[]
 	sample_rate: number
 	language: string
-	capabilities: ProviderCaps
 	routing?: OpenRouterRouting | null
 	enabled: boolean
 	secret_set?: boolean
@@ -324,7 +314,6 @@ export interface ProviderConfig {
 export interface ProviderCreate {
 	name: string
 	kind: ProviderKind
-	protocol: ProtocolKind
 	base_url?: string | null
 	favorite_models?: string[]
 	sample_rate?: number

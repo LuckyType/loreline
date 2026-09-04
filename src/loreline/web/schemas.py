@@ -10,8 +10,6 @@ from loreline.models import (
     ORIGINAL_VERSION,
     DiarizationConfig,
     OpenRouterRouting,
-    Protocol,
-    ProviderCaps,
     ProviderKind,
 )
 from loreline.monitoring.alerts import AlertChannelType, AlertLevel
@@ -28,14 +26,12 @@ class ProviderCreate(BaseModel):
 
     name: str
     kind: ProviderKind
-    protocol: Protocol
     base_url: str | None = None
     # No `model`: a provider row serves every interaction its kind declares, so
     # it cannot hold one model. See ProviderConfig in src/loreline/models.py.
     favorite_models: list[str] = Field(default_factory=list[str])
     sample_rate: int = 16000
     language: str = "de"
-    capabilities: ProviderCaps = Field(default_factory=ProviderCaps)
     routing: OpenRouterRouting | None = None  # OpenRouter kind only
     enabled: bool = True
     api_key: str | None = Field(

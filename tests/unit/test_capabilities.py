@@ -31,7 +31,7 @@ from loreline.capabilities import (
     surface_for,
 )
 from loreline.capability_config import CapabilityConfig, ModelSpec, TranscribeCapabilities
-from loreline.models import Interaction, ModelInfo, Protocol, ProviderConfig, ProviderKind
+from loreline.models import Interaction, ModelInfo, ProviderConfig, ProviderKind
 
 
 class TestCapabilityTable:
@@ -523,9 +523,7 @@ class TestGeminiSummarizeEfforts:
 
 
 def _row(kind: ProviderKind, base_url: str | None = None) -> ProviderConfig:
-    return ProviderConfig(
-        id="p1", name="Row", kind=kind, protocol=Protocol.HTTP_BATCH, base_url=base_url
-    )
+    return ProviderConfig(id="p1", name="Row", kind=kind, base_url=base_url)
 
 
 class TestSurfaces:

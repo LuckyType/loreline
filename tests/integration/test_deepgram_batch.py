@@ -20,7 +20,7 @@ from typing import Any
 import httpx
 
 from loreline.audio.chunker import Utterance
-from loreline.models import Glossary, Protocol, ProviderConfig, ProviderKind, TranscriptEvent
+from loreline.models import Glossary, ProviderConfig, ProviderKind, TranscriptEvent
 from loreline.stt.backends.deepgram_batch import DeepgramBatchBackend
 
 BASE_URL = "https://api.deepgram.com"
@@ -31,7 +31,6 @@ def _config() -> ProviderConfig:
         id="dg-1",
         name="Deepgram",
         kind=ProviderKind.DEEPGRAM,
-        protocol=Protocol.HTTP_BATCH,
         language="de",
     )
 

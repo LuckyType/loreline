@@ -23,15 +23,14 @@ from websockets.http11 import Request, Response
 import loreline.stt.backends._ws as ws_helpers
 from loreline.health import HealthStatus
 from loreline.health_probe import probe_provider, probe_surface, probe_target
-from loreline.models import Interaction, Protocol, ProviderConfig, ProviderKind
+from loreline.models import Interaction, ProviderConfig, ProviderKind
 from mocks.assemblyai_ws import assemblyai_handler
 from mocks.deepgram_ws import deepgram_handler
 from mocks.gemini_live_ws import gemini_live_handler
 
 
 def _row(kind: ProviderKind, base_url: str | None = None) -> ProviderConfig:
-    protocol = Protocol.WS if base_url and base_url.startswith("ws") else Protocol.HTTP_BATCH
-    return ProviderConfig(id="p1", name=kind.value, kind=kind, base_url=base_url, protocol=protocol)
+    return ProviderConfig(id="p1", name=kind.value, kind=kind, base_url=base_url)
 
 
 class _Seen:

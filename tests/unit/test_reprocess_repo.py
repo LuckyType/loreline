@@ -8,32 +8,8 @@ from pathlib import Path
 
 import pytest_asyncio
 
-from loreline.bus import EventBus
-from loreline.diarization.openai_diarizer import OpenAIDiarizer
-from loreline.models import (
-    DiarizationConfig,
-    DiarizationMode,
-    JobStatus,
-    Protocol,
-    ProviderConfig,
-    ProviderKind,
-    ReprocessJob,
-    Session,
-)
-from loreline.persistence import (
-    AudioStore,
-    Database,
-    GlossaryRepository,
-    ProviderRepository,
-    ReprocessRepository,
-    SessionRepository,
-    TranscriptRepository,
-)
-from loreline.reprocess.jobs import (
-    ReprocessManager,
-    _resolve_openai_key,  # pyright: ignore[reportPrivateUsage]
-)
-from loreline.secrets import SecretStore
+from loreline.models import JobStatus, ReprocessJob, Session
+from loreline.persistence import Database, ReprocessRepository, SessionRepository
 
 
 @pytest_asyncio.fixture
@@ -70,65 +46,6 @@ async def test_mark_interrupted_fails_running_and_queued(db: Database) -> None:
     assert queued is not None and queued.status is JobStatus.ERROR
     assert done is not None and done.status is JobStatus.DONE  # completed jobs untouched
     assert running.error == "interrupted by restart"
-
-
-def test_resolve_openai_key_prefers_configured_provider(tmp_path: Path) -> None:
-    secrets = SecretStore(tmp_path / "secrets.json")
-    secrets.set("provider:oai", "sk-from-store")
-
-    def provider(kind: ProviderKind, auth_ref: str | None) -> ProviderConfig:
-        return ProviderConfig(
-            id=kind.value, name=kind.value, kind=kind, protocol=Protocol.WS, auth_ref=auth_ref
-        )
-
-    providers = [
-        provider(ProviderKind.DEEPGRAM, "provider:dg"),
-        provider(ProviderKind.OPENAI, "provider:oai"),
-    ]
-    # Reuses the stored OpenAI provider key (so batch diarization needs no env var).
-    assert _resolve_openai_key(providers, secrets) == "sk-from-store"
-    # No OpenAI provider configured -> None (OpenAIDiarizer then falls back to the env var).
-    assert _resolve_openai_key([provider(ProviderKind.DEEPGRAM, "provider:dg")], secrets) is None
-
-
-async def test_build_diarizer_openai_mode_reuses_stored_key(db: Database, tmp_path: Path) -> None:
-    """``_build_diarizer`` is shared by both the "diarize" and "transcribe" reprocess
-    operations (see ``_transcribe_session``) - it must resolve the stored OpenAI
-    provider key for either, not just the dedicated "diarize" op."""
-    providers = ProviderRepository(db)
-    secrets = SecretStore(tmp_path / "secrets.json")
-    await providers.upsert(
-        ProviderConfig(
-            id="oai",
-            name="OpenAI",
-            kind=ProviderKind.OPENAI,
-            protocol=Protocol.WS,
-            auth_ref="provider:oai",
-        )
-    )
-    secrets.set("provider:oai", "sk-from-store")
-
-    def _unreachable_factory(_cfg: DiarizationConfig) -> object:
-        msg = "OPENAI mode must not fall through to the generic diarizer_factory"
-        raise AssertionError(msg)
-
-    manager = ReprocessManager(
-        providers=providers,
-        glossaries=GlossaryRepository(db),
-        sessions=SessionRepository(db),
-        transcripts=TranscriptRepository(db),
-        reprocess=ReprocessRepository(db),
-        secrets=secrets,
-        audio_store=AudioStore(tmp_path / "audio"),
-        transcript_bus=EventBus(),
-        diarizer_factory=_unreachable_factory,  # pyright: ignore[reportArgumentType]
-    )
-
-    diarizer = await manager._build_diarizer(  # pyright: ignore[reportPrivateUsage]
-        DiarizationConfig(mode=DiarizationMode.OPENAI)
-    )
-    assert isinstance(diarizer, OpenAIDiarizer)
-    assert diarizer._api_key == "sk-from-store"  # pyright: ignore[reportPrivateUsage]
 
 
 async def test_delete_version_takes_the_diarize_jobs_aimed_at_it(db: Database) -> None:

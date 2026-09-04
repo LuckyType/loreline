@@ -1,4 +1,4 @@
-"""Integration tests for the STT router (failover, diarization, compare)."""
+"""Integration tests for the STT router (failover, diarization)."""
 
 from __future__ import annotations
 
@@ -13,7 +13,6 @@ from loreline.bus import EventBus
 from loreline.models import (
     DiarizationConfig,
     DiarizationMode,
-    Protocol,
     ProviderConfig,
     ProviderKind,
     SpeakerSegment,
@@ -28,7 +27,6 @@ def _config(provider_id: str) -> ProviderConfig:
         id=provider_id,
         name=provider_id,
         kind=ProviderKind.OPENAI_COMPAT,
-        protocol=Protocol.HTTP_BATCH,
     )
 
 
@@ -336,21 +334,6 @@ async def test_router_fallback_success_is_not_degraded() -> None:
     assert all(e.source == "fallback" for e in events)
     assert router.degraded_since is None
     assert alerts == []
-
-
-async def test_compare_fan_out() -> None:
-    bus: EventBus[TranscriptEvent] = EventBus()
-    router = SttRouter(FakeBackend("p1"), bus, RouterConfig(session_id="s1"))
-    backends = {
-        "p1": FakeBackend("p1", text="one"),
-        "p2": FakeBackend("p2", text="two"),
-        "bad": FailingBackend("bad"),
-    }
-    utterance = Utterance(pcm=b"\x01\x00" * 1600, start=0.0, end=1.0)
-    result = await router.transcribe_compare(utterance, backends)
-    assert result["p1"][0].text == "one"
-    assert result["p2"][0].text == "two"
-    assert result["bad"] == []
 
 
 # --- terminal provider failures --------------------------------------------

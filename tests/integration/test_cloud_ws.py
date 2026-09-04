@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator
 from websockets.asyncio.server import ServerConnection, serve
 
 from loreline.audio.chunker import Utterance
-from loreline.models import Glossary, Protocol, ProviderConfig, ProviderKind, TranscriptEvent
+from loreline.models import Glossary, ProviderConfig, ProviderKind, TranscriptEvent
 from loreline.stt.backends.assemblyai import AssemblyAIBackend
 from loreline.stt.backends.deepgram import DeepgramBackend
 from mocks.assemblyai_ws import assemblyai_handler
@@ -29,7 +29,6 @@ def _dg_config(port: int) -> ProviderConfig:
         name="Deepgram",
         kind=ProviderKind.DEEPGRAM,
         base_url=f"ws://127.0.0.1:{port}",
-        protocol=Protocol.WS,
     )
 
 
@@ -39,7 +38,6 @@ def _aai_config(port: int) -> ProviderConfig:
         name="AssemblyAI",
         kind=ProviderKind.ASSEMBLYAI,
         base_url=f"ws://127.0.0.1:{port}",
-        protocol=Protocol.WS,
     )
 
 
@@ -51,7 +49,6 @@ async def test_deepgram_streaming_with_diarization() -> None:
             name="Deepgram",
             kind=ProviderKind.DEEPGRAM,
             base_url=f"ws://127.0.0.1:{port}",
-            protocol=Protocol.WS,
         )
         backend = DeepgramBackend(config, api_key="secret")
         glossary = Glossary(campaign_id="c1", terms=["Drakonia"])
@@ -81,7 +78,6 @@ async def test_assemblyai_streaming_with_diarization() -> None:
             name="AssemblyAI",
             kind=ProviderKind.ASSEMBLYAI,
             base_url=f"ws://127.0.0.1:{port}",
-            protocol=Protocol.WS,
         )
         backend = AssemblyAIBackend(config, api_key="secret")
         events: list[TranscriptEvent] = [

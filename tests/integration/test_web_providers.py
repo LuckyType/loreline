@@ -14,7 +14,6 @@ def _provider_body() -> dict[str, object]:
     return {
         "name": "Local Whisper",
         "kind": "openai_compat",
-        "protocol": "http_batch",
         "base_url": "http://localhost:9000",
         "model": "whisper-1",
         "sample_rate": 16000,
@@ -152,7 +151,7 @@ async def test_test_route_reports_a_missing_key_without_calling_out(
     OpenAI-compatible /models answers a keyless request with 404 - a wrong-URL
     status for what is really a missing key.
     """
-    body = {"name": "Gemini", "kind": "gemini", "protocol": "http_batch"}
+    body = {"name": "Gemini", "kind": "gemini"}
     pid = (await client.post("/api/providers", json=body)).json()["id"]
 
     resp = await client.post(f"/api/providers/{pid}/test")
@@ -178,7 +177,7 @@ async def test_test_route_hands_the_row_and_its_key_to_the_probe_and_renders_the
         return HealthReport(HealthStatus.UNAUTHORIZED, "API key not valid.")
 
     monkeypatch.setattr("loreline.web.routes.providers.probe_provider", fake_probe)
-    body = {"name": "Gemini", "kind": "gemini", "protocol": "http_batch", "api_key": "bad"}
+    body = {"name": "Gemini", "kind": "gemini", "api_key": "bad"}
     pid = (await client.post("/api/providers", json=body)).json()["id"]
 
     resp = await client.post(f"/api/providers/{pid}/test")

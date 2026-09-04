@@ -1,17 +1,14 @@
-"""STT router: primary/fallback failover + compare fan-out.
+"""STT router: primary/fallback failover.
 
-Consumes a stream of voiced ``Utterance`` chunks and drives one or more STT
-backends, publishing ``TranscriptEvent`` objects to an ``EventBus``:
-
-- **Live mode** (``run``): a single primary backend per utterance; on error or
-  timeout, an optional fallback backend is tried. Diarization (inline or remote)
-  is merged onto each event before publishing. A failure that will repeat for
-  every remaining utterance (a rejected key, an exhausted balance, a model that
-  does not exist) retires that provider instead of being paid for again, and
-  once every provider is retired the run raises ``ProvidersExhaustedError``
-  rather than looking busy while transcribing nothing.
-- **Compare mode** (``transcribe_compare``): fan out the same utterance to every
-  configured backend and return their outputs side by side (web-UI testing).
+Consumes a stream of voiced ``Utterance`` chunks and drives one STT backend
+per utterance, publishing ``TranscriptEvent`` objects to an ``EventBus``. On
+error or timeout, an optional fallback backend is tried. Diarization (inline
+or remote) is merged onto each event before publishing. A failure that will
+repeat for every remaining utterance (a rejected key, an exhausted balance, a
+model that does not exist) retires that provider instead of being paid for
+again, and once every provider is retired the run raises
+``ProvidersExhaustedError`` rather than looking busy while transcribing
+nothing.
 """
 
 from __future__ import annotations
@@ -19,7 +16,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 
 from loreline.audio.chunker import Utterance
@@ -128,28 +125,6 @@ class SttRouter:
             for event in events:
                 merged = await self._merge_diarization(event, utterance)
                 await self._bus.publish(merged)
-
-    async def transcribe_compare(
-        self, utterance: Utterance, backends: Mapping[str, STTBackend]
-    ) -> dict[str, list[TranscriptEvent]]:
-        """Fan an utterance out to multiple backends; return per-backend events."""
-        results = await asyncio.gather(
-            *(self._collect(backend, utterance) for backend in backends.values()),
-            return_exceptions=True,
-        )
-        output: dict[str, list[TranscriptEvent]] = {}
-        for provider_id, result in zip(backends, results, strict=True):
-            if isinstance(result, BaseException):
-                log.warning(
-                    "stt.compare.error",
-                    provider=backends[provider_id].config.name,
-                    provider_id=provider_id,
-                    error=str(result),
-                )
-                output[provider_id] = []
-            else:
-                output[provider_id] = result
-        return output
 
     async def _transcribe_with_failover(self, utterance: Utterance) -> list[TranscriptEvent]:
         """Try each provider still worth trying; [] when none produced a transcript.

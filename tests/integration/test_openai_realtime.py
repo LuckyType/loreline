@@ -10,7 +10,7 @@ from websockets.asyncio.server import ServerConnection, serve
 
 from loreline.audio.chunker import Utterance
 from loreline.audio.resample import resample_pcm16
-from loreline.models import Glossary, Protocol, ProviderConfig, ProviderKind, TranscriptEvent
+from loreline.models import Glossary, ProviderConfig, ProviderKind, TranscriptEvent
 from loreline.stt.backends.openai_realtime import OpenAIRealtimeBackend
 from mocks.openai_realtime_ws import openai_realtime_handler
 
@@ -33,7 +33,6 @@ async def test_realtime_transcribe_via_mock() -> None:
             name="OpenAI",
             kind=ProviderKind.OPENAI,
             base_url=f"ws://127.0.0.1:{port}",
-            protocol=Protocol.WS,
             sample_rate=24000,  # == realtime output rate -> no resample (no numpy needed)
         )
         backend = OpenAIRealtimeBackend(config, api_key="secret")
@@ -63,7 +62,6 @@ async def test_realtime_reuses_one_connection_across_utterances() -> None:
             name="OpenAI",
             kind=ProviderKind.OPENAI,
             base_url=f"ws://127.0.0.1:{port}",
-            protocol=Protocol.WS,
             sample_rate=24000,
         )
         backend = OpenAIRealtimeBackend(config, api_key="secret")
@@ -98,7 +96,6 @@ async def test_realtime_applies_glossary_prompt() -> None:
             name="OpenAI",
             kind=ProviderKind.OPENAI,
             base_url=f"ws://127.0.0.1:{port}",
-            protocol=Protocol.WS,
             sample_rate=24000,
         )
         backend = OpenAIRealtimeBackend(config, api_key="x")
@@ -138,7 +135,6 @@ async def test_realtime_prompt_capped_to_openai_limit() -> None:
             name="OpenAI",
             kind=ProviderKind.OPENAI,
             base_url=f"ws://127.0.0.1:{port}",
-            protocol=Protocol.WS,
             sample_rate=24000,
         )
         backend = OpenAIRealtimeBackend(config, api_key="x")
@@ -193,7 +189,6 @@ async def test_realtime_prompt_rejection_downgrades_to_promptless() -> None:
             name="OpenAI",
             kind=ProviderKind.OPENAI,
             base_url=f"ws://127.0.0.1:{port}",
-            protocol=Protocol.WS,
             sample_rate=24000,
         )
         backend = OpenAIRealtimeBackend(config, api_key="x")

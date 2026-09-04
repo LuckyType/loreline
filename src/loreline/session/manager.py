@@ -20,7 +20,6 @@ from typing import TYPE_CHECKING, Protocol, cast
 from loreline.audio.chunker import SpeechDetector, Utterance, VadChunker
 from loreline.bus import EventBus
 from loreline.capabilities import supports_inline_diarization, supports_live_capture
-from loreline.diarization.provider import create_diarizer
 from loreline.logging import bind_log_context, get_logger, log_context
 from loreline.models import (
     DiarizationMode,
@@ -35,6 +34,7 @@ from loreline.stt.router import ProvidersExhaustedError, RouterConfig, SttRouter
 
 if TYPE_CHECKING:
     from loreline.diarization.base import DiarizationProvider
+    from loreline.diarization.provider import BuildDiarizer
     from loreline.models import DiarizationConfig, ProviderConfig
     from loreline.monitoring.alerts import AlertManager
     from loreline.persistence import (
@@ -65,7 +65,6 @@ class CaptureSource(Protocol):
 
 
 CaptureFactory = Callable[["StartSessionRequest", int], tuple[CaptureSource, SpeechDetector]]
-DiarizerFactory = Callable[["DiarizationConfig"], "DiarizationProvider"]
 
 
 class SessionActiveError(RuntimeError):
@@ -127,11 +126,11 @@ class SessionManager:
         transcripts: TranscriptRepository,
         secrets: SecretStore,
         transcript_bus: EventBus[TranscriptEvent],
+        diarizer_factory: BuildDiarizer,
         audio_store: AudioStore | None = None,
         alerter: AlertManager | None = None,
         capture_factory: CaptureFactory | None = None,
         backend_factory: BackendFactory | None = None,
-        diarizer_factory: DiarizerFactory | None = None,
     ) -> None:
         self._providers = providers
         self._glossaries = glossaries
@@ -143,7 +142,7 @@ class SessionManager:
         self._alerter = alerter
         self._capture_factory = capture_factory or _default_capture
         self._backend_factory = backend_factory or create_backend
-        self._diarizer_factory = diarizer_factory or create_diarizer
+        self._diarizer_factory = diarizer_factory
         self._runtime: _Runtime | None = None
         self._lock = asyncio.Lock()
 
@@ -258,10 +257,10 @@ class SessionManager:
             raise SessionConfigError(str(exc)) from exc
         return primary, fallback, backends
 
-    def _build_diarizer(self, config: DiarizationConfig) -> DiarizationProvider:
+    async def _build_diarizer(self, config: DiarizationConfig) -> DiarizationProvider:
         """Instantiate the diarizer, translating an invalid config to a 400."""
         try:
-            return self._diarizer_factory(config)
+            return await self._diarizer_factory(config)
         except ValueError as exc:
             raise SessionConfigError(str(exc)) from exc
 
@@ -278,7 +277,7 @@ class SessionManager:
             glossary = (
                 await self._glossaries.get_effective(req.campaign_id) if req.use_glossary else None
             )
-            diarizer = self._build_diarizer(req.diarization)
+            diarizer = await self._build_diarizer(req.diarization)
             sample_rate = primary_cfg.sample_rate
 
             source, detector = self._capture_factory(req, sample_rate)

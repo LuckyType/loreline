@@ -16,10 +16,12 @@ from starlette.status import (
     HTTP_502_BAD_GATEWAY,
 )
 
+from loreline.capabilities import supports
 from loreline.export import EXPORTERS, canonical_transcript, relabel_speakers, to_txt, variant_view
-from loreline.llm import LLM_KINDS, LLMError, summarize_transcript
+from loreline.llm import LLMError, summarize_transcript
 from loreline.models import (
     ORIGINAL_VERSION,
+    Interaction,
     Session,
     SessionStatus,
     TranscriptEvent,
@@ -195,7 +197,8 @@ async def summarize_session(
     provider = await state.providers.get(body.provider_id)
     if provider is None:
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="provider not found")
-    if provider.kind not in LLM_KINDS:
+    # Asked of the yaml per request, so a capabilities.reload() is honoured.
+    if not supports(provider.kind, Interaction.SUMMARIZE):
         raise HTTPException(
             status_code=HTTP_400_BAD_REQUEST, detail="provider is not an LLM provider"
         )

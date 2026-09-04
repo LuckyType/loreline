@@ -15,7 +15,10 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from loreline.audio.chunker import SpeechDetector, Utterance
+from loreline.diarization import openai_diarizer
+from loreline.diarization.base import DiarizationProvider
 from loreline.models import (
+    DiarizationConfig,
     ProviderConfig,
     Session,
     SessionStatus,
@@ -135,6 +138,11 @@ class FakeDiarizer:
         return None
 
 
+async def fake_diarizers(_config: DiarizationConfig) -> DiarizationProvider:
+    """Stands in for the app's diarizer factory: a fake for every mode."""
+    return FakeDiarizer()
+
+
 @pytest.fixture
 def session_settings(tmp_path: Path) -> Settings:
     return Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="test-secret")
@@ -146,7 +154,7 @@ async def session_client(session_settings: Settings) -> AsyncIterator[AsyncClien
         session_settings,
         capture_factory=capture_factory,  # type: ignore[arg-type]
         backend_factory=FakeBackend,  # type: ignore[arg-type]
-        diarizer_factory=lambda _cfg: FakeDiarizer(),
+        diarizer_factory=fake_diarizers,
     )
     async with LifespanManager(app):
         transport = ASGITransport(app=app)
@@ -157,9 +165,52 @@ async def session_client(session_settings: Settings) -> AsyncIterator[AsyncClien
 async def _create_provider(client: AsyncClient) -> str:
     resp = await client.post(
         "/api/providers",
-        json={"name": "Fake", "kind": "openai_compat", "protocol": "http_batch"},
+        json={"name": "Fake", "kind": "openai_compat"},
     )
     return resp.json()["id"]
+
+
+async def test_openai_diarization_runs_a_live_session_with_the_stored_key(
+    session_settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A live session in OpenAI diarization mode gets its key the way a
+    reprocess job does: from the configured OpenAI provider row first, the
+    environment second. The session path used to build its diarizer through a
+    factory that knew nothing of the row, so only the env var ever reached it.
+    No diarizer override here: this is the app's own factory."""
+    built: list[str | None] = []
+
+    class Recording(FakeDiarizer):
+        def __init__(self, *, api_key: str | None = None, **_: object) -> None:
+            built.append(api_key)
+
+    monkeypatch.setattr(openai_diarizer, "OpenAIDiarizer", Recording)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-from-env")
+    app = create_app(
+        session_settings,
+        capture_factory=capture_factory,  # type: ignore[arg-type]
+        backend_factory=FakeBackend,  # type: ignore[arg-type]
+    )
+    async with LifespanManager(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            pid = await _create_provider(client)
+            stored = await client.post(
+                "/api/providers",
+                json={"name": "OpenAI", "kind": "openai", "api_key": "sk-from-store"},
+            )
+            assert stored.status_code == 201
+            start = await client.post(
+                "/api/session/start",
+                json={
+                    "primary_provider": pid,
+                    "model": _MODEL,
+                    "diarization": {"mode": "openai"},
+                },
+            )
+            assert start.status_code == 201
+            await client.post("/api/session/stop")
+    assert built == ["sk-from-store"]
 
 
 async def test_session_lifecycle(session_client: AsyncClient) -> None:
@@ -221,7 +272,7 @@ async def test_start_names_the_model_for_the_backend(session_settings: Settings)
         session_settings,
         capture_factory=capture_factory,  # type: ignore[arg-type]
         backend_factory=factory,  # type: ignore[arg-type]
-        diarizer_factory=lambda _cfg: FakeDiarizer(),
+        diarizer_factory=fake_diarizers,
     )
     async with LifespanManager(app):
         transport = ASGITransport(app=app)
@@ -249,7 +300,7 @@ async def test_start_names_the_fallback_model_separately(session_settings: Setti
         session_settings,
         capture_factory=capture_factory,  # type: ignore[arg-type]
         backend_factory=factory,  # type: ignore[arg-type]
-        diarizer_factory=lambda _cfg: FakeDiarizer(),
+        diarizer_factory=fake_diarizers,
     )
     async with LifespanManager(app):
         transport = ASGITransport(app=app)
@@ -284,7 +335,7 @@ async def test_start_applies_the_glossary_unless_switched_off(session_settings: 
         session_settings,
         capture_factory=capture_factory,  # type: ignore[arg-type]
         backend_factory=factory,  # type: ignore[arg-type]
-        diarizer_factory=lambda _cfg: FakeDiarizer(),
+        diarizer_factory=fake_diarizers,
     )
     async with LifespanManager(app):
         transport = ASGITransport(app=app)
@@ -316,7 +367,7 @@ async def test_start_disabled_provider_conflicts(session_client: AsyncClient) ->
     pid = await _create_provider(session_client)
     disabled = await session_client.put(
         f"/api/providers/{pid}",
-        json={"name": "Fake", "kind": "openai_compat", "protocol": "http_batch", "enabled": False},
+        json={"name": "Fake", "kind": "openai_compat", "enabled": False},
     )
     assert disabled.status_code == 200
     resp = await session_client.post(
@@ -334,14 +385,14 @@ async def test_merge_concatenates_audio(tmp_path: Path) -> None:
         settings,
         capture_factory=capture_factory,  # type: ignore[arg-type]
         backend_factory=FakeBackend,  # type: ignore[arg-type]
-        diarizer_factory=lambda _cfg: FakeDiarizer(),
+        diarizer_factory=fake_diarizers,
     )
     async with LifespanManager(app):
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             resp = await client.post(
                 "/api/providers",
-                json={"name": "Fake", "kind": "openai_compat", "protocol": "http_batch"},
+                json={"name": "Fake", "kind": "openai_compat"},
             )
             pid = resp.json()["id"]
 
@@ -416,7 +467,7 @@ async def test_stop_returns_despite_hung_backend(
         session_settings,
         capture_factory=capture_factory,  # type: ignore[arg-type]
         backend_factory=HangingBackend,  # type: ignore[arg-type]
-        diarizer_factory=lambda _cfg: FakeDiarizer(),
+        diarizer_factory=fake_diarizers,
     )
     async with LifespanManager(app):
         transport = ASGITransport(app=app)
@@ -456,7 +507,7 @@ async def test_startup_rebuilds_orphaned_index(
             settings,
             capture_factory=capture_factory,  # type: ignore[arg-type]
             backend_factory=FakeBackend,  # type: ignore[arg-type]
-            diarizer_factory=lambda _cfg: FakeDiarizer(),
+            diarizer_factory=fake_diarizers,
         )
 
     app = make_app()
@@ -580,7 +631,7 @@ async def test_capture_keeps_recording_when_transcription_dies(
         session_settings,
         capture_factory=capture_factory,  # type: ignore[arg-type]
         backend_factory=OutOfCreditBackend,  # type: ignore[arg-type]
-        diarizer_factory=lambda _cfg: FakeDiarizer(),
+        diarizer_factory=fake_diarizers,
     )
     async with LifespanManager(app):
         transport = ASGITransport(app=app)

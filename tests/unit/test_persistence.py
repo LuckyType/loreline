@@ -12,8 +12,6 @@ from loreline.models import (
     DEFAULT_GLOSSARY_CAMPAIGN,
     Glossary,
     OpenRouterRouting,
-    Protocol,
-    ProviderCaps,
     ProviderConfig,
     ProviderKind,
     Session,
@@ -37,6 +35,7 @@ _V_DROP_GOOGLE = 10  # v11: delete rows of the removed Google STT v2 kind
 _V_MERGE_KINDS = 11  # v12: fold openrouter_stt / openai_chat onto merged kinds
 _V_DROP_VOSK = 14  # v15: delete rows of the removed vosk kind and what named them
 _V_DROP_PROVIDER_MODEL = 15  # v16: drop providers.model, chosen per request now
+_V_DROP_PROVIDER_WIRE = 16  # v17: drop providers.protocol and providers.capabilities
 
 
 @pytest_asyncio.fixture
@@ -58,7 +57,7 @@ async def test_migrations_idempotent(tmp_path: Path) -> None:
         async with database.connection.execute("SELECT MAX(version) FROM schema_version;") as cur:
             row = await cur.fetchone()
         assert row is not None
-        assert row[0] == 16
+        assert row[0] == 17
 
 
 async def test_glossary_get_effective_merges_default_and_campaign(db: Database) -> None:
@@ -131,9 +130,7 @@ async def test_provider_roundtrip(db: Database) -> None:
         kind=ProviderKind.DEEPGRAM,
         base_url=None,
         auth_ref="deepgram",
-        protocol=Protocol.WS,
         favorite_models=["nova-3"],
-        capabilities=ProviderCaps(streaming=True, inline_diarization=True, vocab_param="keyterm"),
     )
     await repo.upsert(provider)
 
@@ -199,10 +196,8 @@ async def test_migration_removes_rows_of_the_dropped_google_kind(tmp_path: Path)
         await conn.execute(
             """
             INSERT INTO providers
-                (id, name, kind, base_url, auth_ref, protocol, sample_rate,
-                 language, capabilities, enabled)
-            VALUES ('g1', 'Google STT v2', 'google', 'my-project', NULL, 'grpc',
-                    16000, 'de', '{}', 1);
+                (id, name, kind, base_url, auth_ref, sample_rate, language, enabled)
+            VALUES ('g1', 'Google STT v2', 'google', 'my-project', NULL, 16000, 'de', 1);
             """
         )
         # Rewind past the removal migration so re-connecting replays it, the
@@ -240,10 +235,8 @@ async def test_migration_removes_the_dropped_vosk_kind_and_its_references(
         await conn.execute(
             """
             INSERT INTO providers
-                (id, name, kind, base_url, auth_ref, protocol, sample_rate,
-                 language, capabilities, enabled)
-            VALUES ('v1', 'Vosk server', 'vosk', 'ws://localhost:2700', NULL, 'ws',
-                    16000, 'de', '{}', 1);
+                (id, name, kind, base_url, auth_ref, sample_rate, language, enabled)
+            VALUES ('v1', 'Vosk server', 'vosk', 'ws://localhost:2700', NULL, 16000, 'de', 1);
             """
         )
         await conn.execute(
@@ -333,9 +326,8 @@ async def test_migration_folds_retired_kinds_onto_the_merged_ones(tmp_path: Path
             await conn.execute(
                 """
                 INSERT INTO providers
-                    (id, name, kind, base_url, auth_ref, protocol, sample_rate,
-                     language, capabilities, enabled)
-                VALUES (?, ?, ?, ?, NULL, 'http_batch', 16000, 'de', '{}', 1);
+                    (id, name, kind, base_url, auth_ref, sample_rate, language, enabled)
+                VALUES (?, ?, ?, ?, NULL, 16000, 'de', 1);
                 """,
                 (pid, pid, kind, base_url),
             )
@@ -371,10 +363,10 @@ async def test_migration_drops_the_provider_model_column(tmp_path: Path) -> None
         await conn.execute(
             """
             INSERT INTO providers
-                (id, name, kind, base_url, auth_ref, protocol, model, sample_rate,
-                 language, capabilities, enabled, favorite_models)
-            VALUES ('or1', 'OpenRouter', 'openrouter', NULL, NULL, 'http_batch',
-                    'openai/gpt-4o-mini', 16000, 'de', '{}', 1, '["deepgram/nova-3"]');
+                (id, name, kind, base_url, auth_ref, model, sample_rate,
+                 language, enabled, favorite_models)
+            VALUES ('or1', 'OpenRouter', 'openrouter', NULL, NULL,
+                    'openai/gpt-4o-mini', 16000, 'de', 1, '["deepgram/nova-3"]');
             """
         )
         await conn.executescript(MIGRATIONS[_V_DROP_PROVIDER_MODEL])
@@ -392,6 +384,54 @@ async def test_migration_drops_the_provider_model_column(tmp_path: Path) -> None
         assert stored.favorite_models == ["deepgram/nova-3"]
 
 
+async def test_migration_drops_the_unread_protocol_and_capabilities_columns(
+    tmp_path: Path,
+) -> None:
+    """A v16 database still carries `protocol` and `capabilities` on every
+    provider row. Nothing read either: the transport follows the chosen model
+    and what a kind can do is in capabilities.yaml. v17 drops both, and the row
+    reads back with everything else intact."""
+    path = tmp_path / "legacy-wire.db"
+    async with Database(path) as database:
+        conn = database.connection
+        # Put the columns back to stand in for a v16 database, then run only
+        # the migration under test (see the v16 test above for why).
+        await conn.execute("ALTER TABLE providers ADD COLUMN protocol TEXT NOT NULL DEFAULT '';")
+        await conn.execute(
+            "ALTER TABLE providers ADD COLUMN capabilities TEXT NOT NULL DEFAULT '{}';"
+        )
+        await conn.execute(
+            """
+            INSERT INTO providers
+                (id, name, kind, base_url, auth_ref, protocol, sample_rate, language,
+                 capabilities, enabled, favorite_models, routing)
+            VALUES ('dg1', 'Deepgram Main', 'deepgram', 'wss://dg.example', 'provider:dg1',
+                    'ws', 16000, 'en', '{"streaming": true, "inline_diarization": true}',
+                    0, '["nova-3"]', NULL);
+            """
+        )
+        await conn.executescript(MIGRATIONS[_V_DROP_PROVIDER_WIRE])
+        await conn.commit()
+
+        async with conn.execute("SELECT * FROM providers;") as cur:
+            row = await cur.fetchone()
+        assert row is not None
+        assert {"protocol", "capabilities"}.isdisjoint(row.keys()), "a column survived"
+
+        stored = await ProviderRepository(database).get("dg1")
+        assert stored == ProviderConfig(
+            id="dg1",
+            name="Deepgram Main",
+            kind=ProviderKind.DEEPGRAM,
+            base_url="wss://dg.example",
+            auth_ref="provider:dg1",
+            favorite_models=["nova-3"],
+            sample_rate=16000,
+            language="en",
+            enabled=False,
+        )
+
+
 async def test_provider_routing_survives_a_round_trip(db: Database) -> None:
     """OpenRouter routing preferences must actually persist.
 
@@ -407,7 +447,6 @@ async def test_provider_routing_survives_a_round_trip(db: Database) -> None:
             id="or1",
             name="OpenRouter",
             kind=ProviderKind.OPENROUTER,
-            protocol=Protocol.HTTP_BATCH,
             routing=OpenRouterRouting(sort="price", data_collection="deny", zdr=True),
         )
     )
@@ -422,9 +461,7 @@ async def test_provider_routing_survives_a_round_trip(db: Database) -> None:
 
     # A provider that never configured routing keeps None, which is what the
     # request builder reads as "send no routing object at all".
-    await repo.upsert(
-        ProviderConfig(id="dg1", name="Deepgram", kind=ProviderKind.DEEPGRAM, protocol=Protocol.WS)
-    )
+    await repo.upsert(ProviderConfig(id="dg1", name="Deepgram", kind=ProviderKind.DEEPGRAM))
     plain = await repo.get("dg1")
     assert plain is not None
     assert plain.routing is None
