@@ -30,6 +30,11 @@ dependencies = [
 audio = [
     "sounddevice>=0.5",
     "numpy>=2.0",
+    # Streaming resampler for the capture path: the mic is opened at whatever
+    # rate the device itself serves and resampled to the rate the STT provider
+    # wants (see loreline.audio.capture). Small, numpy-only, and keeps its
+    # filter state across blocks, which a per-block linear interpolation cannot.
+    "soxr>=0.5",
     "onnxruntime>=1.19",
     "silero-vad>=5.1",
     # Direct (not just transitive via silero-vad): `[tool.uv.sources]` below
