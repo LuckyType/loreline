@@ -435,6 +435,63 @@ async def test_merge_concatenates_audio(tmp_path: Path) -> None:
             assert int(job["segments_added"]) == len(utterances)
 
 
+async def test_session_detail_reports_audio_duration(session_client: AsyncClient) -> None:
+    """GET /api/session/{id} reports the stored WAV's length, computed off the
+    file itself rather than kept on the session row - a stored value would go
+    stale while a live capture keeps growing the WAV."""
+    pid = await _create_provider(session_client)
+    start = await session_client.post(
+        "/api/session/start", json={"primary_provider": pid, "model": _MODEL}
+    )
+    session_id = start.json()["id"]
+    await session_client.post("/api/session/stop")
+
+    detail = (await session_client.get(f"/api/session/{session_id}")).json()
+    assert detail["audio_duration_s"] is not None
+    assert detail["audio_duration_s"] > 0
+
+
+def _silent_capture_factory(_req: object, _sample_rate: int) -> tuple[FakeSource, SpeechDetector]:
+    """Like capture_factory, but the source ends without ever yielding a
+    frame - nothing is appended to the session's WAV, matching a session that
+    errored before capturing any audio. The WAV (and its audio_path) still get
+    written, just as a bare header."""
+
+    def detector(_frame: bytes) -> bool:
+        return True
+
+    return FakeSource(frames=0), detector
+
+
+async def test_session_detail_reports_zero_duration_for_a_headeronly_wav(
+    tmp_path: Path,
+) -> None:
+    """A session whose capture produced no frames at all still gets a WAV and
+    an audio_path - just a bare header, indistinguishable from a real
+    recording by path alone. The reported duration says so as 0, which is
+    what lets the frontend tell the two apart."""
+    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t")
+    app = create_app(
+        settings,
+        capture_factory=_silent_capture_factory,  # type: ignore[arg-type]
+        backend_factory=FakeBackend,  # type: ignore[arg-type]
+        diarizer_factory=fake_diarizers,
+    )
+    async with LifespanManager(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            pid = await _create_provider(client)
+            start = await client.post(
+                "/api/session/start", json={"primary_provider": pid, "model": _MODEL}
+            )
+            session_id = start.json()["id"]
+            await client.post("/api/session/stop")
+
+            detail = (await client.get(f"/api/session/{session_id}")).json()
+            assert detail["session"]["audio_path"]
+            assert detail["audio_duration_s"] == 0
+
+
 class HangingBackend(FakeBackend):
     """Accepts the utterance, then never answers - a black-holed provider."""
 

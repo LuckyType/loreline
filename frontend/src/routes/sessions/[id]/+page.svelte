@@ -162,7 +162,11 @@ onMount(async () => {
 	<p class="text-muted-foreground">Loading…</p>
 {:else}
 	<Card>
-		<SessionHeader sessionId={id} session={detail.session} />
+		<SessionHeader
+			sessionId={id}
+			session={detail.session}
+			audioDurationS={detail.audio_duration_s}
+		/>
 
 		<div class="border-t"></div>
 

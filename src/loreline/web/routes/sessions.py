@@ -61,6 +61,12 @@ class SessionDetail(BaseModel):
 
     session: Session
     transcript: list[TranscriptEvent]
+    # Length of the stored WAV, seconds - None when there is none. Computed on
+    # every read rather than carried on Session itself: the WAV keeps growing
+    # throughout a live capture, so a stored value would go stale, and it is
+    # exactly what tells a real recording apart from an errored session's
+    # bare-header WAV, which "audio_path is set" alone cannot.
+    audio_duration_s: float | None = None
 
 
 @router.post("/start", status_code=201)
@@ -106,7 +112,11 @@ async def get_session(request: Request, session_id: str) -> SessionDetail:
     if session is None:
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="session not found")
     transcript = canonical_transcript(await state.transcripts.for_session(session_id))
-    return SessionDetail(session=session, transcript=transcript)
+    audio_duration_s = None
+    if session.audio_path and state.audio_store.exists(session_id):
+        # Blocking file I/O (reads the WAV header only) off the event loop.
+        audio_duration_s = await asyncio.to_thread(state.audio_store.duration_s, session_id)
+    return SessionDetail(session=session, transcript=transcript, audio_duration_s=audio_duration_s)
 
 
 @router.get("/{session_id}/transcript")
