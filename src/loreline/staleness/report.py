@@ -15,8 +15,8 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 
+from loreline.catalog import CatalogProbe, CatalogStatus
 from loreline.models import Interaction, ProviderKind
-from loreline.staleness.catalog import CatalogProbe, CatalogStatus
 
 
 class Severity(StrEnum):

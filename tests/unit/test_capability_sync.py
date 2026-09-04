@@ -21,14 +21,14 @@ import yaml
 
 from loreline.capabilities import config as shipped_config
 from loreline.capability_config import CONFIG_PATH, CapabilityConfig
-from loreline.models import Interaction, ProviderKind
-from loreline.staleness.catalog import (
+from loreline.catalog import (
     CatalogProbe,
     CatalogStatus,
     VendorModel,
     VendorReasoning,
     VendorVideo,
 )
+from loreline.models import Interaction, ProviderKind
 from loreline.staleness.sync import (
     DERIVABLE_FACTS,
     SyncPlan,

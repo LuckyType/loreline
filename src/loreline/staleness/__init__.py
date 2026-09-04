@@ -23,11 +23,12 @@ unreachable. Silence and a labelled "could not check" are the only two
 acceptable outcomes of a failed lookup, and both checks are built so that
 absence of evidence is never reported as evidence of absence.
 
-The three halves are separate on purpose - :mod:`catalog` works out what the
-vendor says, :mod:`compare` diffs that against the config, :mod:`report`
-renders it - and :mod:`sync` reuses the first two unchanged: the same fetch,
-and the same definition of drift, so the checker and the regenerator can never
-disagree about whether a field is stale.
+The halves are separate on purpose. What the vendor says comes from
+:mod:`loreline.catalog`, the one catalogue reader this package consumes but
+does not own (the pickers and the video dialog read the same probe);
+:mod:`compare` diffs that against the config, :mod:`report` renders it, and
+:mod:`sync` reuses the same fetch and the same definition of drift, so the
+checker and the regenerator can never disagree about whether a field is stale.
 """
 
 from loreline.staleness.check import FailOn, run_check, should_fail, summarize

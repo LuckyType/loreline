@@ -1,16 +1,18 @@
-"""What each vendor's catalogue says today, fetched fail soft.
+"""What each vendor's catalogue lists right now, read once and fail soft.
 
-This is the read half of the staleness feature, and it deliberately knows
-nothing about capabilities.yaml. It answers one question - "what does the
-vendor publish for this provider and interaction right now" - so that the write
-half planned for later (a sync script that regenerates the derivable fields
-instead of hand editing them) can reuse it unchanged. Everything that compares
-an answer against the curated file lives in :mod:`loreline.staleness.compare`.
+The one vendor catalogue reader. It answers one question, "what does this
+vendor list for this interaction right now", and three readers project the
+answer: the model pickers (:mod:`loreline.stt.catalog`), the video generate
+dialog (:mod:`loreline.video.client`) and the staleness feature
+(:mod:`loreline.staleness`), which compares it against the curated file. Each
+used to fetch and parse for itself; a vendor payload change now breaks one
+parser here and one test file, not three.
 
 FAIL SOFT IS THE POINT. Nothing in here raises. A vendor that is down, rate
 limiting, missing a key, or answering with a shape nobody has seen yields a
-:class:`CatalogProbe` whose status says so, and the caller reports "could not
-check" instead of "your models are gone". Two rules encode that:
+:class:`CatalogProbe` whose status says so. The pickers read that as "fall
+back to the curated list"; the staleness check reads it as "could not check",
+never as "your models are gone". Two rules encode that:
 
 * An empty catalogue is UNREADABLE, never OK-with-zero-models. No real vendor
   serves an empty list, so parsing one means the response shape moved under us,
@@ -20,13 +22,14 @@ check" instead of "your models are gone". Two rules encode that:
 
 Where each catalogue lives, how the key is spelled for it, whether it answers
 without one, and which environment variable CI would find a key in, are all
-read from the capability config (the kind's ``catalog`` surface and
-``key_env``), never restated here. What stays in this module is how to read
-the body, because the bodies differ enough that one generic parser would be a
-lie: OpenRouter's chat catalogue publishes reasoning and parameter metadata,
-its video catalogue is a different schema entirely, OpenAI's carries nothing
-but an id and a shutdown date, Deepgram splits stt from tts, and Gemini
-prefixes every id with ``models/``.
+read from capabilities.yaml (the kind's ``catalog`` surface and ``key_env``),
+never restated here. What stays in this module is how to read the body,
+because the bodies differ enough that one generic parser would be a lie:
+OpenRouter's chat catalogue publishes prices, reasoning and parameter
+metadata, its video catalogue is a different schema entirely, OpenAI's carries
+nothing but an id and a shutdown date (and a self-hosted server claiming
+compatibility may serve a bare list of id strings), Deepgram splits stt from
+tts, and Gemini prefixes every id with ``models/``.
 """
 
 from __future__ import annotations
@@ -36,11 +39,13 @@ import os
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import date
+from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from typing import cast
 
 import httpx
 
+from loreline import capabilities
 from loreline.capability_config import ProviderSpec, Surface
 from loreline.logging import get_logger
 from loreline.models import Interaction, ProviderKind
@@ -93,6 +98,22 @@ class VendorReasoning:
 
 
 @dataclass(frozen=True, slots=True)
+class VendorPrice:
+    """What a model costs, in USD per million tokens, as the vendor quotes it.
+
+    OpenRouter quotes USD per *single* token as a decimal string ("0.000003"),
+    which is unreadable in a picker and lossy as a float, so the parser scales
+    it through ``Decimal`` to the per-million figure every price list uses.
+    ``min_prompt_tokens`` is None on the base price and set on a tier that only
+    applies above a prompt-length threshold.
+    """
+
+    prompt: float | None = None
+    completion: float | None = None
+    min_prompt_tokens: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class VendorVideo:
     """The parameter surface a video model publishes.
 
@@ -103,8 +124,11 @@ class VendorVideo:
     durations: tuple[int, ...] | None = None
     resolutions: tuple[str, ...] | None = None
     aspect_ratios: tuple[str, ...] | None = None
+    # Explicit "WxH" sizes, where a model offers those instead of resolutions.
+    sizes: tuple[str, ...] | None = None
     audio: bool | None = None
     image_input: bool | None = None
+    seed: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,10 +142,19 @@ class VendorModel:
     """
 
     id: str
+    # The vendor's display name and blurb, where it publishes them (OpenRouter
+    # does); the video dialog shows the name, the pickers show the id.
+    name: str | None = None
+    description: str | None = None
     context_length: int | None = None
     max_output_tokens: int | None = None
     temperature: bool | None = None
     reasoning: VendorReasoning | None = None
+    # Whether the model takes a reasoning-effort setting, read from the
+    # vendor's parameter list rather than from the reasoning block above: the
+    # two are published separately and the picker's control follows the
+    # parameter. None where the vendor publishes no parameter list.
+    accepts_reasoning_effort: bool | None = None
     # Whether this row's catalogue speaks about reasoning at all. Needed
     # because a missing block means two opposite things: on OpenRouter's chat
     # catalogue it is the vendor saying "this model does not reason", and on
@@ -131,6 +164,12 @@ class VendorModel:
     # Vendor-announced sunset: OpenRouter's ``expiration_date``, OpenAI's
     # ``shutdown_date``. The yaml's ``deprecated:`` is the same fact by hand.
     retires_on: date | None = None
+    # The base price and the ladder of prices that take over above a
+    # prompt-length threshold, cheapest threshold first. Empty for the vast
+    # majority of models, which price one way at any length. None where the
+    # vendor publishes no price, or one this app cannot read honestly.
+    pricing: VendorPrice | None = None
+    price_tiers: tuple[VendorPrice, ...] = ()
     video: VendorVideo | None = None
 
 
@@ -222,28 +261,24 @@ async def probe(
     kind: ProviderKind,
     interaction: Interaction,
     *,
-    spec: ProviderSpec,
+    spec: ProviderSpec | None = None,
     api_key: str | None = None,
     base_url: str | None = None,
-    endpoint: str | None = None,
     client_factory: ClientFactory | None = None,
     request_timeout: float = DEFAULT_TIMEOUT_S,
 ) -> CatalogProbe:
     """Ask one vendor what it offers. Never raises, never blocks forever.
 
-    ``endpoint`` overrides the address from the config, which the startup check
-    uses for a self-hosted server whose URL only its provider row knows.
+    ``spec`` is the provider's entry in the capability config, defaulting to
+    the shipped file's; the staleness check passes its own so a test can run
+    it against a synthetic file. ``base_url`` is a provider row's override,
+    which is the only way to locate a self-hosted server's catalogue.
     """
-    url = endpoint or endpoint_for(spec, interaction, base_url=base_url)
-    if url is None:
-        # Two different nothings, and the report has to tell them apart: a
-        # vendor that publishes no list at all, versus a list that exists on a
-        # server whose address only the operator knows.
-        detail = (
-            "catalogue lives on the operator's own server, no address to call"
-            if _needs_base_url(spec, interaction)
-            else "vendor publishes no catalogue for this interaction"
-        )
+    if spec is None:
+        spec = capabilities.config().provider(kind)
+    url = endpoint_for(spec, interaction, base_url=base_url) if spec else None
+    if spec is None or url is None:
+        detail = _nothing_to_call(spec, interaction)
         return CatalogProbe(kind, interaction, None, CatalogStatus.NO_CATALOGUE, detail)
     if api_key is None and needs_credentials(spec, interaction):
         env = ", ".join(spec.key_env) or "an API key"
@@ -267,7 +302,7 @@ async def probe(
         # way: everything that stopped a body from arriving is one status.
         return _unreachable(kind, interaction, url, exc)
     except Exception as exc:  # pragma: no cover - the "never crash" backstop
-        # A staleness check may not be the thing that takes an app down, so an
+        # A catalogue read may not be the thing that takes an app down, so an
         # exception nobody anticipated (a transport raising OSError, an SSL
         # library disagreeing with a proxy) still becomes a status.
         return _unreachable(kind, interaction, url, exc)
@@ -279,7 +314,7 @@ async def probe(
         models, partial = _parse(kind, interaction, payload)
     except (ValueError, TypeError, _UnreadableError) as exc:
         log.warning(
-            "staleness.catalog.unreadable",
+            "catalog.unreadable",
             kind=kind.value,
             interaction=interaction.value,
             error=str(exc),
@@ -298,12 +333,25 @@ async def probe(
     )
 
 
+def _nothing_to_call(spec: ProviderSpec | None, interaction: Interaction) -> str:
+    """Why there is no address: the report has to tell the nothings apart.
+
+    A kind the file does not know, a vendor that publishes no list at all, or
+    a list that exists on a server whose address only the operator knows.
+    """
+    if spec is None:
+        return "unknown provider kind"
+    if _needs_base_url(spec, interaction):
+        return "catalogue lives on the operator's own server, no address to call"
+    return "vendor publishes no catalogue for this interaction"
+
+
 def _unreachable(
     kind: ProviderKind, interaction: Interaction, url: str, exc: Exception
 ) -> CatalogProbe:
     detail = f"{type(exc).__name__}: {exc}".strip().rstrip(":")
     log.warning(
-        "staleness.catalog.unreachable",
+        "catalog.unreachable",
         kind=kind.value,
         interaction=interaction.value,
         error=detail,
@@ -338,8 +386,13 @@ def _rows(payload: object, keys: Sequence[str]) -> list[dict[str, object]]:
     if not isinstance(data, list):
         raise _UnreadableError(f"expected a list of models, got {type(data).__name__}")
     entries = cast("list[object]", data)
+    # A bare string is a row with nothing but an id: some self-hosted servers
+    # claiming OpenAI compatibility answer ``/models`` with a list of names,
+    # and no parser here reads anything else from such a row.
     rows: list[dict[str, object]] = [
-        cast("dict[str, object]", r) for r in entries if isinstance(r, dict)
+        cast("dict[str, object]", r) if isinstance(r, dict) else {"id": r}
+        for r in entries
+        if isinstance(r, dict | str)
     ]
     if not rows:
         raise _UnreadableError("catalogue is empty")
@@ -391,6 +444,69 @@ def _dict(value: object) -> dict[str, object] | None:
     return cast("dict[str, object]", value) if isinstance(value, dict) else None
 
 
+# A price quoted per single token, scaled to the per-million figure people read.
+_PER_MILLION = 1_000_000
+
+
+def _usd_per_million(raw: object) -> float | None:
+    """ "0.000003" (USD per token) -> 3.0 (USD per million tokens).
+
+    Parsed as ``Decimal`` rather than ``float`` so the scaling is exact: the
+    source values run to nine decimal places, where binary floating point
+    starts printing 2.9999999999999996 at people. Anything unparseable (a
+    missing key, an empty string, a future non-numeric marker) yields None:
+    a price we cannot read must render as "unknown", never as free.
+    """
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        return float(Decimal(raw) * _PER_MILLION)
+    except (InvalidOperation, ValueError):
+        return None
+
+
+def _price(source: dict[str, object], min_prompt_tokens: object = None) -> VendorPrice | None:
+    """A price from a ``pricing`` (or ``pricing.overrides[]``) object, or None
+    when it names neither an input nor an output price."""
+    prompt = _usd_per_million(source.get("prompt"))
+    completion = _usd_per_million(source.get("completion"))
+    if prompt is None and completion is None:
+        return None
+    return VendorPrice(
+        prompt=prompt, completion=completion, min_prompt_tokens=_int(min_prompt_tokens)
+    )
+
+
+def _price_tiers(pricing: dict[str, object]) -> tuple[VendorPrice, ...]:
+    """The ``overrides`` ladder, prices that take over above a prompt-length
+    threshold, cheapest threshold first."""
+    raw = pricing.get("overrides")
+    if not isinstance(raw, list):
+        return ()
+    tiers: list[VendorPrice] = []
+    for override in cast("list[object]", raw):
+        entry = _dict(override)
+        if entry is None:
+            continue
+        tier = _price(entry, entry.get("min_prompt_tokens"))
+        if tier is not None:
+            tiers.append(tier)
+    return tuple(sorted(tiers, key=lambda t: t.min_prompt_tokens or 0))
+
+
+def _is_transcription_model(row: dict[str, object]) -> bool:
+    architecture = _dict(row.get("architecture"))
+    outputs = _str_tuple(architecture.get("output_modalities")) if architecture else None
+    return outputs is not None and "transcription" in outputs
+
+
+# Parameter names that mean "this model takes a reasoning-effort setting".
+# OpenRouter publishes these per model in ``supported_parameters``; both
+# spellings appear across its catalogue, and either is enough to offer the
+# control.
+_REASONING_PARAMS = frozenset({"reasoning", "reasoning_effort"})
+
+
 def _reasoning(row: dict[str, object]) -> VendorReasoning | None:
     block = _dict(row.get("reasoning"))
     if block is None:
@@ -404,10 +520,21 @@ def _reasoning(row: dict[str, object]) -> VendorReasoning | None:
 def _openrouter_chat(rows: list[dict[str, object]]) -> list[VendorModel]:
     """OpenRouter ``GET /api/v1/models``.
 
-    The fields read here are the ones the gateway genuinely publishes and that
-    the yaml mirrors: context_length, top_provider.max_completion_tokens,
-    whether ``temperature`` is in supported_parameters, and the reasoning
-    block. Nothing else in this payload is treated as a fact about a model.
+    The same schema serves the transcription list (``?output_modalities=
+    transcription``), so this parser reads both. The fields read here are the
+    ones the gateway genuinely publishes and that the yaml mirrors, plus the
+    ones the pickers show: context_length, top_provider.max_completion_tokens,
+    whether ``temperature`` and a reasoning effort are in supported_parameters,
+    the reasoning block, and the price. Nothing else in this payload is treated
+    as a fact about a model.
+
+    Transcription models are priced per unit of *audio*, not per token, and
+    the catalogue does not say which unit: measured against the live API,
+    deepgram/nova-3's "0.0043" bills per minute while nvidia/nemotron-3.5-asr's
+    "0.00000333" bills per second. Nothing in the payload distinguishes the
+    two, so any figure shown would be wrong by a factor of 60 for some models.
+    Reporting no price is the honest option; OpenRouter's own model page is the
+    place to check an audio rate.
     """
     models: list[VendorModel] = []
     for row in rows:
@@ -416,15 +543,23 @@ def _openrouter_chat(rows: list[dict[str, object]]) -> list[VendorModel]:
             continue
         top = _dict(row.get("top_provider")) or {}
         params = _str_tuple(row.get("supported_parameters"))
+        pricing = None if _is_transcription_model(row) else _dict(row.get("pricing"))
         models.append(
             VendorModel(
                 id=model_id,
+                name=_str(row.get("name")),
+                description=_str(row.get("description")),
                 context_length=_int(row.get("context_length")),
                 max_output_tokens=_int(top.get("max_completion_tokens")),
                 temperature=("temperature" in params) if params is not None else None,
                 reasoning=_reasoning(row),
+                accepts_reasoning_effort=(
+                    any(p in _REASONING_PARAMS for p in params) if params is not None else None
+                ),
                 publishes_reasoning=True,
                 retires_on=_date(row.get("expiration_date")),
+                pricing=_price(pricing) if pricing is not None else None,
+                price_tiers=_price_tiers(pricing) if pricing is not None else (),
             )
         )
     return models
@@ -434,10 +569,11 @@ def _openrouter_video(rows: list[dict[str, object]]) -> list[VendorModel]:
     """OpenRouter ``GET /api/v1/videos/models``.
 
     A separate schema from the chat catalogue, and the whole ``video:`` block
-    in the yaml except the prompt limits comes from it. ``generate_audio`` is
-    read as a tri-state: null means the vendor says nothing, which the modal
-    renders as silence rather than as "no audio", so it must not be flattened
-    to False the way the runtime parser does.
+    in the yaml except the prompt limits comes from it. ``generate_audio`` and
+    ``seed`` are read as tri-states: null means the vendor says nothing, which
+    the staleness check renders as silence rather than as "no audio", so it
+    must not be flattened to False here; the generate dialog flattens it for
+    its own form, where a knob the vendor did not vouch for is not offered.
     """
     models: list[VendorModel] = []
     for row in rows:
@@ -452,15 +588,19 @@ def _openrouter_video(rows: list[dict[str, object]]) -> list[VendorModel]:
         models.append(
             VendorModel(
                 id=model_id,
+                name=_str(row.get("name")),
+                description=_str(row.get("description")),
                 retires_on=_date(row.get("expiration_date")),
                 video=VendorVideo(
                     durations=_int_tuple(row.get("supported_durations")),
                     resolutions=_str_tuple(row.get("supported_resolutions")),
                     aspect_ratios=_str_tuple(row.get("supported_aspect_ratios")),
+                    sizes=_str_tuple(row.get("supported_sizes")),
                     audio=_bool(row.get("generate_audio")),
                     image_input=(
                         bool(_str_tuple(row.get("supported_frame_images"))) if frames else None
                     ),
+                    seed=_bool(row.get("seed")),
                 ),
             )
         )
@@ -475,6 +615,10 @@ def _openai(rows: list[dict[str, object]]) -> list[VendorModel]:
     is usable for exactly two things: does this id still exist, and has OpenAI
     announced a date for it. Every capability in the yaml for this vendor stays
     hand-annotated from the model cards.
+
+    Also the parser for anything claiming OpenAI compatibility (Speaches,
+    Ollama, LM Studio, vLLM), whose rows may carry nothing but an id, or be
+    bare id strings: see :func:`_rows`.
     """
     models: list[VendorModel] = []
     for row in rows:
@@ -551,3 +695,19 @@ def _parse(
     envelope = _dict(payload)
     partial = bool(_str(envelope.get("nextPageToken"))) if envelope else False
     return models, partial
+
+
+__all__ = [
+    "DEFAULT_TIMEOUT_S",
+    "CatalogProbe",
+    "CatalogStatus",
+    "ClientFactory",
+    "VendorModel",
+    "VendorPrice",
+    "VendorReasoning",
+    "VendorVideo",
+    "credential_from_env",
+    "endpoint_for",
+    "needs_credentials",
+    "probe",
+]

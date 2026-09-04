@@ -13,8 +13,8 @@ import httpx
 import pytest
 
 from loreline.capabilities import config
+from loreline.catalog import CatalogStatus, probe
 from loreline.models import Interaction, ProviderKind
-from loreline.staleness.catalog import CatalogStatus, probe
 from loreline.staleness.check import gather_probes, run_check
 from loreline.staleness.compare import compare
 

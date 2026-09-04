@@ -27,8 +27,7 @@ from enum import StrEnum
 
 from loreline import capabilities
 from loreline.capability_config import CapabilityConfig
-from loreline.models import Interaction, ProviderKind
-from loreline.staleness.catalog import (
+from loreline.catalog import (
     DEFAULT_TIMEOUT_S,
     CatalogProbe,
     CatalogStatus,
@@ -37,6 +36,7 @@ from loreline.staleness.catalog import (
     endpoint_for,
     probe,
 )
+from loreline.models import Interaction, ProviderKind
 from loreline.staleness.compare import compare
 from loreline.staleness.deprecation import FAIL_HORIZON_DAYS, WARN_HORIZON_DAYS, check_dates
 from loreline.staleness.report import Finding, Severity, StalenessReport, order

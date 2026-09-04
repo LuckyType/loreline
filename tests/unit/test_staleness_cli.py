@@ -16,8 +16,8 @@ import pytest
 from typer.testing import CliRunner
 
 from loreline import cli
+from loreline.catalog import CatalogProbe, CatalogStatus
 from loreline.models import Interaction, ProviderKind
-from loreline.staleness.catalog import CatalogProbe, CatalogStatus
 from loreline.staleness.report import Code, Finding, Severity, StalenessReport
 from loreline.staleness.sync import Change, SyncPlan, SyncRefusedError
 
