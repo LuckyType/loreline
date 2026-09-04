@@ -77,6 +77,22 @@ same range with live verification.
 | `deploy/` | install/update scripts, systemd units |
 | `mocks/` | mock provider servers for offline testing |
 
+## Wire types
+
+`frontend/src/lib/wire.ts` names every request and response shape the pages
+use. Each one derives from `frontend/src/lib/api.generated.d.ts`, which is
+generated from `frontend/openapi.json`, FastAPI's own description of the API
+(`uv run loreline openapi`). Nothing about the wire is written by hand any
+more; `frontend/src/lib/types.ts` keeps only what the document cannot say.
+
+After changing `src/loreline/web/schemas.py`, `src/loreline/models.py` or a
+route signature, run `cd frontend && npm run gen:api` and commit both generated
+files with the change. Two checks catch a miss. The `openapi-current`
+pre-commit hook compares the committed document against the live one and,
+where `frontend/node_modules` is installed, the types against the document.
+CI does the same in halves: the backend job checks the document, the frontend
+job's `npm run check` checks the types. The fix for either is that one command.
+
 ## How a transcription request travels
 
 A route in `src/loreline/web/routes/` takes the provider row and the model the
