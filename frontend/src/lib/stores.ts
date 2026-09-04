@@ -1,5 +1,5 @@
 import { writable } from 'svelte/store'
-import type { Health, ProviderConfig } from './wire'
+import type { Health, ProviderConfig, ReprocessJob } from './wire'
 
 export const health = writable<Health | null>(null)
 export const authed = writable<boolean>(true)
@@ -14,6 +14,27 @@ export function speakerColor(speaker: string | null): string {
 	let hash = 0
 	for (let i = 0; i < speaker.length; i++) hash = (hash * 31 + speaker.charCodeAt(i)) % 360
 	return `hsl(${hash}, 60%, 55%)`
+}
+
+/** One moment on the session clock, spelled for a person. */
+export function fmtWhen(ts: number): string {
+	return new Date(ts * 1000).toLocaleString()
+}
+
+/** Whether a re-processing job is still going: shared by the version list,
+ *  which counts up while it runs, and the page's poll, which stops when the
+ *  last one drains. */
+export function inFlight(job: ReprocessJob): boolean {
+	return job.status === 'queued' || job.status === 'running'
+}
+
+/** What the diarizer a job used is called: named in the version list, and
+ *  again next to the transcript that job relabeled. */
+export function diarizerLabel(job: ReprocessJob): string {
+	if (job.diarization.mode === 'openai') return 'OpenAI · gpt-4o-transcribe-diarize'
+	if (job.diarization.mode === 'remote')
+		return `sherpa-onnx${job.diarization.endpoint ? ` · ${job.diarization.endpoint}` : ''}`
+	return job.diarization.mode
 }
 
 export function formatTime(seconds: number): string {
