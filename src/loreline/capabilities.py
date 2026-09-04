@@ -249,7 +249,7 @@ def curated_models(kind: ProviderKind, interaction: Interaction) -> list[str]:
     """Model ids this file offers for one interaction, hidden entries excluded.
 
     The fallback catalogue for a kind whose models are not discovered live -
-    Gemini publishes no list this app fetches, so its chat models exist only
+    Gemini publishes no list the pickers read, so its chat models exist only
     here. Empty for a kind that lists none, which is not the same as "offer
     everything": see :mod:`loreline.stt.catalog` for what that falls back to.
 

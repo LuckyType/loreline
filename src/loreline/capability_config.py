@@ -534,6 +534,11 @@ class Surface(_Strict):
     # A catalogue that answers without a credential, so a CI run with no
     # secrets can still read it. A key is still sent when one is around.
     public: bool = False
+    # Whether a model picker offers this catalogue live. False marks a list
+    # that is read to check the curated models (the staleness check) but never
+    # to replace them in a picker: the vendor's list is not fit to choose from
+    # as published, and the reason is written beside the surface in the yaml.
+    picker: bool = True
 
     @model_validator(mode="after")
     def _absolute_unless_operator_supplied(self) -> Self:
