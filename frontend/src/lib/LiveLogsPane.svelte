@@ -44,6 +44,12 @@ function toggleFilter() {
 	if (!filterOpen) filter = ''
 }
 
+function onFilterKeydown(e: KeyboardEvent) {
+	if (e.key !== 'Escape') return
+	e.preventDefault()
+	toggleFilter()
+}
+
 async function clear() {
 	if (feed.items.length && !(await confirm('Clear the log view?'))) return
 	feed.clear()
@@ -55,7 +61,13 @@ async function clear() {
 		<h3 class="m-0">Logs</h3>
 		<div class="flex items-center gap-1">
 			{#if filterOpen}
-				<Input class="w-33" placeholder="filter…" bind:value={filter} autofocus />
+				<Input
+					class="w-33"
+					placeholder="filter…"
+					bind:value={filter}
+					autofocus
+					onkeydown={onFilterKeydown}
+				/>
 			{/if}
 			<Button
 				variant="ghost"
@@ -99,6 +111,7 @@ async function clear() {
 				class="opacity-55 hover:opacity-100"
 				title="Clear logs"
 				aria-label="Clear logs"
+				disabled={feed.items.length === 0}
 				onclick={clear}
 			>
 				<Trash2 />

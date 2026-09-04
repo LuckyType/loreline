@@ -186,6 +186,7 @@ async function testChannel(id: string) {
 }
 
 async function deleteChannel(id: string) {
+	chanMsg = ''
 	if (!(await confirm({ description: 'Delete this alert channel?', destructive: true }))) return
 	await api.deleteAlertChannel(id)
 	await loadChannels()
