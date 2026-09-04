@@ -12,6 +12,7 @@ import {
 	Users,
 } from '@lucide/svelte'
 import { onMount } from 'svelte'
+import { actionSetup, type CompleteDefaults, completeDefaults } from '$lib/actionSetup.svelte'
 import { ApiError, api } from '$lib/api'
 import { Badge } from '$lib/components/ui/badge'
 import { Button } from '$lib/components/ui/button'
@@ -58,8 +59,6 @@ import {
 	requiresBaseUrl,
 } from '$lib/capabilities.svelte'
 import {
-	providersFor,
-	type ActionDefaults,
 	type AuthKind,
 	type Hosting,
 	capabilityBadges,
@@ -148,7 +147,6 @@ const blank = (): ProviderCreate => ({
 	api_key: '',
 })
 
-let providers = $state<ProviderConfig[]>([])
 let editing = $state<string | null>(null)
 let message = $state('')
 /**
@@ -194,23 +192,11 @@ let wizardOpen = $state(false)
 // answered picks up the real label and key link the moment it arrives.
 const selected = $derived(catalog.find((c) => c.kind === selectedKind))
 
-const blankDefaults = (): ActionDefaults => ({
-	stt_provider: '',
-	stt_model: '',
-	diar_mode: '',
-	diar_endpoint: '',
-	summarize_provider: '',
-	summarize_model: '',
-	summarize_prompt: '',
-	summarize_reasoning_effort: '',
-	video_provider: '',
-	video_model: '',
-	strict_model_filtering: true,
-})
-let defaults = $state<ActionDefaults>(blankDefaults())
-// Last persisted state - drives the "default" tags in the pickers, so they
-// reflect what is saved, not the (possibly unsaved) current selection.
-let savedDefaults = $state<ActionDefaults>(blankDefaults())
+// The pickers edit a draft; nothing is persisted until the explicit Save. The
+// store's own defaults are the last persisted state, which drives the
+// "default" tags in the pickers, so they reflect what is saved, not the
+// (possibly unsaved) current selection.
+let draft = $state<CompleteDefaults>(completeDefaults())
 let defaultsMsg = $state('')
 // This default is pre-selected when *starting or re-processing* a session (the
 // card below says so), and re-processing replays stored audio - the
@@ -219,25 +205,17 @@ let defaultsMsg = $state('')
 // impossible to set as the transcription default at all. The live pickers on
 // the dashboard apply the live-capture rule themselves, and ignore a stored
 // default that cannot drive a capture.
-const sttProviders = $derived(providersFor(providers, 'transcribe'))
-const llmProviders = $derived(providersFor(providers, 'summarize'))
-const videoProviders = $derived(providersFor(providers, 'video'))
-const sttSrcProvider = $derived(providers.find((p) => p.id === defaults.stt_provider))
-const llmSrcProvider = $derived(providers.find((p) => p.id === defaults.summarize_provider))
-const videoSrcProvider = $derived(providers.find((p) => p.id === defaults.video_provider))
+const sttProviders = $derived(actionSetup.providersFor('transcribe'))
+const llmProviders = $derived(actionSetup.providersFor('summarize'))
+const videoProviders = $derived(actionSetup.providersFor('video'))
+const sttSrcProvider = $derived(actionSetup.provider(draft.stt_provider))
+const llmSrcProvider = $derived(actionSetup.provider(draft.summarize_provider))
+const videoSrcProvider = $derived(actionSetup.provider(draft.video_provider))
 // A saved default is a provider/model pair: its model half earns the "default"
 // tag only while its provider half is the row currently selected above it.
-const sttSavedModel = $derived(
-	defaults.stt_provider === savedDefaults.stt_provider ? savedDefaults.stt_model : '',
-)
-const llmSavedModel = $derived(
-	defaults.summarize_provider === savedDefaults.summarize_provider
-		? savedDefaults.summarize_model
-		: '',
-)
-const videoSavedModel = $derived(
-	defaults.video_provider === savedDefaults.video_provider ? savedDefaults.video_model : '',
-)
+const sttSavedModel = $derived(actionSetup.pairedDefault('transcribe', sttSrcProvider))
+const llmSavedModel = $derived(actionSetup.pairedDefault('summarize', llmSrcProvider))
+const videoSavedModel = $derived(actionSetup.pairedDefault('video', videoSrcProvider))
 // The name field's placeholder is a real default, not a hint: leaving it blank
 // names the provider after its type ("OpenRouter"), which is what most people
 // want for their first one. Save stays enabled accordingly.
@@ -254,25 +232,20 @@ const apiKeyLabel = $derived(
 // advertises reasoning; the STT one whether inline diarization yields
 // speakers, since the default must not be settable otherwise.
 const llmModelInfo = $derived(
-	modelInfoFor(
-		llmSrcProvider,
-		'summarize',
-		defaults.strict_model_filtering,
-		defaults.summarize_model,
-	),
+	modelInfoFor(llmSrcProvider, 'summarize', draft.strict_model_filtering, draft.summarize_model),
 )
 const sttModelInfo = $derived(
-	modelInfoFor(sttSrcProvider, 'transcribe', defaults.strict_model_filtering, defaults.stt_model),
+	modelInfoFor(sttSrcProvider, 'transcribe', draft.strict_model_filtering, draft.stt_model),
 )
 const inlineDiarizationAvailable = $derived(
-	inlineDiarizationFor(sttSrcProvider?.kind, defaults.stt_model, sttModelInfo?.inline_diarization),
+	inlineDiarizationFor(sttSrcProvider?.kind, draft.stt_model, sttModelInfo?.inline_diarization),
 )
 // The effort levels this model accepts, in config order; empty means offer no
 // dropdown at all rather than an empty one.
 const llmEfforts = $derived(
 	reasoningEffortsFor(
 		llmSrcProvider?.kind,
-		defaults.summarize_model,
+		draft.summarize_model,
 		llmModelInfo?.supports_reasoning,
 	),
 )
@@ -284,18 +257,18 @@ const llmEfforts = $derived(
 $effect(() => {
 	if (
 		llmEfforts.length &&
-		defaults.summarize_reasoning_effort &&
-		!llmEfforts.includes(defaults.summarize_reasoning_effort)
+		draft.summarize_reasoning_effort &&
+		!llmEfforts.includes(draft.summarize_reasoning_effort)
 	) {
-		defaults.summarize_reasoning_effort = ''
+		draft.summarize_reasoning_effort = ''
 	}
 })
 
 // Never leave a stored "inline" default pointing at a model that cannot serve
 // it - the session-start guard would reject every session using it.
 $effect(() => {
-	if (defaults.diar_mode === 'inline' && sttModelInfo && !inlineDiarizationAvailable) {
-		defaults.diar_mode = 'none'
+	if (draft.diar_mode === 'inline' && sttModelInfo && !inlineDiarizationAvailable) {
+		draft.diar_mode = 'none'
 	}
 })
 
@@ -308,39 +281,40 @@ const filteredModels = $derived(
 		: offeredModels,
 )
 
-$effect(() => {
-	// Pre-fill empty pickers so the model list is browsable; nothing is
-	// persisted until the explicit Save.
-	if (!defaults.stt_provider && sttProviders.length) defaults.stt_provider = sttProviders[0].id
-	if (!defaults.summarize_provider && llmProviders.length) {
-		defaults.summarize_provider = llmProviders[0].id
-	}
-	if (!defaults.video_provider && videoProviders.length) {
-		defaults.video_provider = videoProviders[0].id
-	}
-})
-
-async function load() {
-	providers = await api.listProviders()
+/** Pre-fill an empty provider picker so its model list is browsable. Blanks
+ *  only: a pick, saved or not, is left alone. Nothing is persisted until the
+ *  explicit Save. */
+function fillBlankProviders() {
+	draft.stt_provider ||= actionSetup.preferredProvider('transcribe')?.id ?? ''
+	draft.summarize_provider ||= actionSetup.preferredProvider('summarize')?.id ?? ''
+	draft.video_provider ||= actionSetup.preferredProvider('video')?.id ?? ''
 }
 
-async function loadDefaults() {
-	try {
-		defaults = await api.getDefaults()
-		// Legacy stored "" and an explicit "none" mean the same thing (no
-		// diarization for new sessions) - show one spelling, not two options.
-		if (!defaults.diar_mode) defaults.diar_mode = 'none'
-		savedDefaults = { ...defaults }
-	} catch {
-		/* keep blanks */
-	}
+/** Start the draft over from what is stored. */
+function resetDraft() {
+	draft = { ...actionSetup.defaults }
+	fillBlankProviders()
+}
+
+/** Rows and defaults come from the shared store; the draft starts from its
+ *  snapshot once that has landed, so a stored default is seeded before "first
+ *  in the list" can be. */
+async function load() {
+	await actionSetup.load()
+	resetDraft()
+}
+
+/** After a row was added, edited or removed: the pickers list the new set,
+ *  and one that was empty gets its first entry. */
+async function reloadProviders() {
+	await actionSetup.reload()
+	fillBlankProviders()
 }
 
 async function saveDefaults() {
 	try {
-		defaults = await api.setDefaults(defaults)
-		if (!defaults.diar_mode) defaults.diar_mode = 'none'
-		savedDefaults = { ...defaults }
+		await actionSetup.saveDefaults(draft)
+		resetDraft()
 		defaultsMsg = 'Saved'
 		setTimeout(() => (defaultsMsg = ''), 2500)
 	} catch (err) {
@@ -409,7 +383,7 @@ async function save() {
 		if (editing) await api.updateProvider(editing, body)
 		else await api.createProvider(body)
 		resetWizard()
-		await load()
+		await reloadProviders()
 	} catch (err) {
 		message = err instanceof ApiError ? err.message : 'save failed'
 	}
@@ -486,7 +460,7 @@ async function testOne(id: string) {
 }
 
 async function testAll() {
-	await Promise.all(providers.map((p) => testOne(p.id)))
+	await Promise.all(actionSetup.providers.map((p) => testOne(p.id)))
 }
 
 async function remove(id: string) {
@@ -499,13 +473,10 @@ async function remove(id: string) {
 		return
 	await api.deleteProvider(id)
 	if (editing === id) resetWizard()
-	await load()
+	await reloadProviders()
 }
 
-onMount(async () => {
-	await load()
-	await loadDefaults()
-})
+onMount(load)
 </script>
 
 {#if message}
@@ -519,7 +490,12 @@ onMount(async () => {
 			Speech-to-text and LLM endpoints for transcription, diarization and summaries.
 		</CardDescription>
 		<CardAction class="flex gap-1">
-			<Button variant="outline" size="sm" onclick={testAll} disabled={providers.length === 0}>
+			<Button
+				variant="outline"
+				size="sm"
+				onclick={testAll}
+				disabled={actionSetup.providers.length === 0}
+			>
 				Test all
 			</Button>
 			<Button
@@ -542,7 +518,7 @@ onMount(async () => {
 				</TableRow>
 			</TableHeader>
 			<TableBody>
-				{#each providers as p (p.id)}
+				{#each actionSetup.providers as p (p.id)}
 					<TableRow>
 						<TableCell>{p.name}</TableCell>
 						<TableCell>
@@ -596,7 +572,7 @@ onMount(async () => {
 						</TableCell>
 					</TableRow>
 				{/each}
-				{#if providers.length === 0}
+				{#if actionSetup.providers.length === 0}
 					<TableRow>
 						<TableCell colspan={6} class="text-muted-foreground"
 							>No providers yet - click + to add one.</TableCell
@@ -623,17 +599,17 @@ onMount(async () => {
 				<Label class="text-xs text-muted-foreground" for="def-stt-src">Provider</Label>
 				<Dropdown
 					id="def-stt-src"
-					bind:value={defaults.stt_provider}
-					defaultValue={savedDefaults.stt_provider ?? ''}
+					bind:value={draft.stt_provider}
+					defaultValue={actionSetup.defaults.stt_provider}
 					options={sttProviders.map((p) => ({ value: p.id, label: p.name }))}
 				/>
 				<Label class="text-xs text-muted-foreground" for="def-stt-model">Model</Label>
 				<ModelPicker
 					id="def-stt-model"
-					refreshToken={defaults.strict_model_filtering}
+					refreshToken={draft.strict_model_filtering}
 					interaction="transcribe"
 					provider={sttSrcProvider}
-					bind:value={defaults.stt_model}
+					bind:value={draft.stt_model}
 					defaultModel={sttSavedModel}
 				/>
 			</div>
@@ -646,8 +622,8 @@ onMount(async () => {
 				<Label class="text-xs text-muted-foreground" for="def-diar">Mode</Label>
 				<Dropdown
 					id="def-diar"
-					bind:value={defaults.diar_mode}
-					defaultValue={savedDefaults.diar_mode}
+					bind:value={draft.diar_mode}
+					defaultValue={actionSetup.defaults.diar_mode}
 					options={[
 						{ value: 'none', label: 'None' },
 						...(inlineDiarizationAvailable
@@ -656,11 +632,11 @@ onMount(async () => {
 						{ value: 'remote', label: 'Remote service' },
 					]}
 				/>
-				{#if defaults.diar_mode === 'remote'}
+				{#if draft.diar_mode === 'remote'}
 					<Label class="text-xs text-muted-foreground" for="def-diar-endpoint">Endpoint</Label>
 					<Input
 						id="def-diar-endpoint"
-						bind:value={defaults.diar_endpoint}
+						bind:value={draft.diar_endpoint}
 						placeholder="http://diarization:8001"
 					/>
 				{/if}
@@ -675,17 +651,17 @@ onMount(async () => {
 					<Label class="text-xs text-muted-foreground" for="def-llm-src">Provider</Label>
 					<Dropdown
 						id="def-llm-src"
-						bind:value={defaults.summarize_provider}
-						defaultValue={savedDefaults.summarize_provider ?? ''}
+						bind:value={draft.summarize_provider}
+						defaultValue={actionSetup.defaults.summarize_provider}
 						options={llmProviders.map((p) => ({ value: p.id, label: p.name }))}
 					/>
 					<Label class="text-xs text-muted-foreground" for="def-llm-model">Model</Label>
 					<ModelPicker
 						id="def-llm-model"
-						refreshToken={defaults.strict_model_filtering}
+						refreshToken={draft.strict_model_filtering}
 						interaction="summarize"
 						provider={llmSrcProvider}
-						bind:value={defaults.summarize_model}
+						bind:value={draft.summarize_model}
 						defaultModel={llmSavedModel}
 					/>
 					{#if llmEfforts.length}
@@ -694,8 +670,8 @@ onMount(async () => {
 						</Label>
 						<Dropdown
 							id="def-llm-effort"
-							bind:value={defaults.summarize_reasoning_effort}
-							defaultValue={savedDefaults.summarize_reasoning_effort ?? ''}
+							bind:value={draft.summarize_reasoning_effort}
+							defaultValue={actionSetup.defaults.summarize_reasoning_effort}
 							options={[
 								{ value: '', label: "Model's default" },
 								...llmEfforts.map((e) => ({ value: e, label: e })),
@@ -718,17 +694,17 @@ onMount(async () => {
 					<Label class="text-xs text-muted-foreground" for="def-video-src">Provider</Label>
 					<Dropdown
 						id="def-video-src"
-						bind:value={defaults.video_provider}
-						defaultValue={savedDefaults.video_provider ?? ''}
+						bind:value={draft.video_provider}
+						defaultValue={actionSetup.defaults.video_provider}
 						options={videoProviders.map((p) => ({ value: p.id, label: p.name }))}
 					/>
 					<Label class="text-xs text-muted-foreground" for="def-video-model">Model</Label>
 					<ModelPicker
 						id="def-video-model"
-						refreshToken={defaults.strict_model_filtering}
+						refreshToken={draft.strict_model_filtering}
 						interaction="video"
 						provider={videoSrcProvider}
-						bind:value={defaults.video_model}
+						bind:value={draft.video_model}
 						defaultModel={videoSavedModel}
 					/>
 				{:else}
@@ -747,7 +723,7 @@ onMount(async () => {
 			<Textarea
 				id="def-llm-prompt"
 				rows={5}
-				bind:value={defaults.summarize_prompt}
+				bind:value={draft.summarize_prompt}
 				placeholder="Instructions the summary model receives before the transcript"
 			/>
 			<p class="m-0 text-xs text-muted-foreground">
@@ -771,8 +747,8 @@ onMount(async () => {
 					</span>
 				</div>
 				<Switch
-					checked={defaults.strict_model_filtering !== false}
-					onCheckedChange={(v) => (defaults.strict_model_filtering = v)}
+					checked={draft.strict_model_filtering !== false}
+					onCheckedChange={(v) => (draft.strict_model_filtering = v)}
 					aria-label="Only show compatible models"
 				/>
 			</div>

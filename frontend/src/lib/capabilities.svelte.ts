@@ -182,6 +182,16 @@ export function interactionsFor(kind: ProviderKind | undefined): Interaction[] {
 	return capabilities.provider(kind)?.interactions ?? ALL_INTERACTIONS
 }
 
+/** Whether a row may be offered for an interaction. No config (or a kind it
+ *  has never heard of): allow it. The backend still refuses a combination it
+ *  cannot serve, and an error beats a provider that silently vanished from
+ *  every picker. */
+export function supportsInteraction(p: { kind: ProviderKind }, interaction: Interaction): boolean {
+	const spec = capabilities.provider(p.kind)
+	if (!spec) return true
+	return spec.interactions.includes(interaction)
+}
+
 /** True when any *offered* transcription model streams within an utterance.
  *  Hidden models grant nothing - that is what the flag is for - and glob
  *  patterns count, since a runtime-discovered catalogue lists no models. */

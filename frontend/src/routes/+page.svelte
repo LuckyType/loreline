@@ -8,6 +8,7 @@ import {
 	WrapText,
 } from '@lucide/svelte'
 import { onDestroy, onMount } from 'svelte'
+import { actionSetup } from '$lib/actionSetup.svelte'
 import { ApiError, api } from '$lib/api'
 import {
 	featureBlockedReason,
@@ -26,40 +27,31 @@ import LogLine from '$lib/LogLine.svelte'
 import { modelInfoFor } from '$lib/modelCatalog.svelte'
 import ModelPicker from '$lib/ModelPicker.svelte'
 import { formatTime, health, logsWs, speakerColor, transcriptWs } from '$lib/stores'
-import {
-	liveSttProviders,
-	type ActionDefaults,
-	type DiarizationModeKind,
-	type ProviderConfig,
-	type TranscriptEvent,
-} from '$lib/types'
+import type { DiarizationModeKind, TranscriptEvent } from '$lib/types'
 import { cn } from '$lib/utils'
 import { connect, type LiveSocket } from '$lib/ws'
 
 // --- session controls ---
-let providers = $state<ProviderConfig[]>([])
-let primary = $state('')
+// Provider rows, stored defaults and the capability gate all come from one
+// store, loaded together, so every seed below is computed from a gated list
+// or not at all. Live capture only: LLM providers can't transcribe, and
+// OpenRouter's STT has no streaming mode so it is re-processing-only.
+const sttProviders = $derived(actionSetup.providersFor('capture'))
+// Seeded, not stored: the configured default while it can drive a capture,
+// else the first row that can. A pick overrides it.
+let primary = $derived(actionSetup.preferredProvider('capture')?.id ?? '')
 let fallback = $state('')
-let defaults = $state<ActionDefaults>({
-	stt_model: '',
-	diar_mode: '',
-	diar_endpoint: '',
-	summarize_model: '',
-})
-
-// Live capture only: LLM providers can't transcribe, and OpenRouter's STT has
-// no streaming mode so it is re-processing-only (see $lib/types).
-const sttProviders = $derived(liveSttProviders(providers))
-const primaryProvider = $derived(providers.find((p) => p.id === primary))
-const fallbackProvider = $derived(providers.find((p) => p.id === fallback))
+const primaryProvider = $derived(actionSetup.provider(primary))
+const fallbackProvider = $derived(actionSetup.provider(fallback))
 // The stored transcription default is a provider/model pair: its model half
 // only counts while its provider half is the one selected.
-const sttDefault = $derived(primary === defaults.stt_provider ? defaults.stt_model : '')
+const sttDefault = $derived(actionSetup.pairedDefault('capture', primaryProvider))
 // Seeded, not stored: a pick in the picker overrides these until the provider
 // changes, and a provider switch starts over (see preferredModel).
-let model = $derived(preferredModel(primaryProvider, sttDefault))
+let model = $derived(actionSetup.preferredModelFor('capture', primaryProvider))
 let fallbackModel = $derived(preferredModel(fallbackProvider, ''))
-let diarMode = $state<DiarizationModeKind>('none')
+// The stored mode, seeded the same way: a pick overrides it.
+let diarMode = $derived(actionSetup.defaults.diar_mode as DiarizationModeKind)
 // The picked model's catalogue entry, used only as the fallback for a model
 // the capability config does not annotate. Read from the shared catalogue, so
 // it is known as soon as the picker's list has loaded and stays known whether
@@ -71,7 +63,17 @@ const primaryKind = $derived(primaryProvider?.kind)
 const inlineAvailable = $derived(
 	inlineDiarizationFor(primaryKind, model, primaryModelInfo?.inline_diarization),
 )
-let diarEndpoint = $state('')
+// Where the bundled sherpa-onnx diarizer answers on the compose network.
+// Used as the actual default, not just placeholder text - it was previously
+// only a placeholder, so you had to retype the value it was already showing.
+const DEFAULT_DIAR_ENDPOINT = 'http://diarization:8001'
+// The stored endpoint. Saved defaults can say "remote" without one: fill in
+// the bundled service rather than showing an empty box next to a placeholder
+// the user would have to copy out by hand. An edit overrides it.
+let diarEndpoint = $derived(
+	actionSetup.defaults.diar_endpoint ||
+		(actionSetup.defaults.diar_mode === 'remote' ? DEFAULT_DIAR_ENDPOINT : ''),
+)
 // On by default: capture always fed the campaign glossary to the provider, and
 // turning it off is the deliberate choice (hear the audio unbiased).
 let useGlossary = $state(true)
@@ -99,11 +101,6 @@ const inlineConflict = $derived(
 )
 let error = $state('')
 let busy = $state(false)
-
-// Where the bundled sherpa-onnx diarizer answers on the compose network.
-// Used as the actual default, not just placeholder text - it was previously
-// only a placeholder, so you had to retype the value it was already showing.
-const DEFAULT_DIAR_ENDPOINT = 'http://diarization:8001'
 
 // Validated in the UI rather than only server-side, so the message can sit
 // under the field it's about instead of at the bottom of the card.
@@ -142,7 +139,7 @@ function setDiarMode(mode: string) {
 	// Switching to remote with nothing configured: offer the bundled service
 	// rather than an empty box the user has to fill from the placeholder.
 	if (mode === 'remote' && !diarEndpoint.trim()) {
-		diarEndpoint = defaults.diar_endpoint || DEFAULT_DIAR_ENDPOINT
+		diarEndpoint = actionSetup.defaults.diar_endpoint || DEFAULT_DIAR_ENDPOINT
 	}
 }
 
@@ -276,34 +273,6 @@ async function clearLogs() {
 	logLines = []
 }
 
-async function load() {
-	try {
-		providers = await api.listProviders()
-	} catch (err) {
-		error = err instanceof ApiError ? err.message : 'failed to load providers'
-	}
-	try {
-		defaults = await api.getDefaults()
-		if (defaults.diar_mode) diarMode = defaults.diar_mode as DiarizationModeKind
-		if (defaults.diar_endpoint) diarEndpoint = defaults.diar_endpoint
-		// Saved defaults can say "remote" without an endpoint. Fill in the
-		// bundled service rather than showing an empty box next to a
-		// placeholder the user would have to copy out by hand.
-		if (diarMode === 'remote' && !diarEndpoint.trim()) {
-			diarEndpoint = DEFAULT_DIAR_ENDPOINT
-		}
-	} catch {
-		/* defaults are optional */
-	}
-	// Seed the provider picker only after the defaults are known, so the
-	// configured default provider wins over "first in the list".
-	if (!primary) {
-		const wanted = defaults.stt_provider
-		primary =
-			wanted && sttProviders.some((p) => p.id === wanted) ? wanted : (sttProviders[0]?.id ?? '')
-	}
-}
-
 // The transcript view only ever holds events pushed since this component's
 // own /ws/transcript connection opened - leaving the Dashboard and coming
 // back reconnects it fresh, otherwise losing everything from before that
@@ -367,7 +336,7 @@ async function refresh() {
 let unmounted = false
 
 onMount(() => {
-	load()
+	void actionSetup.load()
 	logSock = connect(
 		'/ws/logs',
 		(data) => {
@@ -416,7 +385,7 @@ onDestroy(() => {
 						<strong>Recording</strong>
 						<span class="text-muted-foreground">
 							{sessionElapsed === null ? '-' : formatTime(sessionElapsed)}
-							· {providers.length} providers
+							· {actionSetup.providers.length} providers
 						</span>
 					</span>
 					<Button variant="destructive" onclick={stop} disabled={busy}>Stop session</Button>
@@ -441,7 +410,7 @@ onDestroy(() => {
 						<Dropdown
 							id="primary"
 							bind:value={primary}
-							defaultValue={defaults.stt_provider ?? ''}
+							defaultValue={actionSetup.defaults.stt_provider}
 							options={sttProviders.map((p) => ({ value: p.id, label: p.name }))}
 							placeholder="Select provider…"
 						/>
@@ -620,8 +589,8 @@ onDestroy(() => {
 					</div>
 				{/if}
 			{/if}
-			{#if error}
-				<p class="mt-2 text-sm text-destructive">{error}</p>
+			{#if error || actionSetup.error}
+				<p class="mt-2 text-sm text-destructive">{error || actionSetup.error}</p>
 			{/if}
 		</CardContent>
 	</Card>

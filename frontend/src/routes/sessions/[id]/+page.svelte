@@ -2,11 +2,11 @@
 import { ChevronDown, TriangleAlert } from '@lucide/svelte'
 import { onMount } from 'svelte'
 import { page } from '$app/stores'
+import { actionSetup } from '$lib/actionSetup.svelte'
 import { ApiError, api } from '$lib/api'
 import {
 	featureBlockedReason,
 	glossaryDropsWarning,
-	preferredModel,
 	reasoningEffortsFor,
 } from '$lib/capabilities.svelte'
 import { Badge } from '$lib/components/ui/badge'
@@ -40,30 +40,19 @@ import { modelInfoFor } from '$lib/modelCatalog.svelte'
 import ModelPicker from '$lib/ModelPicker.svelte'
 import { providerName } from '$lib/stores'
 import TranscriptList from '$lib/TranscriptList.svelte'
-import {
-	providersFor,
-	type ActionDefaults,
-	type DiarizationModeKind,
-	type ExportFormat,
-	type ProviderConfig,
-	type ReprocessJob,
-	type SessionDetail,
-	type TranscriptEvent,
-	type VideoJob,
+import type {
+	DiarizationModeKind,
+	ExportFormat,
+	ReprocessJob,
+	SessionDetail,
+	TranscriptEvent,
+	VideoJob,
 } from '$lib/types'
 import { connect } from '$lib/ws'
 
 let detail = $state<SessionDetail | null>(null)
-let providers = $state<ProviderConfig[]>([])
 let jobs = $state<ReprocessJob[]>([])
 let error = $state('')
-let defaults = $state<ActionDefaults>({
-	stt_model: '',
-	diar_mode: '',
-	diar_endpoint: '',
-	summarize_model: '',
-})
-let rpProvider = $state('')
 let rpDiarKind = $state<DiarizationModeKind>('remote')
 let rpDiarEndpoint = $state('')
 let rpDiarMin = $state('')
@@ -83,13 +72,32 @@ const formatLabels: Record<ExportFormat, string> = {
 	json: 'JSON (.json)',
 }
 const hasAudio = $derived(!!detail?.session.audio_path)
-const rpSelectedProvider = $derived(providers.find((p) => p.id === rpProvider))
+
+/** Re-processing replays stored audio, so it accepts every transcribe-capable
+ *  provider - including the ones excluded from live capture. */
+const reprocessProviders = $derived(actionSetup.providersFor('transcribe'))
+
+/** Which provider the re-process row comes up on. Seeded, not stored: a pick
+ * overrides it.
+ *
+ * The stored transcription default wins: Settings promises it is pre-selected
+ * "when starting or re-processing a session", and it is the only way to say
+ * "re-run my sessions on the batch provider". Re-running whatever captured the
+ * session is the fallback, not the rule - a capture provider is by definition
+ * one that can drive a live session, so preferring it buried the batch
+ * providers behind a manual switch every single time. A default naming a
+ * provider that has since been deleted (or lost its transcribe ability) is
+ * ignored rather than selected into a dead id. */
+let rpProvider = $derived(
+	actionSetup.preferredProvider('transcribe', detail?.session.primary_provider)?.id ?? '',
+)
+const rpSelectedProvider = $derived(actionSetup.provider(rpProvider))
 // The stored transcription default is a provider/model pair: its model half
 // only counts while its provider half is the one selected.
-const rpDefault = $derived(rpProvider === defaults.stt_provider ? defaults.stt_model : '')
+const rpDefault = $derived(actionSetup.pairedDefault('transcribe', rpSelectedProvider))
 // Seeded, not stored: a pick overrides this until the provider changes, and a
 // provider switch starts over (see preferredModel).
-let rpModel = $derived(preferredModel(rpSelectedProvider, rpDefault))
+let rpModel = $derived(actionSetup.preferredModelFor('transcribe', rpSelectedProvider))
 // Not every model can take a glossary: OpenRouter's transcription API accepts
 // a prompt field and ignores it, so the checkbox there was a silent no-op.
 // Disabled with the reason, rather than left to do nothing.
@@ -346,8 +354,8 @@ const originalStatus = $derived.by(() => {
 const selectedJob = $derived(transcribeJobs.find((j) => j.id === selectedVersion))
 const selectedProviderName = $derived(
 	selectedVersion === 'original'
-		? providerName(detail?.session.primary_provider, providers)
-		: providerName(selectedJob?.provider_id, providers),
+		? providerName(detail?.session.primary_provider, actionSetup.providers)
+		: providerName(selectedJob?.provider_id, actionSetup.providers),
 )
 const selectedModel = $derived(selectedVersion === 'original' ? '-' : (selectedJob?.model ?? '-'))
 
@@ -360,18 +368,18 @@ let renameOpen = $state(false)
 let nameForm = $state<Record<string, string>>({})
 
 // --- summarize ---
-const llmProviders = $derived(providersFor(providers, 'summarize'))
+const llmProviders = $derived(actionSetup.providersFor('summarize'))
 let summarizeOpen = $state(false)
-let sumProvider = $state('')
+// Seeded, not stored, same rule as `rpProvider`: the saved default while it
+// still summarizes, else the first row that does.
+let sumProvider = $derived(actionSetup.preferredProvider('summarize')?.id ?? '')
 let sumEffort = $state('')
 let sumBusy = $state(false)
 let sumError = $state('')
 const selectedLlm = $derived(llmProviders.find((p) => p.id === sumProvider))
 // The summarize default as a pair, same rule as `rpDefault` above.
-const sumDefault = $derived(
-	sumProvider === defaults.summarize_provider ? defaults.summarize_model : '',
-)
-let sumModel = $derived(preferredModel(selectedLlm, sumDefault))
+const sumDefault = $derived(actionSetup.pairedDefault('summarize', selectedLlm))
+let sumModel = $derived(actionSetup.preferredModelFor('summarize', selectedLlm))
 // The picked model's catalogue entry; the fallback for a model the capability
 // config does not annotate. Read from the shared catalogue rather than
 // reported by the picker, which the dialog unmounts on close: the entry must
@@ -391,31 +399,11 @@ $effect(() => {
 	if (sumEfforts.length && sumEffort && !sumEfforts.includes(sumEffort)) sumEffort = ''
 })
 
-/** Re-processing replays stored audio, so it accepts every transcribe-capable
- *  provider - including the ones excluded from live capture. */
-const reprocessProviders = $derived(providersFor(providers, 'transcribe'))
-
-/** Which provider the re-process row comes up on.
- *
- * The stored transcription default wins: Settings promises it is pre-selected
- * "when starting or re-processing a session", and it is the only way to say
- * "re-run my sessions on the batch provider". Re-running whatever captured the
- * session is the fallback, not the rule - a capture provider is by definition
- * one that can drive a live session, so preferring it buried the batch
- * providers behind a manual switch every single time. A default naming a
- * provider that has since been deleted (or lost its transcribe ability) is
- * ignored rather than selected into a dead id. */
-function initialReprocessProvider(): string {
-	const wanted = defaults.stt_provider
-	if (wanted && reprocessProviders.some((p) => p.id === wanted)) return wanted
-	return detail?.session.primary_provider ?? reprocessProviders[0]?.id ?? ''
-}
-
 // --- video generation ---
 // Only OpenRouter can generate video (see supports_video in
 // src/loreline/video/client.py); every other provider kind is filtered out
 // rather than offered and rejected at submit time.
-const videoProviders = $derived(providersFor(providers, 'video'))
+const videoProviders = $derived(actionSetup.providersFor('video'))
 let videoOpen = $state(false)
 let videoJobs = $state<VideoJob[]>([])
 
@@ -552,11 +540,6 @@ async function openSummarize() {
 	)
 		return
 	sumError = ''
-	if (!sumProvider) {
-		const wanted = defaults.summarize_provider
-		sumProvider =
-			wanted && llmProviders.some((p) => p.id === wanted) ? wanted : (llmProviders[0]?.id ?? '')
-	}
 	summarizeOpen = true
 }
 
@@ -584,16 +567,11 @@ async function runSummarize() {
 // to an effect above, exactly because a teardown returned from an async onMount
 // is never registered.
 onMount(async () => {
+	// Providers, defaults and the capability gate: the seeds above are derived
+	// from the store, so nothing here has to wait for it.
+	void actionSetup.load()
 	try {
 		detail = await api.getSession(id)
-		providers = await api.listProviders()
-		try {
-			defaults = await api.getDefaults()
-		} catch {
-			/* defaults are optional */
-		}
-		// After the defaults load, since the stored one is the first choice.
-		rpProvider = initialReprocessProvider()
 		await refreshJobs()
 		await refreshVideoJobs()
 	} catch (err) {
@@ -602,8 +580,8 @@ onMount(async () => {
 })
 </script>
 
-{#if error}
-	<p class="mb-2 text-sm text-destructive">{error}</p>
+{#if error || actionSetup.error}
+	<p class="mb-2 text-sm text-destructive">{error || actionSetup.error}</p>
 {/if}
 
 {#if !detail}
@@ -681,7 +659,9 @@ onMount(async () => {
 							onclick={() => selectVersion('original')}
 						>
 							<TableCell><code>original</code></TableCell>
-							<TableCell>{providerName(detail.session.primary_provider, providers)}</TableCell>
+							<TableCell
+								>{providerName(detail.session.primary_provider, actionSetup.providers)}</TableCell
+							>
 							<TableCell class="text-muted-foreground">-</TableCell>
 							<TableCell>{diarizeInfo('original')}</TableCell>
 							<TableCell>{detail.transcript.length}</TableCell>
@@ -717,7 +697,7 @@ onMount(async () => {
 								onclick={() => selectable(j) && selectVersion(j.id)}
 							>
 								<TableCell><code>{j.id.slice(0, 8)}</code></TableCell>
-								<TableCell>{providerName(j.provider_id, providers)}</TableCell>
+								<TableCell>{providerName(j.provider_id, actionSetup.providers)}</TableCell>
 								<TableCell>{j.model ?? '-'}</TableCell>
 								<TableCell>{diarizeInfo(j.id)}</TableCell>
 								<TableCell>
@@ -794,7 +774,7 @@ onMount(async () => {
 						<Dropdown
 							class="max-w-52"
 							bind:value={rpProvider}
-							defaultValue={defaults.stt_provider ?? ''}
+							defaultValue={actionSetup.defaults.stt_provider}
 							options={reprocessProviders.map((p) => ({ value: p.id, label: p.name }))}
 							placeholder="Provider"
 						/>
@@ -931,7 +911,7 @@ onMount(async () => {
 				<TranscriptList
 					events={shownEvents}
 					names={detail.session.speaker_names}
-					{providers}
+					providers={actionSetup.providers}
 					showSource={selectedVersion === 'original'}
 				/>
 			</Foldable>
@@ -943,7 +923,7 @@ onMount(async () => {
 			<Foldable
 				title="Summary"
 				meta={detail.session.summary && detail.session.summary_model
-					? `${providerName(detail.session.summary_provider, providers)} · ${detail.session.summary_model}`
+					? `${providerName(detail.session.summary_provider, actionSetup.providers)} · ${detail.session.summary_model}`
 					: ''}
 				bind:open={sections.summary}
 			>
@@ -1023,9 +1003,7 @@ onMount(async () => {
 <GenerateVideoDialog
 	bind:open={videoOpen}
 	sessionId={id}
-	providers={videoProviders}
 	summary={detail?.session.summary ?? ''}
-	{defaults}
 	onqueued={refreshVideoJobs}
 />
 
@@ -1098,7 +1076,7 @@ onMount(async () => {
 			<Label>LLM provider</Label>
 			<Dropdown
 				bind:value={sumProvider}
-				defaultValue={defaults.summarize_provider ?? ''}
+				defaultValue={actionSetup.defaults.summarize_provider}
 				options={llmProviders.map((p) => ({ value: p.id, label: p.name }))}
 				placeholder="LLM provider"
 			/>
@@ -1117,7 +1095,7 @@ onMount(async () => {
 				<Label>Reasoning effort</Label>
 				<Dropdown
 					bind:value={sumEffort}
-					defaultValue={defaults.summarize_reasoning_effort ?? ''}
+					defaultValue={actionSetup.defaults.summarize_reasoning_effort}
 					options={[
 						{ value: '', label: "Model's default" },
 						...sumEfforts.map((e) => ({ value: e, label: e })),
