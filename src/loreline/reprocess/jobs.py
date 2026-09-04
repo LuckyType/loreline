@@ -16,21 +16,18 @@ import asyncio
 import contextlib
 import time
 import uuid
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
 from loreline.bus import EventBus
 from loreline.diarization.merge import assign_speakers
-from loreline.diarization.provider import create_diarizer
 from loreline.export import variant_rows
 from loreline.logging import bind_log_context, get_logger
 from loreline.models import (
     DIARIZE_SOURCE_PREFIX,
     ORIGINAL_VERSION,
     REPROCESS_SOURCE_PREFIX,
-    DiarizationMode,
     JobStatus,
-    ProviderKind,
     ReprocessJob,
     TranscriptEvent,
     rebase_transcript,
@@ -40,8 +37,8 @@ from loreline.stt.router import RouterConfig, SttRouter
 
 if TYPE_CHECKING:
     from loreline.audio.chunker import Utterance
-    from loreline.diarization.base import DiarizationProvider
-    from loreline.models import DiarizationConfig, ProviderConfig
+    from loreline.diarization.provider import BuildDiarizer
+    from loreline.models import ProviderConfig
     from loreline.persistence import (
         AudioStore,
         GlossaryRepository,
@@ -54,8 +51,6 @@ if TYPE_CHECKING:
     from loreline.web.schemas import ReprocessRequest
 
 log = get_logger(__name__)
-
-DiarizerFactory = Callable[["DiarizationConfig"], "DiarizationProvider"]
 
 
 class SessionNotFoundError(ValueError):
@@ -135,8 +130,8 @@ class ReprocessManager:
         secrets: SecretStore,
         audio_store: AudioStore,
         transcript_bus: EventBus[TranscriptEvent],
+        diarizer_factory: BuildDiarizer,
         backend_factory: BackendFactory | None = None,
-        diarizer_factory: DiarizerFactory | None = None,
     ) -> None:
         self._providers = providers
         self._glossaries = glossaries
@@ -150,7 +145,7 @@ class ReprocessManager:
         # reach whoever is watching that session (see _drive).
         self._bus = transcript_bus
         self._backend_factory = backend_factory or create_backend
-        self._diarizer_factory = diarizer_factory or create_diarizer
+        self._diarizer_factory = diarizer_factory
         self._tasks: dict[str, asyncio.Task[None]] = {}
 
     async def enqueue(self, req: ReprocessRequest) -> ReprocessJob:
@@ -312,7 +307,7 @@ class ReprocessManager:
             msg = "transcribe requires a provider"
             raise ProviderNotFoundError(msg)
         backend = self._backend_factory(provider, self._secrets, job.model)
-        diarizer = await self._build_diarizer(job.diarization)
+        diarizer = await self._diarizer_factory(job.diarization)
         # Not loaded at all when the job opted out, so no glossary reaches the
         # backend as keyterms or as a prompt.
         glossary = await self._glossaries.get_effective(campaign_id) if job.use_glossary else None
@@ -335,22 +330,6 @@ class ReprocessManager:
             await _aclose(backend)
             await _aclose(diarizer)
 
-    async def _build_diarizer(self, config: DiarizationConfig) -> DiarizationProvider:
-        """Construct the diarizer for a reprocess op.
-
-        OpenAI batch diarization needs an OpenAI API key. Rather than only reading
-        the ``OPENAI_API_KEY`` env var, reuse the key the user already stored on a
-        configured OpenAI provider (secret store); the env var stays the fallback.
-
-        Deliberately does not route that mode through ``self._diarizer_factory``:
-        an injected factory takes the config alone and has nowhere to receive the
-        resolved key, so it is ``create_diarizer`` that gets it.
-        """
-        if config.mode == DiarizationMode.OPENAI:
-            key = _resolve_openai_key(await self._providers.list(), self._secrets)
-            return create_diarizer(config, openai_api_key=key)
-        return self._diarizer_factory(config)
-
     async def _diarize_session(self, job: ReprocessJob) -> int:
         """Diarize the whole continuous session audio once and relabel ONE
         transcript version (``job.target``) globally, giving stable speaker
@@ -362,7 +341,7 @@ class ReprocessManager:
             raise SessionNotFoundError(msg)
         # Blocking file I/O (the whole continuous session WAV) off the event loop.
         wav, sample_rate = await asyncio.to_thread(self._audio_store.read_wav, job.session_id)
-        diarizer = await self._build_diarizer(job.diarization)
+        diarizer = await self._diarizer_factory(job.diarization)
         try:
             segments = await diarizer.diarize(
                 wav,
@@ -447,17 +426,3 @@ async def _aclose(obj: object) -> None:
             await closer()
         except Exception:  # cleanup must never mask the job result
             log.warning("reprocess.aclose.failed")
-
-
-def _resolve_openai_key(providers: list[ProviderConfig], secrets: SecretStore) -> str | None:
-    """Return a configured OpenAI provider's stored API key, if any.
-
-    Lets OpenAI batch diarization reuse the key the user already saved for their
-    OpenAI provider instead of requiring a separate ``OPENAI_API_KEY`` env var.
-    """
-    for provider in providers:
-        if provider.kind == ProviderKind.OPENAI and provider.auth_ref:
-            key = secrets.get(provider.auth_ref)
-            if key:
-                return key
-    return None

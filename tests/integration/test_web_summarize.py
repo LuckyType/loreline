@@ -9,7 +9,7 @@ import pytest
 import pytest_asyncio
 from asgi_lifespan import LifespanManager
 from httpx import ASGITransport, AsyncClient
-from test_web_session import FakeBackend, FakeDiarizer, capture_factory
+from test_web_session import FakeBackend, capture_factory, fake_diarizers
 
 import loreline.web.routes.sessions as sessions_route
 from loreline.llm import LLMError
@@ -28,7 +28,7 @@ async def client(tmp_path: Path) -> AsyncIterator[AsyncClient]:
         settings,
         capture_factory=capture_factory,  # type: ignore[arg-type]
         backend_factory=FakeBackend,  # type: ignore[arg-type]
-        diarizer_factory=lambda _cfg: FakeDiarizer(),
+        diarizer_factory=fake_diarizers,
     )
     async with LifespanManager(app):
         transport = ASGITransport(app=app)

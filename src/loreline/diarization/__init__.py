@@ -9,17 +9,25 @@ from __future__ import annotations
 
 from loreline.diarization.base import DiarizationProvider, NoopDiarizer
 from loreline.diarization.merge import assign_speakers, segments_from_words
-from loreline.diarization.provider import create_diarizer
+from loreline.diarization.provider import (
+    BuildDiarizer,
+    DiarizerFactory,
+    create_diarizer,
+    resolve_openai_key,
+)
 from loreline.diarization.remote import RemoteDiarizer
 
 # NOTE: OpenAIDiarizer is intentionally not eagerly imported here; create_diarizer
 # imports it lazily so the diarization package has no hard dependency on it.
 
 __all__ = [
+    "BuildDiarizer",
     "DiarizationProvider",
+    "DiarizerFactory",
     "NoopDiarizer",
     "RemoteDiarizer",
     "assign_speakers",
     "create_diarizer",
+    "resolve_openai_key",
     "segments_from_words",
 ]

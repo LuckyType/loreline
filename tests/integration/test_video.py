@@ -19,7 +19,7 @@ import pytest_asyncio
 from asgi_lifespan import LifespanManager
 from httpx import ASGITransport, AsyncClient
 from test_catalog_reader import VIDEO_BODY
-from test_web_session import FakeBackend, FakeDiarizer, capture_factory
+from test_web_session import FakeBackend, capture_factory, fake_diarizers
 
 from loreline.models import (
     Interaction,
@@ -705,7 +705,7 @@ class TestInlineDiarizationGuard:
             settings,
             capture_factory=capture_factory,  # type: ignore[arg-type]
             backend_factory=FakeBackend,  # type: ignore[arg-type]
-            diarizer_factory=lambda _cfg: FakeDiarizer(),
+            diarizer_factory=fake_diarizers,
         )
         async with LifespanManager(app):
             transport = ASGITransport(app=app)

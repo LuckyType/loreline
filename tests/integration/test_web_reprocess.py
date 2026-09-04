@@ -11,15 +11,16 @@ from asgi_lifespan import LifespanManager
 from httpx import ASGITransport, AsyncClient
 from test_web_session import (  # type: ignore[import-not-found]
     FakeBackend,
-    FakeDiarizer,
     FakeSource,
     GlossaryRecordingBackend,
     OutOfCreditBackend,
     capture_factory,
+    fake_diarizers,
 )
 
 from loreline.audio.chunker import SpeechDetector, Utterance
-from loreline.models import ProviderConfig, SpeakerSegment, TranscriptEvent
+from loreline.diarization.base import DiarizationProvider
+from loreline.models import DiarizationConfig, ProviderConfig, SpeakerSegment, TranscriptEvent
 from loreline.secrets import SecretStore
 from loreline.settings import Settings
 from loreline.web.app import create_app
@@ -36,7 +37,7 @@ async def client(tmp_path: Path) -> AsyncIterator[AsyncClient]:
         settings,
         capture_factory=capture_factory,  # type: ignore[arg-type]
         backend_factory=FakeBackend,  # type: ignore[arg-type]
-        diarizer_factory=lambda _cfg: FakeDiarizer(),
+        diarizer_factory=fake_diarizers,
     )
     async with LifespanManager(app):
         transport = ASGITransport(app=app)
@@ -102,7 +103,7 @@ async def test_reprocess_transcribe_names_the_model_it_runs(tmp_path: Path) -> N
         settings,
         capture_factory=capture_factory,  # type: ignore[arg-type]
         backend_factory=factory,  # type: ignore[arg-type]
-        diarizer_factory=lambda _cfg: FakeDiarizer(),
+        diarizer_factory=fake_diarizers,
     )
     async with LifespanManager(app):
         transport = ASGITransport(app=app)
@@ -146,7 +147,7 @@ async def test_reprocess_applies_the_glossary_unless_switched_off(tmp_path: Path
         settings,
         capture_factory=capture_factory,  # type: ignore[arg-type]
         backend_factory=factory,  # type: ignore[arg-type]
-        diarizer_factory=lambda _cfg: FakeDiarizer(),
+        diarizer_factory=fake_diarizers,
     )
     async with LifespanManager(app):
         transport = ASGITransport(app=app)
@@ -192,7 +193,7 @@ async def test_reprocess_job(tmp_path: Path) -> None:
         settings,
         capture_factory=capture_factory,  # type: ignore[arg-type]
         backend_factory=FakeBackend,  # type: ignore[arg-type]
-        diarizer_factory=lambda _cfg: FakeDiarizer(),
+        diarizer_factory=fake_diarizers,
     )
     async with LifespanManager(app):
         transport = ASGITransport(app=app)
@@ -315,13 +316,17 @@ class _WholeSessionDiarizer:
         return None
 
 
+async def _whole_session_diarizers(_config: DiarizationConfig) -> DiarizationProvider:
+    return _WholeSessionDiarizer()
+
+
 async def test_diarize_session_relabels_globally(tmp_path: Path) -> None:
     settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t")
     app = create_app(
         settings,
         capture_factory=capture_factory,  # type: ignore[arg-type]
         backend_factory=FakeBackend,  # type: ignore[arg-type]
-        diarizer_factory=lambda _cfg: _WholeSessionDiarizer(),
+        diarizer_factory=_whole_session_diarizers,
     )
     async with LifespanManager(app):
         transport = ASGITransport(app=app)
@@ -422,7 +427,7 @@ async def test_delete_transcript_version(tmp_path: Path) -> None:
         settings,
         capture_factory=capture_factory,  # type: ignore[arg-type]
         backend_factory=FakeBackend,  # type: ignore[arg-type]
-        diarizer_factory=lambda _cfg: _WholeSessionDiarizer(),
+        diarizer_factory=_whole_session_diarizers,
     )
     async with LifespanManager(app):
         transport = ASGITransport(app=app)
@@ -575,7 +580,7 @@ async def test_running_job_publishes_its_segment_count(tmp_path: Path) -> None:
         settings,
         capture_factory=_two_utterance_capture,  # type: ignore[arg-type]
         backend_factory=factory,  # type: ignore[arg-type]
-        diarizer_factory=lambda _cfg: FakeDiarizer(),
+        diarizer_factory=fake_diarizers,
     )
     async with LifespanManager(app):
         transport = ASGITransport(app=app)
@@ -632,7 +637,7 @@ async def test_reprocess_fails_with_the_vendors_reason_when_credit_runs_out(
         settings,
         capture_factory=capture_factory,  # type: ignore[arg-type]
         backend_factory=factory,  # type: ignore[arg-type]
-        diarizer_factory=lambda _cfg: FakeDiarizer(),
+        diarizer_factory=fake_diarizers,
     )
     async with LifespanManager(app):
         transport = ASGITransport(app=app)
