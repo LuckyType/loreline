@@ -24,6 +24,39 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/system/diarizer/probe": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Probe Diarizer Endpoint
+         * @description Probe an arbitrary diarization endpoint, uncached and on demand.
+         *
+         *     Deliberately not routed through ``_diarizer_status`` above: that cache
+         *     exists because ``/healthz`` is polled every few seconds for one settings
+         *     value, while this answers a one-off question about whatever a GM is
+         *     currently typing into the capture panel's endpoint field - a different
+         *     string on every keystroke, which a cache keyed for a single settings value
+         *     would not help and could even answer wrong (a stale verdict for a value
+         *     that has since changed back).
+         *
+         *     Requires auth like every other route here: naming an endpoint makes the
+         *     server issue an arbitrary outbound HTTP request, which is already true of
+         *     the stored default's probe behind ``/healthz`` above - this is the same
+         *     exposure on a second, caller-supplied value, not a new one.
+         */
+        get: operations["probe_diarizer_endpoint_api_system_diarizer_probe_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/system/revision": {
         parameters: {
             query?: never;
@@ -1158,6 +1191,24 @@ export interface components {
          * @enum {string}
          */
         DiarizationMode: "inline" | "remote" | "openai" | "none";
+        /**
+         * DiarizerProbeResponse
+         * @description The graded probe of one diarization endpoint, checked on demand.
+         *
+         *     The same verdict shape ``HealthResponse`` already carries for the stored
+         *     default, but for whatever endpoint the caller names. The capture panel
+         *     uses this to check the value currently typed into its endpoint field,
+         *     which ``/healthz`` cannot: that call only ever probes
+         *     ``defaults.diar_endpoint``, the last *saved* value, never a value someone
+         *     is only trying out.
+         */
+        DiarizerProbeResponse: {
+            /** Reachable */
+            reachable: boolean;
+            status: components["schemas"]["HealthStatus"];
+            /** Detail */
+            detail?: string | null;
+        };
         /**
          * Glossary
          * @description Per-campaign custom vocabulary (spell / character / place names).
@@ -2328,6 +2379,37 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HealthResponse"];
+                };
+            };
+        };
+    };
+    probe_diarizer_endpoint_api_system_diarizer_probe_get: {
+        parameters: {
+            query: {
+                endpoint: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DiarizerProbeResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

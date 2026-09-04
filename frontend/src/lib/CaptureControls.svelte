@@ -30,7 +30,7 @@ import { elapsedSince } from '$lib/elapsed.svelte'
 import { modelInfoFor } from '$lib/modelCatalog.svelte'
 import ModelPicker from '$lib/ModelPicker.svelte'
 import { formatTime, health } from '$lib/stores'
-import type { DiarizationModeKind } from '$lib/wire'
+import type { DiarizationModeKind, DiarizerProbe } from '$lib/wire'
 import { cn } from '$lib/utils'
 
 // Provider rows, stored defaults and the capability gate all come from one
@@ -74,6 +74,17 @@ const DEFAULT_DIAR_ENDPOINT = 'http://diarization:8001'
 let diarEndpoint = $derived(
 	actionSetup.defaults.diar_endpoint ||
 		(actionSetup.defaults.diar_mode === 'remote' ? DEFAULT_DIAR_ENDPOINT : ''),
+)
+// An on-demand probe of whatever diarEndpoint holds right now, not the stored
+// default: $health's diarizer_* fields only ever grade defaults.diar_endpoint,
+// so typing a different endpoint here used to get neither a warning when it's
+// down nor credit when it's up. diarProbedEndpoint records which endpoint the
+// verdict is about, so a slow or stale answer can never be shown against a
+// value that isn't on screen any more - see diarProbeCurrent below.
+let diarProbe = $state<DiarizerProbe | null>(null)
+let diarProbedEndpoint = $state('')
+const diarProbeCurrent = $derived(
+	diarMode === 'remote' && diarProbedEndpoint === diarEndpoint.trim(),
 )
 // On by default: capture always fed the campaign glossary to the provider, and
 // turning it off is the deliberate choice (hear the audio unbiased).
@@ -135,6 +146,43 @@ $effect(() => {
 	if (useGlossary && glossaryBlocked) useGlossary = false
 })
 
+// Debounced live probe of the remote diarization endpoint: fires shortly
+// after diarEndpoint (or diarMode) settles rather than on every keystroke, so
+// typing a URL doesn't hammer the server or the service behind it. Runs
+// whenever remote diarization is selected, whether or not the advanced panel
+// happens to be open - the collapsed summary needs the same live answer the
+// panel does, since folding it away must never hide a problem.
+const DIAR_PROBE_DEBOUNCE_MS = 500
+
+$effect(() => {
+	const endpoint = diarEndpoint.trim()
+	if (diarMode !== 'remote' || !endpoint) {
+		diarProbe = null
+		diarProbedEndpoint = ''
+		return
+	}
+	const timer = setTimeout(async () => {
+		try {
+			const result = await api.probeDiarizerEndpoint(endpoint)
+			// Read the field again rather than closing over it: a slow answer
+			// must not paint a verdict about an endpoint no longer shown.
+			if (diarEndpoint.trim() === endpoint) {
+				diarProbe = result
+				diarProbedEndpoint = endpoint
+			}
+		} catch {
+			// The probe call itself failing (our own backend hiccuping, an
+			// expired session) says nothing about the endpoint, so this
+			// clears to "unknown" rather than painting it red.
+			if (diarEndpoint.trim() === endpoint) {
+				diarProbe = null
+				diarProbedEndpoint = ''
+			}
+		}
+	}, DIAR_PROBE_DEBOUNCE_MS)
+	return () => clearTimeout(timer)
+})
+
 function setDiarMode(mode: string) {
 	diarMode = mode as DiarizationModeKind
 	// Switching to remote with nothing configured: offer the bundled service
@@ -162,7 +210,7 @@ const diarSummary = $derived.by(() => {
 	if (diarMode === 'none') return 'Off'
 	if (diarMode === 'inline') return 'Inline (from STT)'
 	if (endpointMissing) return 'Remote - endpoint missing'
-	if ($health?.diarizer_endpoint && $health.diarizer_reachable === false) {
+	if (diarProbeCurrent && diarProbe && !diarProbe.reachable) {
 		return 'Remote - service not answering'
 	}
 	return `Remote - ${diarEndpoint}`
@@ -171,8 +219,7 @@ const diarSummary = $derived.by(() => {
 // Split out so each half of the summary line can colour itself: a missing
 // fallback model is not a diarization problem and must not paint one red.
 const diarProblem = $derived(
-	endpointMissing ||
-		(diarMode === 'remote' && !!$health?.diarizer_endpoint && $health.diarizer_reachable === false),
+	endpointMissing || (diarProbeCurrent && !!diarProbe && !diarProbe.reachable),
 )
 
 const advancedProblem = $derived(startBlocked || diarProblem)
@@ -584,19 +631,19 @@ onMount(() => {
 								<span class="text-xs text-destructive">
 									Required for remote diarization - the service's base URL.
 								</span>
-							{:else if $health?.diarizer_endpoint && $health.diarizer_reachable === false}
+							{:else if diarProbeCurrent && diarProbe && !diarProbe.reachable}
 								<span class="text-xs text-amber-500">
-									No diarization service answered at {$health.diarizer_endpoint}.
-									{#if $health.diarizer_detail}
-										({$health.diarizer_detail})
+									No diarization service answered at {diarEndpoint}.
+									{#if diarProbe.detail}
+										({diarProbe.detail})
 									{/if}
 								</span>
-							{:else if $health?.diarizer_endpoint && $health.diarizer_status === 'degraded'}
+							{:else if diarProbeCurrent && diarProbe?.status === 'degraded'}
 								<span class="text-xs text-amber-500">
-									The diarization service at {$health.diarizer_endpoint} answered but cannot serve
+									The diarization service at {diarEndpoint} answered but cannot serve
 									right now.
-									{#if $health.diarizer_detail}
-										({$health.diarizer_detail})
+									{#if diarProbe.detail}
+										({diarProbe.detail})
 									{/if}
 								</span>
 							{/if}

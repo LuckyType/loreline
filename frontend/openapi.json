@@ -28,6 +28,54 @@
         }
       }
     },
+    "/api/system/diarizer/probe": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Probe Diarizer Endpoint",
+        "description": "Probe an arbitrary diarization endpoint, uncached and on demand.\n\nDeliberately not routed through ``_diarizer_status`` above: that cache\nexists because ``/healthz`` is polled every few seconds for one settings\nvalue, while this answers a one-off question about whatever a GM is\ncurrently typing into the capture panel's endpoint field - a different\nstring on every keystroke, which a cache keyed for a single settings value\nwould not help and could even answer wrong (a stale verdict for a value\nthat has since changed back).\n\nRequires auth like every other route here: naming an endpoint makes the\nserver issue an arbitrary outbound HTTP request, which is already true of\nthe stored default's probe behind ``/healthz`` above - this is the same\nexposure on a second, caller-supplied value, not a new one.",
+        "operationId": "probe_diarizer_endpoint_api_system_diarizer_probe_get",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "endpoint",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Endpoint"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DiarizerProbeResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/system/revision": {
       "get": {
         "tags": [
@@ -2823,6 +2871,35 @@
         ],
         "title": "DiarizationMode",
         "description": "How speaker labels are produced."
+      },
+      "DiarizerProbeResponse": {
+        "properties": {
+          "reachable": {
+            "type": "boolean",
+            "title": "Reachable"
+          },
+          "status": {
+            "$ref": "#/components/schemas/HealthStatus"
+          },
+          "detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "required": [
+          "reachable",
+          "status"
+        ],
+        "title": "DiarizerProbeResponse",
+        "description": "The graded probe of one diarization endpoint, checked on demand.\n\nThe same verdict shape ``HealthResponse`` already carries for the stored\ndefault, but for whatever endpoint the caller names. The capture panel\nuses this to check the value currently typed into its endpoint field,\nwhich ``/healthz`` cannot: that call only ever probes\n``defaults.diar_endpoint``, the last *saved* value, never a value someone\nis only trying out."
       },
       "Glossary": {
         "properties": {

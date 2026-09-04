@@ -9,6 +9,7 @@ import type {
 	AutostartState,
 	CapabilityConfig,
 	DeviceSetting,
+	DiarizerProbe,
 	Glossary,
 	Health,
 	InputDevice,
@@ -87,6 +88,10 @@ export const api = {
 
 	// --- system ---
 	health: () => request<Health>('/api/system/healthz'),
+	/** Probe whatever endpoint the caller names, on demand - unlike the
+	 *  healthz snapshot, which only ever probes the stored default. */
+	probeDiarizerEndpoint: (endpoint: string) =>
+		request<DiarizerProbe>(`/api/system/diarizer/probe?endpoint=${encodeURIComponent(endpoint)}`),
 	revision: () => request<RevisionResponse>('/api/system/revision'),
 	update: () => request<UpdateResult>('/api/system/update', { method: 'POST' }),
 	rollback: (commit: string) =>
