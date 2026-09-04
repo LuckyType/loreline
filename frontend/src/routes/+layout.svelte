@@ -4,7 +4,7 @@ import { PanelLeft } from '@lucide/svelte'
 import type { Snippet } from 'svelte'
 import { onDestroy, onMount } from 'svelte'
 import { goto } from '$app/navigation'
-import { page } from '$app/stores'
+import { page } from '$app/state'
 import { ApiError, api } from '$lib/api'
 import { capabilities, loadCapabilities } from '$lib/capabilities.svelte'
 import ConfirmDialog from '$lib/ConfirmDialog.svelte'
@@ -46,7 +46,7 @@ const nav = [
 ]
 
 function isActiveNavItem(href: string): boolean {
-	return href === '/' ? $page.url.pathname === '/' : $page.url.pathname.startsWith(href)
+	return href === '/' ? page.url.pathname === '/' : page.url.pathname.startsWith(href)
 }
 
 async function poll() {
@@ -57,7 +57,7 @@ async function poll() {
 	} catch (err) {
 		if (err instanceof ApiError && err.status === 401) {
 			authed.set(false)
-			if ($page.url.pathname !== '/login') goto('/login')
+			if (page.url.pathname !== '/login') goto('/login')
 		}
 	}
 }
@@ -101,7 +101,7 @@ function hms(seconds: number | undefined): string {
 }
 </script>
 
-{#if $page.url.pathname === '/login'}
+{#if page.url.pathname === '/login'}
 	{@render children()}
 {:else}
 	<div class="flex min-h-screen flex-col">
