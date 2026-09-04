@@ -36,8 +36,14 @@ surface: transports served, speakers, word timings, glossary ceiling.
 `Connector` base and satisfying the `STTBackend` contract.
 _Avoid_: backend (kept only in class names and the contract), provider class
 
-**HealthReport**: A probe's graded verdict on a provider: reachable, the
-credential works, or the vendor's own words on why not.
+**Health probe**: One question per provider row, "does this key work at
+this surface", answered as a **HealthReport** (reachable, the credential
+works, or the vendor's own words on why not) by one entry point,
+`probe_provider`, never by building a connector. The surface asked is the
+one the yaml declares for the kind, and the grading is the same behind the
+settings badge, the remote diarizer and `/healthz`. Distinct from the
+Catalogue probe below, which asks what a vendor lists.
+_Avoid_: connector health, `health()` (each was one connector's copy)
 
 **Catalogue probe**: One vendor's answer to "what do you list right now" for
 one interaction, read once from its catalog surface, fail-soft, with an
