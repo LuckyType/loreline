@@ -1,7 +1,7 @@
 """Curated file versus vendor catalogue: what actually differs.
 
 The middle third of the check. It takes what the yaml says (via the typed
-config) and what a vendor said (via :mod:`loreline.staleness.catalog`) and
+config) and what a vendor said (via :mod:`loreline.catalog`) and
 produces findings. It performs no I/O, which is what makes it testable against
 a hand-written catalogue and reusable by the sync script that will later
 regenerate the derivable fields instead of hand editing them.
@@ -62,8 +62,8 @@ from datetime import date, timedelta
 from typing import cast
 
 from loreline.capability_config import CapabilityConfig, ModelSpec, ProviderSpec
+from loreline.catalog import CatalogProbe, VendorModel
 from loreline.models import Interaction, ProviderKind
-from loreline.staleness.catalog import CatalogProbe, VendorModel
 from loreline.staleness.deprecation import WARN_HORIZON_DAYS
 from loreline.staleness.report import Code, Finding, Severity
 

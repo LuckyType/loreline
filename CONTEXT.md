@@ -39,6 +39,14 @@ _Avoid_: backend (kept only in class names and the contract), provider class
 **HealthReport**: A probe's graded verdict on a provider: reachable, the
 credential works, or the vendor's own words on why not.
 
+**Catalogue probe**: One vendor's answer to "what do you list right now" for
+one interaction, read once from its catalog surface, fail-soft, with an
+explicit status (ok, no catalogue, no credentials, unreachable, unreadable)
+so silence is never mistaken for absence. The model pickers, the video list
+and the staleness gate are projections of that one answer. A different
+question from the health probe, which asks whether a provider row works.
+_Avoid_: live fetch, vendor list (each was one projection's own reader)
+
 ## Audio and transcript
 
 **Utterance**: One voiced stretch of session audio, cut by the VAD chunker,

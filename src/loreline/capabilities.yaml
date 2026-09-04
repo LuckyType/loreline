@@ -94,7 +94,10 @@ providers:
       # GET https://api.deepgram.com/v1/models -- returns STT models with name/canonical_name/uuid/
       # architecture/languages/version.
       # https://developers.deepgram.com/reference/manage/models/list
-      catalog: {url: "https://api.deepgram.com/v1/models", auth: token_header}
+      # Read by the staleness check, never offered live: it lists every
+      # task-tuned variant under two names each, and the pickers deliberately
+      # offer the handful curated below (see the model_patterns note).
+      catalog: {url: "https://api.deepgram.com/v1/models", auth: token_header, picker: false}
     interactions: [transcribe]
     models:
       - id: nova-3
@@ -1260,7 +1263,10 @@ providers:
       summarize: {url: "https://generativelanguage.googleapis.com/v1beta/openai", auth: bearer, overridable: true}
       # models.list -> Model{name, inputTokenLimit, outputTokenLimit,
       # supportedGenerationMethods[], temperature, maxTemperature, topP, topK, thinking}
-      catalog: {url: "https://generativelanguage.googleapis.com/v1beta/models", auth: goog_header}
+      # Read by the staleness check, never offered live: one list for every
+      # interaction, and nothing in it says which model transcribes and which
+      # chats, so a picker reading it would offer a chat model to transcribe with.
+      catalog: {url: "https://generativelanguage.googleapis.com/v1beta/models", auth: goog_header, picker: false}
     # No video: see the note where the Veo models would otherwise be listed.
     interactions: [transcribe, summarize]
     models:

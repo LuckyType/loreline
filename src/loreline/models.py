@@ -86,7 +86,7 @@ class ModelPrice(BaseModel):
 
     The source (OpenRouter's ``/models``) quotes USD per *single* token as a
     decimal string - "0.000003". That is unreadable in a picker and lossy as a
-    float, so :mod:`loreline.stt.catalog` parses it as ``Decimal`` and scales
+    float, so :mod:`loreline.catalog` parses it as ``Decimal`` and scales
     it here to the per-million figure every price list actually uses.
 
     ``min_prompt_tokens`` is None on the base price and set on a tier that only

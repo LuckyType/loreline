@@ -1,8 +1,16 @@
-"""Tests for the provider model catalog (live /v1/models + curated fallback)."""
+"""The model pickers as a projection of the one catalogue reader.
+
+What a vendor body becomes is pinned in test_catalog_reader.py. What is pinned
+here is the picker's own contract: which catalogue it asks for (the surface's
+address and credential spelling, per kind and interaction), how a probe's rows
+land in ``ModelInfo``, and that an unusable probe, or a catalogue the yaml
+marks curated-only, yields the curated list and never a guess.
+"""
 
 from __future__ import annotations
 
 import httpx
+from test_catalog_reader import CHAT_BODY
 
 from loreline import capabilities
 from loreline.models import Interaction, ModelInfo, ProviderKind
@@ -18,27 +26,44 @@ def _ids(models: list[ModelInfo]) -> list[str]:
     return [m.id for m in models]
 
 
-async def test_curated_fallback_for_non_openai() -> None:
-    models = await list_models(kind=ProviderKind.DEEPGRAM, base_url=None, api_key=None)
-    assert "nova-3" in _ids(models)  # curated catalog (no /v1/models endpoint)
+async def test_a_catalogue_marked_curated_only_is_never_fetched() -> None:
+    """The reader parses Deepgram's list, and the staleness check reads it,
+    but the yaml marks its ``catalog`` surface ``picker: false``: every
+    task-tuned variant under two names is not a list to choose from. The
+    picker must not even ask."""
+    called: list[str] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        called.append(str(request.url))
+        return httpx.Response(200, json={"stt": [{"name": "nova-3-medical"}]})
+
+    models = await list_models(
+        kind=ProviderKind.DEEPGRAM,
+        base_url=None,
+        api_key="k",
+        client_factory=lambda: _factory(httpx.MockTransport(handle)),
+    )
+    assert called == []
+    assert _ids(models) == capabilities.curated_models(
+        ProviderKind.DEEPGRAM, Interaction.TRANSCRIBE
+    )
 
 
 async def test_gemini_offers_both_transports() -> None:
-    """Gemini is not fetched live, so the curated list is the only path into
-    the transcribe catalogue. Both models belong in it now that the Live
-    connector has been verified against the real service, and each carries the
-    transport flag the picker badges."""
+    """Gemini's catalogue is curated-only for the pickers, so the curated list
+    is the only path into the transcribe picker. Both models belong in it now
+    that the Live connector has been verified against the real service, and
+    each carries the transport flag the picker badges."""
     models = await list_models(kind=ProviderKind.GEMINI, base_url=None, api_key=None)
     assert _ids(models) == ["gemini-3.5-transcribe", "gemini-3.5-transcribe-live"]
     assert [m.realtime for m in models] == [False, True]
 
 
 async def test_gemini_summarize_picker_offers_chat_models_not_the_transcriber() -> None:
-    """Gemini publishes no list this app fetches, so both its pickers fall back
-    to a curated one - and they must not fall back to the same one. The
-    transcription table in stt.catalog knows nothing about chat, so a summarize
-    picker reading it would offer gemini-3.5-transcribe to write a summary
-    with."""
+    """Gemini publishes no list the pickers read, so both its pickers fall back
+    to a curated one, and they must not fall back to the same one: a summarize
+    picker reading the transcription list would offer gemini-3.5-transcribe to
+    write a summary with."""
     models = await list_models(
         kind=ProviderKind.GEMINI,
         base_url=None,
@@ -112,188 +137,34 @@ async def test_live_openrouter_models() -> None:
     assert _ids(models) == ["anthropic/claude-sonnet-4.5", "openai/gpt-4o"]
 
 
-async def test_openrouter_pricing_is_scaled_to_usd_per_million_tokens() -> None:
-    """OpenRouter quotes USD per single token as a decimal string; the pickers
-    show the per-million figure people actually compare. The scaling goes
-    through ``Decimal``, so 0.000003 must land on exactly 3.0 - not the
-    2.9999999999999996 a binary float multiply produces."""
-
-    def handle(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200,
-            json={
-                "data": [
-                    {
-                        "id": "anthropic/claude-sonnet-4.5",
-                        "context_length": 1000000,
-                        "pricing": {"prompt": "0.000003", "completion": "0.000015"},
-                    }
-                ]
-            },
-        )
-
-    models = await list_models(
-        kind=ProviderKind.OPENROUTER,
-        base_url=None,
-        api_key="k",
-        client_factory=lambda: _factory(httpx.MockTransport(handle)),
-    )
-
-    model = models[0]
-    assert model.context_length == 1000000
-    assert model.pricing is not None
-    assert model.pricing.prompt == 3.0
-    assert model.pricing.completion == 15.0
-    assert model.price_tiers == []
-
-
-async def test_price_overrides_become_tiers_ordered_by_threshold() -> None:
-    """A long-context model reprices above a prompt-length threshold. The
-    picker has to be able to say so - a transcript is exactly the kind of
-    prompt that crosses one."""
-
-    def handle(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200,
-            json={
-                "data": [
-                    {
-                        "id": "anthropic/claude-sonnet-4.5",
-                        "pricing": {
-                            "prompt": "0.000003",
-                            "completion": "0.000015",
-                            "overrides": [
-                                {
-                                    "min_prompt_tokens": 500000,
-                                    "prompt": "0.000009",
-                                    "completion": "0.00003",
-                                },
-                                {
-                                    "min_prompt_tokens": 200000,
-                                    "prompt": "0.000006",
-                                    "completion": "0.0000225",
-                                },
-                            ],
-                        },
-                    }
-                ]
-            },
-        )
-
-    models = await list_models(
-        kind=ProviderKind.OPENROUTER,
-        base_url=None,
-        api_key="k",
-        client_factory=lambda: _factory(httpx.MockTransport(handle)),
-    )
-
-    tiers = models[0].price_tiers
-    assert [t.min_prompt_tokens for t in tiers] == [200000, 500000]  # cheapest threshold first
-    assert (tiers[0].prompt, tiers[0].completion) == (6.0, 22.5)
-
-
-async def test_models_without_pricing_still_list_cleanly() -> None:
-    """Plain OpenAI ``/models`` publishes no prices at all, and a curated
-    entry has nothing but a name. Both must come back as usable rows rather
-    than being dropped or defaulted to a price of zero."""
-
-    def handle(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200,
-            json={
-                "data": [
-                    {"id": "whisper-1"},
-                    {"id": "whisper-weird", "pricing": {"prompt": "", "completion": None}},
-                    {
-                        "id": "whisper-unparseable",
-                        "pricing": {"prompt": "free", "completion": "free"},
-                    },
-                    {"no_id": True},
-                ]
-            },
-        )
-
-    models = await list_models(
-        kind=ProviderKind.OPENAI_COMPAT,
-        base_url="http://stt:8000/v1",
-        api_key="k",
-        client_factory=lambda: _factory(httpx.MockTransport(handle)),
-    )
-
-    # The id-less row is skipped; the rest survive (all name-shaped as
-    # transcription models, so the capability filter is a no-op here).
-    assert _ids(models) == ["whisper-1", "whisper-unparseable", "whisper-weird"]
-    assert all(m.pricing is None for m in models)  # never 0.0, which would read as free
-
-    curated = await list_models(kind=ProviderKind.DEEPGRAM, base_url=None, api_key=None)
-    assert all(m.pricing is None and m.context_length is None for m in curated)
-
-
-async def test_transcription_models_report_no_price() -> None:
-    """Audio models are priced per unit of audio, not per token, and the
-    catalogue does not say which unit: measured against the live API,
-    deepgram/nova-3's "0.0043" bills per minute while nvidia/nemotron-3.5-asr's
-    "0.00000333" bills per second. Treating either as a per-token rate produced
-    "$4300 / $0" in the picker. No price beats a wrong one.
-    """
-
-    def handle(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200,
-            json={
-                "data": [
-                    {
-                        "id": "deepgram/nova-3",
-                        "architecture": {
-                            "input_modalities": ["audio"],
-                            "output_modalities": ["transcription"],
-                        },
-                        "pricing": {"prompt": "0.0043", "completion": "0"},
-                    }
-                ]
-            },
-        )
-
-    models = await list_models(
-        kind=ProviderKind.OPENROUTER,
-        base_url=None,
-        api_key="k",
-        interaction=Interaction.TRANSCRIBE,
-        client_factory=lambda: _factory(httpx.MockTransport(handle)),
-    )
-    assert models[0].pricing is None
-
-
-async def test_chat_models_keep_their_per_token_price() -> None:
-    """The suppression is scoped to audio: text models really are per-token,
-    and $3/$15 per million is the figure people compare."""
-
-    def handle(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200,
-            json={
-                "data": [
-                    {
-                        "id": "anthropic/claude-sonnet-4.5",
-                        "architecture": {
-                            "input_modalities": ["text"],
-                            "output_modalities": ["text"],
-                        },
-                        "pricing": {"prompt": "0.000003", "completion": "0.000015"},
-                    }
-                ]
-            },
-        )
-
+async def test_picker_rows_carry_the_vendor_price_and_context() -> None:
+    """Everything past ``id`` is optional and comes straight off the probe:
+    the per-million price, its tiers cheapest threshold first, the context
+    length and whether the model takes a reasoning effort. A curated row has
+    nothing but its id, and must never read as free."""
     models = await list_models(
         kind=ProviderKind.OPENROUTER,
         base_url=None,
         api_key="k",
         interaction=Interaction.SUMMARIZE,
-        client_factory=lambda: _factory(httpx.MockTransport(handle)),
+        client_factory=lambda: _factory(
+            httpx.MockTransport(lambda _r: httpx.Response(200, json=CHAT_BODY))
+        ),
     )
-    assert models[0].pricing is not None
-    assert (models[0].pricing.prompt, models[0].pricing.completion) == (3.0, 15.0)
+    by_id = {m.id: m for m in models}
+    luna = by_id["openai/gpt-5.6-luna"]
+    assert luna.context_length == 1000000 + 50000
+    assert luna.supports_reasoning is True
+    assert luna.pricing is not None
+    assert (luna.pricing.prompt, luna.pricing.completion) == (3.0, 15.0)
+    assert luna.price_tiers == []
+    sonnet = by_id["anthropic/claude-sonnet-4.5"]
+    assert sonnet.supports_reasoning is False
+    assert [t.min_prompt_tokens for t in sonnet.price_tiers] == [200000, 500000]
+    assert (sonnet.price_tiers[0].prompt, sonnet.price_tiers[0].completion) == (6.0, 22.5)
+
+    curated = await list_models(kind=ProviderKind.DEEPGRAM, base_url=None, api_key=None)
+    assert all(m.pricing is None and m.context_length is None for m in curated)
 
 
 async def test_video_models_come_from_the_video_catalogue() -> None:
@@ -380,18 +251,16 @@ async def test_openai_transcription_falls_back_to_curated_when_the_fetch_fails()
     assert "gpt-transcribe" in _ids(models)
 
 
-async def test_live_transcription_lists_carry_inline_diarization_flags() -> None:
-    """The diarization flag has to survive the live-fetch path.
-
-    Otherwise the picker refuses inline diarization for a model that supports
-    it, or worse offers it for one that does not.
+async def test_transcription_lists_carry_inline_diarization_flags() -> None:
+    """The diarization flag is stamped per model on both paths, live and
+    curated. Otherwise the picker refuses inline diarization for a model that
+    supports it, or worse offers it for one that does not.
     """
+    called: list[str] = []
 
-    def handle(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200,
-            json={"data": [{"id": "gemini-3.5-transcribe"}, {"id": "some-unknown-asr"}]},
-        )
+    def handle(request: httpx.Request) -> httpx.Response:
+        called.append(str(request.url))
+        return httpx.Response(200, json={"models": [{"name": "models/some-unknown-asr"}]})
 
     models = await list_models(
         kind=ProviderKind.GEMINI,
@@ -402,8 +271,9 @@ async def test_live_transcription_lists_carry_inline_diarization_flags() -> None
     )
     by_id = {m.id: m for m in models}
     assert by_id["gemini-3.5-transcribe"].inline_diarization is True
-    # This kind publishes no usable catalogue, so the curated list stands and
-    # an id the server volunteered is not smuggled into the picker.
+    # Gemini's catalogue is curated-only for the pickers, so the list is never
+    # asked for and an id the vendor volunteered cannot reach the picker.
+    assert called == []
     assert "some-unknown-asr" not in by_id
 
 
@@ -432,11 +302,10 @@ async def test_openrouter_transcription_never_claims_diarization() -> None:
     assert all(m.inline_diarization is False for m in models)
 
 
-# Interactions that fall back to the curated catalogue when no live list is
-# available. Video is not one of them: its catalogue lives on a separate
-# endpoint (see _fetch_video_models), and a failed fetch there yields nothing
-# rather than falling through.
-_FALLBACK_INTERACTIONS = (Interaction.TRANSCRIBE, Interaction.SUMMARIZE)
+# Every interaction falls back to the curated catalogue when the probe is
+# unusable; video included, since the yaml curates OpenRouter's video models
+# the same way it curates its chat ones.
+_FALLBACK_INTERACTIONS = tuple(Interaction)
 
 
 def _dead_client() -> httpx.AsyncClient:

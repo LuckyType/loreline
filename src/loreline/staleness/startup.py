@@ -25,9 +25,9 @@ from typing import Protocol
 
 from loreline import capabilities
 from loreline.capability_config import CapabilityConfig
+from loreline.catalog import CatalogProbe, ClientFactory, probe
 from loreline.logging import get_logger
 from loreline.models import Interaction, ProviderConfig, ProviderKind
-from loreline.staleness.catalog import CatalogProbe, ClientFactory, probe
 from loreline.staleness.deprecation import (
     FAIL_HORIZON_DAYS,
     WARN_HORIZON_DAYS,

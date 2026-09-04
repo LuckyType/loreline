@@ -19,8 +19,8 @@ import pytest
 
 from loreline.capabilities import config as shipped_config
 from loreline.capability_config import CONFIG_PATH
+from loreline.catalog import ClientFactory
 from loreline.models import ProviderKind
-from loreline.staleness.catalog import ClientFactory
 from loreline.staleness.sync import SyncRefusedError, run_sync, write
 
 NEMOTRON = "nvidia/nemotron-3-ultra-550b-a55b"

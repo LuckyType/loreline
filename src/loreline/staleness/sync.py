@@ -6,7 +6,7 @@ vendors disagree, and this module resolves the subset of those disagreements
 where the vendor is authoritative, by rewriting the file.
 
 It reuses both earlier halves rather than restating them.
-:mod:`loreline.staleness.catalog` does the fetching, which is why there is no
+:mod:`loreline.catalog` does the fetching, which is why there is no
 second HTTP client here, and :mod:`loreline.staleness.compare` decides what
 counts as drift, which is why there is no second definition of "differs" here
 either. This module reads the *typed* vendor value behind each mismatch
@@ -76,13 +76,13 @@ import yaml
 
 from loreline import capabilities
 from loreline.capability_config import CONFIG_PATH, CapabilityConfig, ModelSpec
-from loreline.models import Interaction, ProviderKind
-from loreline.staleness.catalog import (
+from loreline.catalog import (
     DEFAULT_TIMEOUT_S,
     CatalogProbe,
     ClientFactory,
     VendorModel,
 )
+from loreline.models import Interaction, ProviderKind
 from loreline.staleness.check import gather_probes
 from loreline.staleness.compare import compare
 from loreline.staleness.report import Code, Finding, probe_lines

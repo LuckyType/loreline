@@ -19,15 +19,15 @@ from pydantic import ValidationError
 
 from loreline.capabilities import config as shipped_config
 from loreline.capability_config import CapabilityConfig
-from loreline.models import Interaction, ProviderKind
-from loreline.staleness import FailOn, Severity, should_fail
-from loreline.staleness.catalog import (
+from loreline.catalog import (
     CatalogProbe,
     CatalogStatus,
     VendorModel,
     VendorReasoning,
     VendorVideo,
 )
+from loreline.models import Interaction, ProviderKind
+from loreline.staleness import FailOn, Severity, should_fail
 from loreline.staleness.compare import compare
 from loreline.staleness.deprecation import check_dates
 from loreline.staleness.report import Code, Finding, StalenessReport, order, render
