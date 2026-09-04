@@ -21,19 +21,18 @@
  */
 
 import { api } from './api'
+import { type ConflictFeature, isConflictFeature, type ModelAnnotation } from './types'
 import type {
 	CapabilityConfig,
-	ConflictFeature,
 	Interaction,
 	LlmCapabilities,
-	ModelAnnotation,
 	ModelSpec,
 	ProviderConfig,
 	ProviderKind,
 	ProviderSpec,
 	TranscribeCapabilities,
 	VideoCapabilities,
-} from './types'
+} from './wire'
 
 /** Every interaction, for the soft fallback when a kind is unknown. */
 const ALL_INTERACTIONS: Interaction[] = ['transcribe', 'summarize', 'video']
@@ -289,7 +288,11 @@ function conflictsWith(
 	const blocked = new Set<ConflictFeature>()
 	for (const group of caps.conflicts) {
 		if (group.includes(feature)) {
-			for (const other of group) if (other !== feature) blocked.add(other)
+			for (const other of group) {
+				// The wire types a group as plain strings; the backend validates
+				// its members against these same three names.
+				if (other !== feature && isConflictFeature(other)) blocked.add(other)
+			}
 		}
 	}
 	return [...blocked]

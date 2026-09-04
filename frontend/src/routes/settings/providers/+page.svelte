@@ -12,7 +12,7 @@ import {
 	Users,
 } from '@lucide/svelte'
 import { onMount } from 'svelte'
-import { actionSetup, type CompleteDefaults, completeDefaults } from '$lib/actionSetup.svelte'
+import { actionSetup, completeDefaults } from '$lib/actionSetup.svelte'
 import { ApiError, api } from '$lib/api'
 import { Badge } from '$lib/components/ui/badge'
 import { Button } from '$lib/components/ui/button'
@@ -58,17 +58,19 @@ import {
 	reasoningEffortsFor,
 	requiresBaseUrl,
 } from '$lib/capabilities.svelte'
-import {
-	type AuthKind,
-	type Hosting,
-	capabilityBadges,
-	type HealthStatus,
-	type ModelInfo,
-	type OpenRouterRouting,
-	type ProviderConfig,
-	type ProviderCreate,
-	type ProviderKind,
-} from '$lib/types'
+import { capabilityBadges } from '$lib/types'
+import type {
+	ActionDefaults,
+	AuthKind,
+	Complete,
+	HealthStatus,
+	Hosting,
+	ModelInfo,
+	OpenRouterRouting,
+	ProviderConfig,
+	ProviderCreate,
+	ProviderKind,
+} from '$lib/wire'
 
 /**
  * Copy the capability config does not carry, and only that: what this kind's
@@ -135,7 +137,7 @@ const blankRouting = (): OpenRouterRouting => ({
 	zdr: false,
 })
 
-const blank = (): ProviderCreate => ({
+const blank = (): Complete<ProviderCreate> => ({
 	name: '',
 	kind: 'openai_compat',
 	base_url: '',
@@ -180,7 +182,7 @@ const TEST_BADGE: Record<
 	unreachable: { label: 'unreachable', variant: 'destructive', dot: 'bg-red-500' },
 	unknown: { label: 'unknown', variant: 'outline', dot: 'bg-muted-foreground' },
 }
-let form = $state<ProviderCreate>(blank())
+let form = $state<Complete<ProviderCreate>>(blank())
 let availableModels = $state<ModelInfo[]>([])
 let modelsLoading = $state(false)
 let modelFilter = $state('')
@@ -196,7 +198,7 @@ const selected = $derived(catalog.find((c) => c.kind === selectedKind))
 // store's own defaults are the last persisted state, which drives the
 // "default" tags in the pickers, so they reflect what is saved, not the
 // (possibly unsaved) current selection.
-let draft = $state<CompleteDefaults>(completeDefaults())
+let draft = $state<ActionDefaults>(completeDefaults())
 let defaultsMsg = $state('')
 // This default is pre-selected when *starting or re-processing* a session (the
 // card below says so), and re-processing replays stored audio - the
@@ -354,7 +356,7 @@ async function loadModels() {
 			.filter((m) => !seen.has(m.id) && seen.add(m.id) && !isHiddenModel(form.kind, m.id))
 		if (availableModels.length) {
 			const present = new Set(availableModels.map((m) => m.id))
-			form.favorite_models = (form.favorite_models ?? []).filter((m) => present.has(m))
+			form.favorite_models = form.favorite_models.filter((m) => present.has(m))
 		}
 	} catch {
 		availableModels = []
@@ -364,7 +366,7 @@ async function loadModels() {
 }
 
 function toggleFavorite(model: string) {
-	const favs = form.favorite_models ?? []
+	const favs = form.favorite_models
 	form.favorite_models = favs.includes(model) ? favs.filter((m) => m !== model) : [...favs, model]
 }
 
@@ -840,7 +842,7 @@ onMount(load)
 								{@const opt = optionFor(form.kind, m.id, m)}
 								<label class="flex items-center gap-2 px-1 py-0.5" title={opt.title}>
 									<Checkbox
-										checked={(form.favorite_models ?? []).includes(m.id)}
+										checked={form.favorite_models.includes(m.id)}
 										onCheckedChange={() => toggleFavorite(m.id)}
 									/>
 									<span class="min-w-0 flex-1 truncate">{opt.label}</span>
@@ -863,9 +865,9 @@ onMount(load)
 								<span class="text-xs text-muted-foreground">No models match.</span>
 							{/if}
 						</div>
-					{:else if (form.favorite_models ?? []).length}
+					{:else if form.favorite_models.length}
 						<div class="flex flex-wrap gap-1">
-							{#each form.favorite_models ?? [] as m (m)}
+							{#each form.favorite_models as m (m)}
 								<Badge variant="secondary">{m}</Badge>
 							{/each}
 						</div>

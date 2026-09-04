@@ -20,7 +20,7 @@ import {
 	TableHeader,
 	TableRow,
 } from '$lib/components/ui/table'
-import type { ServiceState } from '$lib/types'
+import type { ServiceState } from '$lib/wire'
 
 let services = $state<ServiceState[]>([])
 let error = $state('')

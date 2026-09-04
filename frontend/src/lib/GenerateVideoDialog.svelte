@@ -34,7 +34,7 @@ import {
 import { Label } from '$lib/components/ui/label'
 import { videoCatalog } from '$lib/modelCatalog.svelte'
 import { Textarea } from '$lib/components/ui/textarea'
-import type { VideoJob } from '$lib/types'
+import type { VideoJob } from '$lib/wire'
 
 let {
 	open = $bindable(false),

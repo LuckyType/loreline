@@ -1,5 +1,5 @@
 import { writable } from 'svelte/store'
-import type { Health, ProviderConfig } from './types'
+import type { Health, ProviderConfig } from './wire'
 
 export const health = writable<Health | null>(null)
 export const authed = writable<boolean>(true)

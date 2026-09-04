@@ -27,7 +27,7 @@ import LogLine from '$lib/LogLine.svelte'
 import { modelInfoFor } from '$lib/modelCatalog.svelte'
 import ModelPicker from '$lib/ModelPicker.svelte'
 import { formatTime, health, logsWs, speakerColor, transcriptWs } from '$lib/stores'
-import type { DiarizationModeKind, TranscriptEvent } from '$lib/types'
+import type { DiarizationModeKind, TranscriptEvent } from '$lib/wire'
 import { cn } from '$lib/utils'
 import { connect, type LiveSocket } from '$lib/ws'
 

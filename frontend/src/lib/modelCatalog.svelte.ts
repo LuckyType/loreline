@@ -20,7 +20,7 @@ import { untrack } from 'svelte'
 import { SvelteMap, SvelteSet } from 'svelte/reactivity'
 import { api } from './api'
 import { withoutHiddenRows } from './capabilities.svelte'
-import type { Interaction, ModelInfo, ProviderConfig, VideoModelInfo } from './types'
+import type { Interaction, ModelInfo, ProviderConfig, VideoModelInfo } from './wire'
 
 /** Any value that should invalidate a cached list when it changes: the server
  *  applies the "only show compatible models" setting, so a list loaded before
@@ -100,9 +100,17 @@ async function fetchModels(
 	interaction: Interaction,
 ): Promise<ModelInfo[]> {
 	if (interaction === 'video') {
+		// A video model described as a picker row. The transcription and LLM
+		// fields are what the server would send for a model that has none of
+		// them, spelled out rather than left off: the row has to be a whole
+		// ModelInfo, and a picker reads these without checking which endpoint
+		// the row came from.
 		return (await api.videoModels(provider.id)).map((m) => ({
 			id: m.id,
 			context_length: null,
+			realtime: null,
+			inline_diarization: false,
+			supports_reasoning: false,
 			pricing: null,
 			price_tiers: [],
 		}))

@@ -32,7 +32,7 @@ import {
 } from '$lib/components/ui/table'
 import { confirm } from '$lib/confirm.svelte'
 import Dropdown from '$lib/Dropdown.svelte'
-import type { AlertChannel, AlertChannelKind, AlertChannelWrite, AlertLevelKind } from '$lib/types'
+import type { AlertChannel, AlertChannelKind, AlertChannelWrite, AlertLevelKind } from '$lib/wire'
 
 interface ChannelMeta {
 	type: AlertChannelKind

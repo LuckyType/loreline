@@ -1,6 +1,6 @@
 import { deprecationFor, deprecationNote } from '$lib/capabilities.svelte'
 import type { DropdownOption } from '$lib/Dropdown.svelte'
-import type { ModelInfo, ModelPrice, ProviderKind } from '$lib/types'
+import type { ModelInfo, ModelPrice, ProviderKind } from '$lib/wire'
 
 /**
  * Formatting for the model pickers' price/context hints.

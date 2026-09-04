@@ -1,6 +1,6 @@
 <script lang="ts">
 import { speakerColor, formatTime, sourceLabel } from '$lib/stores'
-import type { ProviderConfig, TranscriptEvent } from '$lib/types'
+import type { ProviderConfig, TranscriptEvent } from '$lib/wire'
 
 let {
 	events,
