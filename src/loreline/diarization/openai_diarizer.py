@@ -28,6 +28,7 @@ from typing import cast
 import httpx
 
 from loreline.capabilities import default_diarizing_model, surface
+from loreline.health import raise_for_vendor_status
 from loreline.httpclient import ClientHandle
 from loreline.logging import get_logger
 from loreline.models import Interaction, ProviderKind, SpeakerSegment
@@ -92,7 +93,7 @@ class OpenAIDiarizer:
             "chunking_strategy": "auto",  # required for audio > 30 s
         }
         response = await self._client.post("/audio/transcriptions", data=data, files=files)
-        response.raise_for_status()
+        raise_for_vendor_status(response)
         return _parse_segments(response.json())
 
     async def _prepare(self, wav: bytes) -> tuple[bytes, str, str]:

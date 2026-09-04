@@ -27,6 +27,7 @@ from loreline.health import (
     error_detail,
     missing_credential,
     probe_endpoint,
+    raise_for_vendor_status,
 )
 from loreline.models import ProviderKind
 
@@ -299,6 +300,25 @@ def test_error_detail_unwraps_googles_array_envelope() -> None:
 def test_error_detail_falls_back_to_the_raw_body_then_the_status_line() -> None:
     assert error_detail(_response(401, text="Invalid credentials.")) == "Invalid credentials."
     assert error_detail(_response(404, text="")) == "Not Found"
+
+
+def test_raise_for_vendor_status_carries_the_bodys_reason_not_httpxs_boilerplate() -> None:
+    """``raise_for_status()`` alone appends a link to Mozilla's HTTP status
+    docs - written for a developer's console, not for a GM reading a job's
+    error off a session page. The diarizers call this instead so their raised
+    message carries the service's own words, the same as every batch STT
+    connector already does via ``HttpConnector._raise_for_status``."""
+    response = _response(503, text="model not loaded yet")
+    with pytest.raises(httpx.HTTPStatusError) as exc_info:
+        raise_for_vendor_status(response)
+    message = str(exc_info.value)
+    assert "model not loaded yet" in message
+    assert "developer.mozilla.org" not in message
+    assert exc_info.value.response is response
+
+
+def test_raise_for_vendor_status_leaves_a_healthy_response_alone() -> None:
+    raise_for_vendor_status(_response(200))  # must not raise
 
 
 # --- the request path: retry, fail over, or stop? --------------------------
