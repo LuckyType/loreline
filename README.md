@@ -33,7 +33,7 @@ all STT and diarization run on remote endpoints (cloud APIs or self-hosted LAN s
 
 - **Capture** - continuous recording with Silero VAD utterance chunking.
 - **Pluggable STT** - Deepgram, AssemblyAI, Google Gemini, OpenAI Realtime, and any OpenAI-compatible endpoint (Speaches, whisper.cpp). A primary/fallback
-  router handles failover, and can fan out to several backends at once to compare them.
+  router handles failover.
   OpenRouter transcription (Whisper, Nova, Chirp, Voxtral…) is available for post-session
   re-processing only - its API has no streaming mode, so it can't drive a live capture.
   Providers are configured one per vendor, and each declares what it supports (Realtime,
