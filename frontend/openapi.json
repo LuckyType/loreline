@@ -3085,6 +3085,28 @@
               }
             ],
             "title": "Stt Error"
+          },
+          "captured_seconds": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Captured Seconds"
+          },
+          "capture_last_frame_age": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Capture Last Frame Age"
           }
         },
         "type": "object",

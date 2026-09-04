@@ -4,6 +4,11 @@ The capture task must keep draining the mic regardless of STT latency: it pushes
 utterances into a bounded queue and never blocks on it (dropping the oldest under
 overload), so a slow STT round-trip can't stall capture and overflow the device
 buffer (the QueueFull / dropped-audio bug).
+
+It must also always close that queue with the sentinel, however it ends: the
+sentinel is the only thing that ends the router's input, so a capture that dies
+without one leaves the router waiting on an empty queue forever (the zombie
+recording bug).
 """
 
 from __future__ import annotations
@@ -11,10 +16,13 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 
+import pytest
+
 from loreline.audio.chunker import Utterance, VadChunker
 from loreline.session.manager import (
     _CAPTURE_DONE,  # pyright: ignore[reportPrivateUsage]
     _capture_utterances,  # pyright: ignore[reportPrivateUsage]
+    _CaptureStats,  # pyright: ignore[reportPrivateUsage]
     _dequeue,  # pyright: ignore[reportPrivateUsage]
     _offer,  # pyright: ignore[reportPrivateUsage]
 )
@@ -59,7 +67,8 @@ async def test_capture_never_blocks_on_full_queue() -> None:
         return True
 
     await asyncio.wait_for(
-        _capture_utterances(source, always_speech, chunker, None, queue), timeout=2.0
+        _capture_utterances(source, always_speech, chunker, None, _CaptureStats(), queue),
+        timeout=2.0,
     )
 
     drained: list[object] = []
@@ -67,6 +76,53 @@ async def test_capture_never_blocks_on_full_queue() -> None:
         drained.append(queue.get_nowait())
     assert drained[-1] is _CAPTURE_DONE  # sentinel is always delivered last
     assert len(drained) <= 4  # bounded - overflow dropped, no unbounded growth
+
+
+class _DeadSource:
+    """A device that fails on open: raises before yielding a single frame."""
+
+    def stop(self) -> None:
+        return None
+
+    async def frames(self) -> AsyncIterator[tuple[bytes, float]]:
+        msg = "Error opening RawInputStream: Invalid sample rate"
+        raise RuntimeError(msg)
+        yield b"", 0.0  # pragma: no cover - unreachable, but makes this a generator
+
+
+async def test_capture_death_still_closes_the_queue() -> None:
+    """A mic that never opens must end the router, not strand it.
+
+    Without the sentinel the router blocks on an empty queue for the life of the
+    process: the session keeps reporting "capturing" with nothing being
+    recorded, and even Stop only gets out of it by timing out 30 seconds later.
+    """
+    chunker = VadChunker(sample_rate=16000, frame_ms=20)
+    queue: asyncio.Queue[object] = asyncio.Queue(maxsize=4)
+
+    capture = _capture_utterances(
+        _DeadSource(), lambda _f: True, chunker, None, _CaptureStats(), queue
+    )
+    with pytest.raises(RuntimeError):
+        await asyncio.wait_for(capture, timeout=2.0)
+
+    assert queue.get_nowait() is _CAPTURE_DONE
+    assert queue.empty()
+
+
+async def test_capture_stats_count_the_audio_that_arrived() -> None:
+    """What the dashboard reads to tell a recording from a stalled one."""
+    stats = _CaptureStats(sample_rate=16000)
+    assert stats.seconds == 0.0
+
+    chunker = VadChunker(sample_rate=16000, frame_ms=20, silence_ms=20, max_utterance_s=0.1)
+    queue: asyncio.Queue[object] = asyncio.Queue(maxsize=64)
+    await _capture_utterances(
+        _FakeSource(n_frames=50), lambda _f: True, chunker, None, stats, queue
+    )
+
+    assert stats.seconds == 1.0  # 50 frames of 20 ms, exactly
+    assert stats.since_last_frame < 1.0
 
 
 async def test_dequeue_stops_at_sentinel() -> None:

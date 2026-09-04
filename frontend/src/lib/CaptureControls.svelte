@@ -231,9 +231,84 @@ const sttDegradedAt = $derived.by(() => {
 // is the only part the GM can act on.
 const sttError = $derived(capturing ? ($health?.stt_error ?? null) : null)
 
+// --- is audio actually arriving? ---
+// "Capturing" only says the machinery started. A microphone that opens and
+// then delivers nothing looks exactly the same from here, which is how a
+// session can tick away for an evening over a recording that never grew. These
+// two say what is really happening: how much audio has been written, and how
+// long ago the last frame arrived. A device sends frames whether or not anyone
+// is speaking, so an age that keeps climbing is the device, not the table.
+const capturedSeconds = $derived(capturing ? ($health?.captured_seconds ?? null) : null)
+const lastFrameAge = $derived(capturing ? ($health?.capture_last_frame_age ?? null) : null)
+// Frames arrive every 20ms, and health reports the age at the moment it is
+// asked, so anything past a couple of seconds is a stopped microphone rather
+// than poll jitter.
+const AUDIO_STALL_S = 3
+const audioStalled = $derived(lastFrameAge !== null && lastFrameAge >= AUDIO_STALL_S)
+const audioSummary = $derived.by(() => {
+	if (audioStalled) return `no audio for ${Math.round(lastFrameAge ?? 0)}s`
+	if (capturedSeconds === null) return 'waiting for audio'
+	return `${formatTime(Math.floor(capturedSeconds))} recorded`
+})
+
+// --- a session that ended badly ---
+// Stop answers with the finished session, and a capture that died answers
+// nothing at all: the health poll simply stops saying "capturing". Either way
+// the GM has to be told, because the card otherwise just resets to the start
+// form as though the evening had gone fine.
+let endedError = $state('')
+let endedSessionId = $state('')
+// Held while POST /api/session/stop is in flight. The backend drains the
+// transcription queue first (up to half a minute on a slow provider), and the
+// card must not look idle while that happens.
+let stopping = $state(false)
+// Plain locals, deliberately not $state: bookkeeping for the effect below, not
+// anything that gets rendered.
+let wasCapturing = false
+let endingSessionId: string | null = null
+let stoppedByUs = false
+
+$effect(() => {
+	const id = activeSessionId
+	if (capturing) {
+		wasCapturing = true
+		endingSessionId = id
+		return
+	}
+	if (!wasCapturing) return
+	wasCapturing = false
+	const ended = endingSessionId
+	endingSessionId = null
+	// Our own Stop reports its own outcome from the response it got, which is
+	// both faster and surer than re-fetching the session.
+	if (stoppedByUs) {
+		stoppedByUs = false
+		return
+	}
+	if (ended) void reportIfFailed(ended)
+})
+
+async function reportIfFailed(id: string) {
+	try {
+		const detail = await api.getSession(id)
+		if (detail.session.status === 'error') showEnded(id)
+	} catch {
+		/* the session page still has the truth; nothing to gain from a second banner */
+	}
+}
+
+function showEnded(id: string) {
+	endedSessionId = id
+	endedError =
+		'The recording stopped before it was finished and the session ended with an error. ' +
+		'Whatever was captured up to that point is saved.'
+}
+
 async function start() {
 	busy = true
 	error = ''
+	endedError = ''
+	endedSessionId = ''
 	try {
 		await api.startSession({
 			primary_provider: primary,
@@ -258,14 +333,30 @@ async function start() {
 
 async function stop() {
 	busy = true
+	stopping = true
+	stoppedByUs = true
 	error = ''
+	endedError = ''
+	const ending = activeSessionId
 	try {
-		await api.stopSession()
-		await refresh()
+		const finished = await api.stopSession()
+		// The response carries the finished session, so a stop that finalized as
+		// an error says so here instead of resetting to the start form as if
+		// nothing had happened.
+		if (finished.status === 'error') showEnded(finished.id)
 	} catch (err) {
-		error = err instanceof ApiError ? err.message : 'failed to stop'
+		// 409 means the session had already ended itself (a dead microphone gets
+		// finalized without waiting for Stop), so this is that outcome to
+		// report, not a Stop that failed.
+		if (err instanceof ApiError && err.status === 409 && ending) {
+			await reportIfFailed(ending)
+		} else {
+			error = err instanceof ApiError ? err.message : 'failed to stop'
+		}
 	} finally {
+		await refresh()
 		busy = false
+		stopping = false
 	}
 }
 
@@ -282,19 +373,40 @@ onMount(() => {
 
 <Card class="shrink-0 py-4">
 	<CardContent class="px-4">
-		{#if capturing}
+		{#if capturing || stopping}
 			<div class="flex items-center justify-between">
 				<span class="flex items-center gap-2">
-					<span class="size-2 rounded-full bg-emerald-500"></span>
-					<strong>Recording</strong>
+					<span
+						class={cn(
+							'size-2 rounded-full',
+							stopping ? 'bg-amber-500' : audioStalled ? 'bg-destructive' : 'bg-emerald-500',
+						)}
+					></span>
+					<strong>{stopping ? 'Finalizing' : 'Recording'}</strong>
 					<span class="text-muted-foreground">
 						{elapsed.seconds === null ? '-' : formatTime(elapsed.seconds)}
 						· {actionSetup.providers.length} providers
+						{#if capturing}
+							· <span class={audioStalled ? 'text-destructive' : ''}>{audioSummary}</span>
+						{/if}
 					</span>
 				</span>
-				<Button variant="destructive" onclick={stop} disabled={busy}>Stop session</Button>
+				<Button variant="destructive" onclick={stop} disabled={busy}>
+					{stopping ? 'Finalizing…' : 'Stop session'}
+				</Button>
 			</div>
-			{#if sttError}
+			{#if stopping}
+				<p class="mt-2 border-t border-dashed pt-2 text-sm text-muted-foreground">
+					Transcribing what is still queued and closing the recording. This can take up to half a
+					minute; the audio is already on disk.
+				</p>
+			{:else if audioStalled}
+				<p class="mt-2 border-t border-dashed pt-2 text-sm font-medium text-destructive">
+					No audio has reached the recorder for {Math.round(lastFrameAge ?? 0)} seconds. A
+					microphone sends frames even in a silent room, so this is the device rather than the table
+					- stop the session, pick another input in Settings, and start again.
+				</p>
+			{:else if sttError}
 				<p class="mt-2 border-t border-dashed pt-2 text-sm font-medium text-destructive">
 					Live transcription stopped: {sttError} Audio is still being recorded, so the session can
 					be re-transcribed once this is fixed.
@@ -492,6 +604,24 @@ onMount(() => {
 					{/if}
 				</div>
 			{/if}
+		{/if}
+		<!-- Outside the capturing/idle split on purpose: this is about the session
+		     that just ended, so it has to survive the card resetting to the start
+		     form - which is precisely what used to hide it. -->
+		{#if endedError}
+			<p class="mt-2 border-t border-dashed pt-2 text-sm font-medium text-destructive">
+				{endedError}
+				<a class="underline underline-offset-2" href="/sessions/{endedSessionId}">
+					Open the session
+				</a>
+				<button
+					type="button"
+					class="ml-2 underline underline-offset-2 text-muted-foreground"
+					onclick={() => (endedError = '')}
+				>
+					Dismiss
+				</button>
+			</p>
 		{/if}
 		{#if error || actionSetup.error}
 			<p class="mt-2 text-sm text-destructive">{error || actionSetup.error}</p>
