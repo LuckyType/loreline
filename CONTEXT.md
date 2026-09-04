@@ -57,6 +57,10 @@ refresh token. The pickers are views over it, not owners of it.
 **Preferred model**: The pure rule for which model a picker starts on: the action default when
 it belongs to this row, else the first favourite, hidden models excluded. A user's pick wins.
 
+**Live feed**: One socket-backed buffer for a page pane: a path, a history seed and a cap. The
+Dashboard's transcript pane, its log pane and a session's re-processing feed are the same object
+three times over, with reconnect handled underneath by ws.ts.
+
 ## Audio and transcript
 
 **Utterance**: One voiced stretch of session audio, cut by the VAD chunker, with its
