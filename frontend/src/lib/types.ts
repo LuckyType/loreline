@@ -1,4 +1,4 @@
-import { capabilities, hasRealtimeTranscription } from './capabilities.svelte'
+import { capabilities, hasRealtimeTranscription, supportsInteraction } from './capabilities.svelte'
 
 export type ProviderKind =
 	| 'deepgram'
@@ -17,7 +17,8 @@ export type Interaction = 'transcribe' | 'summarize' | 'video'
 // The wire shape of src/loreline/capabilities.yaml, which is the single source
 // of truth for which provider+model combinations exist and what each can do.
 // These are types only: the fetched data lives in $lib/capabilities.svelte,
-// and the helper functions at the bottom of this file read it from there.
+// which also holds the helpers that read it; $lib/actionSetup.svelte gates
+// provider rows with them.
 
 export type Hosting = 'cloud' | 'selfhosted'
 
@@ -196,11 +197,7 @@ export interface CapabilityConfig {
 	providers: Partial<Record<ProviderKind, ProviderSpec>>
 }
 
-// --- capability helpers -----------------------------------------------------
-//
-// Thin wrappers over the fetched config. Every one of them answers "unknown"
-// permissively: if the config never arrived, the UI offers everything and says
-// so, rather than hiding controls an operator needs.
+// --- capability badges ------------------------------------------------------
 
 /** The capability badges shown for a provider, in a stable order. */
 export function capabilityBadges(p: { kind: ProviderKind }): string[] {
@@ -215,36 +212,6 @@ export function capabilityBadges(p: { kind: ProviderKind }): string[] {
 	if (supportsInteraction(p, 'summarize')) badges.push('Summarizing')
 	if (supportsInteraction(p, 'video')) badges.push('Video')
 	return badges
-}
-
-export function supportsInteraction(p: { kind: ProviderKind }, interaction: Interaction): boolean {
-	const spec = capabilities.provider(p.kind)
-	// No config (or a kind it has never heard of): allow it. The backend still
-	// refuses a combination it cannot serve, and an error beats a provider that
-	// silently vanished from every picker.
-	if (!spec) return true
-	return spec.interactions.includes(interaction)
-}
-
-/** Providers offerable for one interaction. */
-export function providersFor<T extends { kind: ProviderKind }>(
-	providers: T[],
-	interaction: Interaction,
-): T[] {
-	return providers.filter((p) => supportsInteraction(p, interaction))
-}
-
-/** Providers that can drive a *live* capture (excludes re-process-only STT -
- *  OpenRouter's transcription has no streaming mode). */
-export function liveSttProviders<T extends { kind: ProviderKind }>(providers: T[]): T[] {
-	return providersFor(providers, 'transcribe').filter(
-		(p) => capabilities.provider(p.kind)?.live_capture !== false,
-	)
-}
-
-/** True for a provider that summarizes - negate it to select the STT ones. */
-export function isLlmProvider(p: { kind: ProviderKind }): boolean {
-	return supportsInteraction(p, 'summarize')
 }
 
 export type ProtocolKind = 'ws' | 'grpc' | 'http_sse' | 'http_batch'

@@ -17,6 +17,7 @@
  *    lists are the fallback for a model that file does not annotate.
  */
 
+import { actionSetup } from '$lib/actionSetup.svelte'
 import { ApiError, api } from '$lib/api'
 import { deprecationNote, videoCapsFor } from '$lib/capabilities.svelte'
 import Dropdown from '$lib/Dropdown.svelte'
@@ -33,28 +34,26 @@ import {
 import { Label } from '$lib/components/ui/label'
 import { videoCatalog } from '$lib/modelCatalog.svelte'
 import { Textarea } from '$lib/components/ui/textarea'
-import type { ActionDefaults, ProviderConfig, VideoJob } from '$lib/types'
+import type { VideoJob } from '$lib/types'
 
 let {
 	open = $bindable(false),
 	sessionId,
-	providers,
 	summary = '',
-	defaults,
 	onqueued,
 }: {
 	open?: boolean
 	sessionId: string
-	/** Video-capable providers only - the caller filters, since it already has them. */
-	providers: ProviderConfig[]
 	/** Seeds the prompt on first open. */
 	summary?: string
-	/** Stored per-action defaults (Settings → Video), used to preselect. */
-	defaults?: ActionDefaults
 	onqueued?: (job: VideoJob) => void
 } = $props()
 
-let providerId = $state('')
+// Video-capable rows only, from the shared setup store the page has loaded.
+const providers = $derived(actionSetup.providersFor('video'))
+// Seeded, not stored: the saved default (Settings, Video) while it still
+// generates video, else the first row that does. A pick overrides it.
+let providerId = $derived(actionSetup.preferredProvider('video')?.id ?? '')
 let prompt = $state('')
 let duration = $state<number | null>(null)
 let resolution = $state('')
@@ -75,7 +74,7 @@ const modelsSettled = $derived(provider ? videoCatalog.settled(provider, 'video'
 // provider switch, or the list arriving), the same rule the other pickers
 // get from preferredModel, minus favourites, which video rows do not carry.
 let modelId = $derived.by(() => {
-	const preferred = defaults?.video_model
+	const preferred = actionSetup.defaults.video_model
 	if (preferred && offered.some((m) => m.id === preferred)) return preferred
 	return offered[0]?.id ?? ''
 })
@@ -96,19 +95,10 @@ const aspectRatios = $derived(
 const audioOffered = $derived(caps?.audio ?? model?.generate_audio === true)
 const sunset = $derived(deprecationNote(providerKind, modelId))
 
-// Re-seed the prompt and pick a provider each time the dialog opens, but never
-// while it is open - that would wipe an edit in progress.
+// Re-seed the prompt each time the dialog opens, but never while it is open -
+// that would wipe an edit in progress.
 $effect(() => {
-	if (!open) return
-	if (!prompt) prompt = summary
-	// The saved default wins, falling back to the first available provider.
-	if (!providerId) {
-		const preferred = defaults?.video_provider
-		providerId =
-			(preferred && providers.some((p) => p.id === preferred) ? preferred : '') ||
-			providers[0]?.id ||
-			''
-	}
+	if (open && !prompt) prompt = summary
 })
 
 // The list is wanted the moment the dialog shows, not when the model dropdown

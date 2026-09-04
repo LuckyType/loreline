@@ -1,6 +1,7 @@
 <script lang="ts">
 import { onMount } from 'svelte'
 import { goto } from '$app/navigation'
+import { actionSetup } from '$lib/actionSetup.svelte'
 import { api, ApiError } from '$lib/api'
 import { confirm } from '$lib/confirm.svelte'
 import { Button } from '$lib/components/ui/button'
@@ -16,10 +17,9 @@ import {
 	TableRow,
 } from '$lib/components/ui/table'
 import { providerName } from '$lib/stores'
-import type { ProviderConfig, Session } from '$lib/types'
+import type { Session } from '$lib/types'
 
 let sessions = $state<Session[]>([])
-let providers = $state<ProviderConfig[]>([])
 let selected = $state<Record<string, boolean>>({})
 let error = $state('')
 let busy = $state(false)
@@ -42,14 +42,10 @@ async function reload() {
 	} catch (err) {
 		error = err instanceof ApiError ? err.message : 'failed to load sessions'
 	}
-	// Only used to render provider ids as names. Deliberately outside the try
-	// above and non-fatal: a cosmetic lookup must not fail the session list,
-	// and providerName() already falls back to a short id.
-	try {
-		providers = await api.listProviders()
-	} catch {
-		providers = []
-	}
+	// Only used to render provider ids as names, so its failure is not the
+	// list's: the store records it, and providerName() already falls back to
+	// a short id.
+	void actionSetup.load()
 }
 
 function toggleAll() {
@@ -146,7 +142,7 @@ onMount(reload)
 							</Badge>
 						</TableCell>
 						<TableCell class="text-muted-foreground"
-							>{providerName(s.primary_provider, providers)}</TableCell
+							>{providerName(s.primary_provider, actionSetup.providers)}</TableCell
 						>
 						<TableCell class="text-muted-foreground">{s.campaign_id ?? '-'}</TableCell>
 						<TableCell
