@@ -218,10 +218,26 @@ const videoSrcProvider = $derived(actionSetup.provider(draft.video_provider))
 const sttSavedModel = $derived(actionSetup.pairedDefault('transcribe', sttSrcProvider))
 const llmSavedModel = $derived(actionSetup.pairedDefault('summarize', llmSrcProvider))
 const videoSavedModel = $derived(actionSetup.pairedDefault('video', videoSrcProvider))
+/** A default name distinct from every other row's: the table has no other
+ *  column that tells two rows of the same kind apart, so a second Deepgram
+ *  left unnamed used to save as a plain, indistinguishable second
+ *  "Deepgram". Only the fallback is touched - a name the user actually
+ *  typed is saved exactly as typed, collision or not. */
+function uniqueName(base: string, excludeId: string | null): string {
+	const taken = new Set(actionSetup.providers.filter((p) => p.id !== excludeId).map((p) => p.name))
+	if (!taken.has(base)) return base
+	let n = 2
+	while (taken.has(`${base} ${n}`)) n++
+	return `${base} ${n}`
+}
+
 // The name field's placeholder is a real default, not a hint: leaving it blank
-// names the provider after its type ("OpenRouter"), which is what most people
-// want for their first one. Save stays enabled accordingly.
-const effectiveName = $derived(form.name.trim() || selected?.label || '')
+// names the provider after its type ("OpenRouter"), or disambiguates it
+// ("OpenRouter 2") once one already exists, which is what most people want
+// for their first, or next, one. Save stays enabled accordingly.
+const effectiveName = $derived(
+	form.name.trim() || (selected ? uniqueName(selected.label, editing) : ''),
+)
 const wizardChoices = $derived(catalog.filter((c) => c.hosting === null || c.hosting === hosting))
 // 'optional' is a self-hosted endpoint that may or may not check a key.
 const apiKeyLabel = $derived(
@@ -229,6 +245,21 @@ const apiKeyLabel = $derived(
 		editing ? ' - blank = keep current' : ''
 	}`,
 )
+// The row this wizard session actually acts on - the one Save and Load
+// models read from and write to, never a same-kind sibling. Read fresh from
+// the store rather than captured once in edit(), so it reflects a key saved
+// a moment ago in this same session.
+const editingRow = $derived(actionSetup.provider(editing))
+// True once this row has a key from either source: one typed into the form
+// this session, or one already on file for the row being edited. A blank
+// field while adding never counts - there is nothing on file yet for a row
+// that does not exist.
+const hasUsableKey = $derived(!!form.api_key?.trim() || !!editingRow?.secret_set)
+const keyRequired = $derived(selected?.auth === 'api_key')
+// Saving now would leave this row with no key at all: nothing to test or
+// transcribe with until one is added. Drives the inline warning below and
+// the Load models gate.
+const keyMissing = $derived(keyRequired && !hasUsableKey)
 // The chosen models' catalogue entries, read from the shared catalogue once
 // the pickers have loaded their lists. The summary one says whether the model
 // advertises reasoning; the STT one whether inline diarization yields
@@ -325,6 +356,13 @@ async function saveDefaults() {
 }
 
 async function loadModels() {
+	// Scoped strictly to this row: editing is null while adding, so no
+	// provider_id is sent and the server has no stored secret to fall back
+	// to, and this row's own id while editing, never a same-kind sibling's.
+	// If this row has no key of its own yet, the button below is already
+	// disabled before onclick can fire; this is that same rule enforced
+	// again rather than trusted to the template alone.
+	if (keyMissing) return
 	modelsLoading = true
 	try {
 		// Favourites are one flat list shared by every picker, while a provider
@@ -372,6 +410,22 @@ function toggleFavorite(model: string) {
 
 async function save() {
 	message = ''
+	// A cloud kind that needs a key and has none yet, typed or on file, saves
+	// a row nothing can test or transcribe with - ask rather than let that
+	// happen silently. The inline warning near the field says the same thing
+	// before it ever gets this far; this is the last chance to catch it.
+	if (
+		keyMissing &&
+		!(await confirm({
+			title: 'No API key',
+			description:
+				"No key saved - you won't be able to test or transcribe with this provider until you add one.",
+			confirmLabel: 'Save anyway',
+			cancelLabel: 'Go back',
+		}))
+	) {
+		return
+	}
 	try {
 		const body: ProviderCreate = {
 			...form,
@@ -816,7 +870,7 @@ onMount(load)
 			<div class="mt-2 flex flex-col gap-4">
 				<div class="flex flex-col gap-2">
 					<Label for="name">Name</Label>
-					<Input id="name" bind:value={form.name} placeholder={sel.label} />
+					<Input id="name" bind:value={form.name} placeholder={effectiveName} />
 				</div>
 				{#if sel.baseUrlPlaceholder !== null}
 					<div class="flex flex-col gap-2">
@@ -831,7 +885,13 @@ onMount(load)
 				<div class="flex flex-col gap-2">
 					<div class="flex items-center justify-between">
 						<span>Favorite models ({form.favorite_models?.length ?? 0})</span>
-						<Button variant="outline" size="sm" onclick={loadModels} disabled={modelsLoading}>
+						<Button
+							variant="outline"
+							size="sm"
+							onclick={loadModels}
+							disabled={modelsLoading || keyMissing}
+							title={keyMissing ? 'Add an API key first' : undefined}
+						>
 							{modelsLoading ? 'Loading…' : 'Load models'}
 						</Button>
 					</div>
@@ -899,6 +959,12 @@ onMount(load)
 							bind:value={form.api_key}
 							placeholder={editing ? '•••• unchanged' : ''}
 						/>
+						{#if keyMissing}
+							<span class="text-xs text-amber-500">
+								No key saved - you won't be able to test or transcribe with this provider until you
+								add one.
+							</span>
+						{/if}
 					</div>
 				{/if}
 				{#if form.kind === 'openrouter' && form.routing}
