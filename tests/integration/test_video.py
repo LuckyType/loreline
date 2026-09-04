@@ -18,6 +18,7 @@ import pytest
 import pytest_asyncio
 from asgi_lifespan import LifespanManager
 from httpx import ASGITransport, AsyncClient
+from test_catalog_reader import VIDEO_BODY
 from test_web_session import FakeBackend, FakeDiarizer, capture_factory
 
 from loreline.models import (
@@ -145,51 +146,37 @@ class TestPayload:
 
 
 class TestModelCatalog:
-    async def test_parses_per_model_parameter_support(self) -> None:
+    """The generate dialog's list is a projection of the one catalogue reader:
+    what the vendor body becomes is pinned in test_catalog_reader.py, and what
+    is pinned here is how a row lands in ``VideoModelInfo``."""
+
+    async def test_rows_carry_per_model_parameter_support(self) -> None:
+        """None means "this model takes no duration at all", which the form
+        must be able to tell apart from an empty list of choices; a knob the
+        vendor did not vouch for (``generate_audio: null``) is not offered."""
+
         def handle(request: httpx.Request) -> httpx.Response:
             assert request.url.path.endswith("/videos/models")
-            return httpx.Response(
-                200,
-                json={
-                    "data": [
-                        {
-                            "id": "alibaba/wan-3.0",
-                            "name": "Wan 3.0",
-                            "supported_durations": [4, 8],
-                            "supported_resolutions": ["480p", "720p"],
-                            "supported_aspect_ratios": ["16:9", "9:16"],
-                            "generate_audio": True,
-                            "seed": True,
-                        }
-                    ]
-                },
-            )
+            assert request.headers.get("Authorization") == "Bearer k"
+            return httpx.Response(200, json=VIDEO_BODY)
 
         models = await list_video_models(
             config=_openrouter(),
             api_key="k",
             client_factory=lambda: _client(httpx.MockTransport(handle)),
         )
-        assert len(models) == 1
-        model = models[0]
-        assert model.supported_durations == [4, 8]
-        assert model.supported_resolutions == ["480p", "720p"]
-        assert model.generate_audio is True
-
-    async def test_absent_parameter_lists_stay_none(self) -> None:
-        """None means "this model takes no duration at all", which the form
-        must be able to tell apart from an empty list of choices."""
-
-        def handle(_r: httpx.Request) -> httpx.Response:
-            return httpx.Response(200, json={"data": [{"id": "runway/aleph", "name": "Aleph"}]})
-
-        models = await list_video_models(
-            config=_openrouter(),
-            api_key="k",
-            client_factory=lambda: _client(httpx.MockTransport(handle)),
+        assert [m.id for m in models] == ["alibaba/wan-3.0", "openai/sora-2-pro"]  # sorted
+        wan, sora = models
+        assert (wan.name, wan.supported_durations, wan.supported_resolutions) == (
+            "Wan 3.0",
+            [4, 8],
+            ["480p", "720p"],
         )
-        assert models[0].supported_durations is None
-        assert models[0].generate_audio is False
+        assert (wan.generate_audio, wan.seed) == (True, True)
+        assert sora.name == "openai/sora-2-pro"  # no name published: the id stands in
+        assert sora.supported_durations == [4, 8, 12]
+        assert sora.supported_sizes is None
+        assert (sora.generate_audio, sora.seed) == (False, False)
 
     async def test_unreachable_provider_yields_an_empty_catalog(self) -> None:
         """Best effort, like the chat model list: the dialog should open and
