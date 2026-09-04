@@ -1,7 +1,7 @@
 <script lang="ts">
 import { ChevronDown, TriangleAlert } from '@lucide/svelte'
 import { onMount } from 'svelte'
-import { page } from '$app/stores'
+import { page } from '$app/state'
 import { actionSetup } from '$lib/actionSetup.svelte'
 import { ApiError, api } from '$lib/api'
 import {
@@ -62,7 +62,7 @@ let rpDiarMax = $state('')
 let rpUseGlossary = $state(true)
 let rpBusy = $state(false)
 
-const id = $derived($page.params.id ?? '')
+const id = $derived(page.params.id ?? '')
 const formats: ExportFormat[] = ['txt', 'md', 'srt', 'vtt', 'json']
 const formatLabels: Record<ExportFormat, string> = {
 	txt: 'Text (.txt)',

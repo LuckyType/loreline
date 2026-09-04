@@ -1,6 +1,6 @@
 <script lang="ts">
 import type { Snippet } from 'svelte'
-import { page } from '$app/stores'
+import { page } from '$app/state'
 
 let { children }: { children: Snippet } = $props()
 
@@ -18,7 +18,7 @@ const tabs = [
 	{#each tabs as tab (tab.href)}
 		<a
 			href={tab.href}
-			class="border-b-2 px-3 py-2 text-sm {$page.url.pathname === tab.href
+			class="border-b-2 px-3 py-2 text-sm {page.url.pathname === tab.href
         ? 'border-primary font-medium'
         : 'border-transparent text-muted-foreground hover:text-foreground'}"
 		>
