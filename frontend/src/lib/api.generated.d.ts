@@ -1849,6 +1849,8 @@ export interface components {
             session: components["schemas"]["Session"];
             /** Transcript */
             transcript: components["schemas"]["TranscriptEvent"][];
+            /** Audio Duration S */
+            audio_duration_s?: number | null;
         };
         /**
          * SessionIds

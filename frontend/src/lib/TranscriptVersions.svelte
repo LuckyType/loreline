@@ -84,6 +84,17 @@ function selectable(job: ReprocessJob): boolean {
 	return inFlight(job) || (job.status === 'done' && job.segments_added > 0)
 }
 
+/** Why a done row isn't clickable, when that's why. A done-but-empty row
+ *  carries the same "done" badge as a normal one, so without this the only
+ *  visible difference is a missing hover style - easy to read as broken
+ *  rather than as "nothing to show". Queued/error rows need no such note:
+ *  their status badge already explains why there's nothing to open. */
+function unselectableReason(job: ReprocessJob): string | undefined {
+	return job.status === 'done' && !selectable(job)
+		? 'This pass produced no segments, so there is nothing to show for it.'
+		: undefined
+}
+
 /** Delete one re-transcription version, its diarization, and its job rows.
  *
  * Only re-transcriptions are deletable: the original is the live capture and
@@ -196,6 +207,7 @@ const originalStatus = $derived.by(() => {
 					j.id
                 ? 'bg-accent/50 [box-shadow:inset_2px_0_0_var(--color-primary)]'
                 : ''}"
+						title={unselectableReason(j)}
 						onclick={() => selectable(j) && onselect?.(j.id)}
 					>
 						<TableCell><code>{j.id.slice(0, 8)}</code></TableCell>

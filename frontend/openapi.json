@@ -4255,6 +4255,17 @@
             },
             "type": "array",
             "title": "Transcript"
+          },
+          "audio_duration_s": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Audio Duration S"
           }
         },
         "type": "object",

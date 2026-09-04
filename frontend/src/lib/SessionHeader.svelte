@@ -5,7 +5,9 @@
  *
  * The export menu is hand-rolled rather than a Dropdown because it is not a
  * picker: nothing stays selected, each item is a download, and the audio entry
- * only exists when there is a recording to hand over.
+ * only exists when there is a recording to hand over - and says so plainly
+ * when that "recording" is a bare WAV header with nothing in it (a session
+ * that errored before capturing any audio still writes one).
  */
 
 import { ChevronDown } from '@lucide/svelte'
@@ -17,7 +19,11 @@ import { fmtWhen } from '$lib/stores'
 import type { ExportFormat } from '$lib/types'
 import type { Session } from '$lib/wire'
 
-let { sessionId, session }: { sessionId: string; session: Session } = $props()
+let {
+	sessionId,
+	session,
+	audioDurationS,
+}: { sessionId: string; session: Session; audioDurationS: number | null } = $props()
 
 const formats: ExportFormat[] = ['txt', 'md', 'srt', 'vtt', 'json']
 const formatLabels: Record<ExportFormat, string> = {
@@ -29,6 +35,11 @@ const formatLabels: Record<ExportFormat, string> = {
 }
 
 const hasAudio = $derived(!!session.audio_path)
+// A stored WAV this short has captured nothing: an errored session's bare
+// ~44-byte header decodes to exactly 0 s. The small margin above zero is
+// only for rounding - any real utterance clears it easily.
+const EMPTY_AUDIO_MAX_S = 0.05
+const audioEmpty = $derived(audioDurationS != null && audioDurationS <= EMPTY_AUDIO_MAX_S)
 
 let exportOpen = $state(false)
 
@@ -77,13 +88,19 @@ const durationText = $derived.by(() => {
 					{/each}
 					{#if hasAudio}
 						<button
-							class="mt-1 rounded border-t px-3 py-1.5 pt-2 text-left hover:bg-accent"
+							class="mt-1 rounded border-t px-3 py-1.5 pt-2 text-left {audioEmpty
+								? 'cursor-not-allowed text-muted-foreground'
+								: 'hover:bg-accent'}"
+							disabled={audioEmpty}
+							title={audioEmpty
+								? 'This session has no captured audio - the recording is empty.'
+								: undefined}
 							onclick={() => {
 								exportOpen = false
 								window.location.href = api.audioUrl(sessionId)
 							}}
 						>
-							Audio (.wav)
+							{audioEmpty ? 'Audio (empty)' : 'Audio (.wav)'}
 						</button>
 					{/if}
 				</div>
