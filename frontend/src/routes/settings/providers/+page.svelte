@@ -243,7 +243,11 @@ const inlineDiarizationAvailable = $derived(
 // The effort levels this model accepts, in config order; empty means offer no
 // dropdown at all rather than an empty one.
 const llmEfforts = $derived(
-	reasoningEffortsFor(llmSrcProvider?.kind, draft.summarize_model, llmModelInfo?.supports_reasoning),
+	reasoningEffortsFor(
+		llmSrcProvider?.kind,
+		draft.summarize_model,
+		llmModelInfo?.supports_reasoning,
+	),
 )
 
 // A level saved against another model, that this one does not accept, would
@@ -486,7 +490,12 @@ onMount(load)
 			Speech-to-text and LLM endpoints for transcription, diarization and summaries.
 		</CardDescription>
 		<CardAction class="flex gap-1">
-			<Button variant="outline" size="sm" onclick={testAll} disabled={actionSetup.providers.length === 0}>
+			<Button
+				variant="outline"
+				size="sm"
+				onclick={testAll}
+				disabled={actionSetup.providers.length === 0}
+			>
 				Test all
 			</Button>
 			<Button
@@ -566,7 +575,7 @@ onMount(load)
 				{#if actionSetup.providers.length === 0}
 					<TableRow>
 						<TableCell colspan={6} class="text-muted-foreground"
-							>No actionSetup.providers yet - click + to add one.</TableCell
+							>No providers yet - click + to add one.</TableCell
 						>
 					</TableRow>
 				{/if}
@@ -778,7 +787,7 @@ onMount(load)
 		{:else if step === 2}
 			<div class="flex items-center justify-between">
 				<span class="text-muted-foreground"
-					>Step 2 - {hosting === 'cloud' ? 'cloud' : 'self-hosted'} actionSetup.providers</span
+					>Step 2 - {hosting === 'cloud' ? 'cloud' : 'self-hosted'} providers</span
 				>
 				<Button variant="outline" size="sm" onclick={() => (step = 1)}>← Back</Button>
 			</div>
@@ -896,7 +905,7 @@ onMount(load)
 						<div class="flex flex-col gap-0.5">
 							<strong class="text-sm">Provider routing</strong>
 							<span class="text-xs text-muted-foreground">
-								OpenRouter serves one model from several upstream actionSetup.providers that differ in price and
+								OpenRouter serves one model from several upstream providers that differ in price and
 								data policy. These pick between them.
 							</span>
 						</div>
@@ -922,7 +931,7 @@ onMount(load)
 							<span class="flex flex-col gap-0.5">
 								<span class="text-sm">No data collection</span>
 								<span class="text-xs text-muted-foreground">
-									Skip actionSetup.providers that may store or train on the transcript.
+									Skip providers that may store or train on the transcript.
 								</span>
 							</span>
 						</label>

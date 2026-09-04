@@ -659,7 +659,9 @@ onMount(async () => {
 							onclick={() => selectVersion('original')}
 						>
 							<TableCell><code>original</code></TableCell>
-							<TableCell>{providerName(detail.session.primary_provider, actionSetup.providers)}</TableCell>
+							<TableCell
+								>{providerName(detail.session.primary_provider, actionSetup.providers)}</TableCell
+							>
 							<TableCell class="text-muted-foreground">-</TableCell>
 							<TableCell>{diarizeInfo('original')}</TableCell>
 							<TableCell>{detail.transcript.length}</TableCell>
