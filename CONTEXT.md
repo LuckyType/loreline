@@ -53,6 +53,16 @@ and the staleness gate are projections of that one answer. A different
 question from the health probe, which asks whether a provider row works.
 _Avoid_: live fetch, vendor list (each was one projection's own reader)
 
+## Browser
+
+**Model catalogue**: One store per browser session answering "which models does
+this provider row offer for this interaction", deduped per provider row,
+interaction and refresh token. The pickers are views over it, not owners of it.
+
+**Preferred model**: The pure rule for which model a picker starts on: the
+action default when it belongs to this provider row, else the first favourite,
+hidden models excluded. A user's pick overrides it until the provider changes.
+
 ## Audio and transcript
 
 **Utterance**: One voiced stretch of session audio, cut by the VAD chunker,
