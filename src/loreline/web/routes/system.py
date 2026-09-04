@@ -102,6 +102,15 @@ class HealthResponse(BaseModel):
     words ("OpenAI: You have no credits remaining."); null while any provider
     still works. Set only for failures that repeat for every utterance, so the
     dashboard can say what to fix rather than only that something is wrong."""
+    captured_seconds: float | None = None
+    """Seconds of audio the active session has captured; null while idle. With
+    ``capture_last_frame_age`` this is the dashboard's proof that a recording is
+    a recording: "capturing" says only that the machinery was started."""
+    capture_last_frame_age: float | None = None
+    """Seconds since the microphone last delivered a frame; null while idle.
+    A device sends frames whether or not anyone is speaking, so this stays near
+    zero all evening on a healthy capture and climbs on a dead one - which is
+    the difference between a quiet table and a microphone that stopped."""
 
 
 @router.get("/healthz")
@@ -136,7 +145,14 @@ async def healthz(request: Request) -> HealthResponse:
         diarizer_detail=diarizer.detail if diarizer is not None else None,
         stt_degraded_since=state.manager.stt_degraded_since(),
         stt_error=state.manager.stt_error(),
+        captured_seconds=_rounded(state.manager.captured_seconds()),
+        capture_last_frame_age=_rounded(state.manager.capture_last_frame_age()),
     )
+
+
+def _rounded(value: float | None) -> float | None:
+    """Trim a duration to milliseconds; the UI shows whole seconds of it."""
+    return None if value is None else round(value, 3)
 
 
 @router.get("/revision", dependencies=_auth)

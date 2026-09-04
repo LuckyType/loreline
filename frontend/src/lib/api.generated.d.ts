@@ -1280,6 +1280,10 @@ export interface components {
             stt_degraded_since?: number | null;
             /** Stt Error */
             stt_error?: string | null;
+            /** Captured Seconds */
+            captured_seconds?: number | null;
+            /** Capture Last Frame Age */
+            capture_last_frame_age?: number | null;
         };
         /**
          * HealthStatus

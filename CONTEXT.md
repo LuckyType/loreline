@@ -65,6 +65,15 @@ three times over, with reconnect handled underneath by ws.ts.
 
 ## Audio and transcript
 
+**Capture pre-flight**: Opening and immediately releasing the chosen microphone while the
+start request is still being answered, through the same calls the capture itself makes. A
+device that refuses fails the request. The device is opened at whatever rate it serves and
+resampled to the provider's rate, so "this mic only does 48 kHz" is no longer a refusal.
+
+**Capture liveness**: How much audio a running session has received, and how long ago its
+last frame arrived. A microphone delivers frames in silence too, so a climbing age is a
+stopped device rather than a quiet table - which is the one thing "capturing" cannot say.
+
 **Utterance**: One voiced stretch of session audio, cut by the VAD chunker, with its
 start and end on the session clock.
 

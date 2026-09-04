@@ -14,8 +14,8 @@ import contextlib
 import time
 import uuid
 from collections.abc import AsyncIterator, Callable
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol, cast
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Protocol, cast, runtime_checkable
 
 from loreline.audio.chunker import SpeechDetector, Utterance, VadChunker
 from loreline.bus import EventBus
@@ -64,6 +64,21 @@ class CaptureSource(Protocol):
         ...
 
 
+@runtime_checkable
+class PreflightCapture(Protocol):
+    """A capture source that can prove its device opens before a session starts.
+
+    Optional half of :class:`CaptureSource`: only the hardware-backed source has
+    a device that can refuse, and the injectable fakes the manager runs on in
+    tests have nothing to pre-flight. ``start()`` asks for it by structural
+    check rather than making every fake implement a no-op.
+    """
+
+    async def preflight(self) -> None:
+        """Open and immediately release the device; raise if it cannot serve."""
+        ...
+
+
 CaptureFactory = Callable[["StartSessionRequest", int], tuple[CaptureSource, SpeechDetector]]
 
 
@@ -102,6 +117,40 @@ def _default_capture(
 
 
 @dataclass(slots=True)
+class _CaptureStats:
+    """How much audio the active session has actually received.
+
+    A microphone that opens and then delivers nothing is indistinguishable from
+    a healthy one everywhere else in the API - both report ``capturing`` - which
+    is how a dead mic can look like a running session for a whole evening. These
+    two numbers are what makes the difference visible, on the dashboard and in
+    the logs, while the session is still salvageable.
+
+    ``last_frame_mono`` starts at the moment capture was set up, so a source
+    that never yields a first frame ages from the start rather than reading as
+    fresh forever.
+    """
+
+    sample_rate: int = 16000
+    samples: int = 0
+    last_frame_mono: float = field(default_factory=time.monotonic)
+
+    def record(self, frame: bytes) -> None:
+        self.samples += len(frame) // 2  # mono s16le
+        self.last_frame_mono = time.monotonic()
+
+    @property
+    def seconds(self) -> float:
+        """Seconds of audio captured so far."""
+        return self.samples / self.sample_rate if self.sample_rate > 0 else 0.0
+
+    @property
+    def since_last_frame(self) -> float:
+        """Seconds since the last frame arrived (frames arrive during silence too)."""
+        return max(0.0, time.monotonic() - self.last_frame_mono)
+
+
+@dataclass(slots=True)
 class _Runtime:
     session: Session
     source: CaptureSource
@@ -112,6 +161,7 @@ class _Runtime:
     backends: list[STTBackend]
     diarizer: DiarizationProvider
     audio_writer: SessionAudioWriter | None
+    stats: _CaptureStats
 
 
 class SessionManager:
@@ -145,6 +195,10 @@ class SessionManager:
         self._diarizer_factory = diarizer_factory
         self._runtime: _Runtime | None = None
         self._lock = asyncio.Lock()
+        # Holds the task that finalizes a session whose capture died on its own
+        # (see _router_finished); asyncio only keeps a weak reference to a task,
+        # so dropping this one could have the teardown collected mid-flight.
+        self._unattended_end: asyncio.Task[None] | None = None
 
     @property
     def transcript_bus(self) -> EventBus[TranscriptEvent]:
@@ -171,6 +225,21 @@ class SessionManager:
         """
         runtime = self._runtime
         return runtime.router.terminal_error if runtime is not None else None
+
+    def captured_seconds(self) -> float | None:
+        """Seconds of audio the active session has captured, or None while idle."""
+        runtime = self._runtime
+        return runtime.stats.seconds if runtime is not None else None
+
+    def capture_last_frame_age(self) -> float | None:
+        """Seconds since the mic last delivered a frame, or None while idle.
+
+        The dashboard's proof that a running session is actually recording:
+        a device delivers frames whether or not anyone is speaking, so an age
+        that keeps climbing means the audio stopped, not the table.
+        """
+        runtime = self._runtime
+        return runtime.stats.since_last_frame if runtime is not None else None
 
     def _check_live_capable(self, config: ProviderConfig, role: str) -> None:
         """Reject a provider that can only transcribe stored audio.
@@ -271,6 +340,14 @@ class SessionManager:
                 raise SessionActiveError
 
             primary_cfg, fallback_cfg = await self._resolve_providers(req)
+            sample_rate = primary_cfg.sample_rate
+
+            # Built and pre-flighted before anything else is: the microphone is
+            # the one part of a session that cannot be retried later, and a
+            # start that fails here costs nothing but an error message.
+            source, detector = self._capture_factory(req, sample_rate)
+            await self._preflight_capture(source, req.device)
+
             primary, fallback, backends = self._build_backends(req, primary_cfg, fallback_cfg)
             # Skipped entirely when the GM opted out, so no glossary reaches the
             # backend as keyterms or as a prompt.
@@ -278,9 +355,6 @@ class SessionManager:
                 await self._glossaries.get_effective(req.campaign_id) if req.use_glossary else None
             )
             diarizer = await self._build_diarizer(req.diarization)
-            sample_rate = primary_cfg.sample_rate
-
-            source, detector = self._capture_factory(req, sample_rate)
             chunker = VadChunker(sample_rate=sample_rate)
 
             session = Session(
@@ -317,8 +391,9 @@ class SessionManager:
             persist_task = asyncio.create_task(
                 self._persist(session_bus, session.started_mono, session.id)
             )
+            stats = _CaptureStats(sample_rate=sample_rate)
             router_task = asyncio.create_task(
-                self._run_router(router, source, detector, chunker, audio_writer, session.id)
+                self._run_router(router, source, detector, chunker, audio_writer, stats, session.id)
             )
             self._runtime = _Runtime(
                 session=session,
@@ -330,9 +405,36 @@ class SessionManager:
                 backends=backends,
                 diarizer=diarizer,
                 audio_writer=audio_writer,
+                stats=stats,
             )
+            # Nothing else awaits this task between here and stop(), so without
+            # a callback a capture that dies mid-session would keep reporting
+            # "capturing" until someone pressed Stop and waited out the drain.
+            router_task.add_done_callback(self._router_finished)
             log.info("session.start", session_id=session.id, primary=req.primary_provider)
             return session
+
+    async def _preflight_capture(self, source: CaptureSource, device: int | str | None) -> None:
+        """Fail the start request now if the chosen microphone cannot be opened.
+
+        The alternative is the failure the QA report found: a session that
+        reports ``capturing`` with a ticking timer while the stored WAV never
+        leaves its 44-byte header, because the device only refused once the
+        capture task was already running behind the response. Fakes have no
+        device, so they are simply not pre-flighted (see PreflightCapture).
+        """
+        if not isinstance(source, PreflightCapture):
+            return
+        try:
+            await source.preflight()
+        except Exception as exc:
+            log.warning("session.start.device_unavailable", device=device, error=str(exc))
+            named = "the default input device" if device is None else f"input device {device!r}"
+            msg = (
+                f"{named} could not be opened for recording ({exc}). Pick another "
+                "microphone in Settings, or check that nothing else is using it."
+            )
+            raise SessionConfigError(msg) from exc
 
     async def stop(self) -> Session | None:
         """Stop the active session and finalize persistence."""
@@ -344,6 +446,48 @@ class SessionManager:
 
         with log_context(session_id=runtime.session.id):
             return await self._finish(runtime)
+
+    def _router_finished(self, task: asyncio.Task[None]) -> None:
+        """Notice a capture that ended itself, and end the session with it.
+
+        Runs as ``router_task``'s done callback. A router that raised has taken
+        the capture down with it (the frame source is gone, the recording is
+        over), and nobody is waiting on that task: without this the manager
+        would keep answering ``capturing`` until the GM pressed Stop, and only
+        then find out - after the 30-second drain timeout - that the session had
+        been dead for hours.
+
+        A task that was *cancelled* is stop() doing its job, and one that ended
+        cleanly is a frame source that ran out (the finite fakes tests inject);
+        neither is a death to report.
+        """
+        if task.cancelled() or task.exception() is None:
+            return
+        runtime = self._runtime
+        if runtime is None or runtime.router_task is not task:
+            return  # stop() already owns the teardown
+        self._unattended_end = asyncio.create_task(self._end_unattended(task))
+
+    async def _end_unattended(self, task: asyncio.Task[None]) -> None:
+        """Finalize a session nobody asked to stop (see :meth:`_router_finished`).
+
+        Deliberately the same teardown ``stop()`` runs: ``_finish`` re-awaits the
+        router task, so the exception that killed it decides the stored status
+        and fires the "Session error" alert, exactly as it would have done had
+        the GM pressed Stop.
+        """
+        async with self._lock:
+            runtime = self._runtime
+            if runtime is None or runtime.router_task is not task:
+                return  # stop() got there first
+            self._runtime = None
+
+        with log_context(session_id=runtime.session.id):
+            log.error("session.capture.died", session_id=runtime.session.id)
+            try:
+                await self._finish(runtime)
+            except Exception:  # pragma: no cover - defensive: this task has no caller
+                log.exception("session.finish.failed", session_id=runtime.session.id)
 
     async def _finish(self, runtime: _Runtime) -> Session:
         """Drain, close and finalize a stopped session's runtime.
@@ -414,6 +558,7 @@ class SessionManager:
         detector: SpeechDetector,
         chunker: VadChunker,
         audio_writer: SessionAudioWriter | None,
+        stats: _CaptureStats,
         session_id: str,
     ) -> None:
         # Everything below (the router, the STT backends, the VAD, the capture
@@ -429,7 +574,7 @@ class SessionManager:
         # utterance is dropped (logged) instead of corrupting live frames.
         queue: asyncio.Queue[object] = asyncio.Queue(maxsize=_UTTERANCE_QUEUE_MAX)
         capture_task = asyncio.create_task(
-            _capture_utterances(source, detector, chunker, audio_writer, queue)
+            _capture_utterances(source, detector, chunker, audio_writer, stats, queue)
         )
         utterances = _dequeue(queue)
         try:
@@ -491,6 +636,7 @@ async def _capture_utterances(
     detector: SpeechDetector,
     chunker: VadChunker,
     audio_writer: SessionAudioWriter | None,
+    stats: _CaptureStats,
     queue: asyncio.Queue[object],
 ) -> None:
     """Drain frames through VAD + chunking into ``queue`` (never blocks).
@@ -499,29 +645,46 @@ async def _capture_utterances(
     of STT latency. Every frame is written to the continuous session recording
     and each completed utterance's span is indexed, so stored audio stays
     complete (and re-VAD-able) even if the live queue drops an utterance.
+
+    However this ends - stopped, cancelled, or with the frame source raising
+    before it ever yields - the closing sentinel is delivered. It is the only
+    thing that ends ``_dequeue``, so skipping it leaves the router blocked on an
+    empty queue for as long as the process lives: the session then reports
+    ``capturing`` with a dead microphone, and even Stop only unblocks it by
+    timing out. That is the zombie recording this ``finally`` exists to prevent.
     """
-    async for frame, ts in source.frames():
-        if audio_writer is not None:
-            # Disk write off the event loop: this task is already decoupled
-            # from STT latency, but a blocking write here would still stall
-            # every other coroutine (health polls, WS streams, HTTP requests)
-            # for its duration.
-            await asyncio.to_thread(audio_writer.append_frame, frame)  # incl. silence
-        # ONNX inference off the event loop for the same reason.
-        is_speech = await asyncio.to_thread(detector, frame)
-        utterance = chunker.feed(frame, ts=ts, is_speech=is_speech)
-        if utterance is not None:
+    try:
+        async for frame, ts in source.frames():
+            stats.record(frame)
             if audio_writer is not None:
-                # mark_utterance persists the index sidecar - disk I/O, so off
-                # the event loop like the frame writes above.
-                await asyncio.to_thread(audio_writer.mark_utterance, utterance)
-            _offer(queue, utterance)
-    final = chunker.flush()
-    if final is not None:
-        if audio_writer is not None:
-            await asyncio.to_thread(audio_writer.mark_utterance, final)
-        _offer(queue, final)
-    _offer(queue, _CAPTURE_DONE)
+                # Disk write off the event loop: this task is already decoupled
+                # from STT latency, but a blocking write here would still stall
+                # every other coroutine (health polls, WS streams, HTTP requests)
+                # for its duration.
+                await asyncio.to_thread(audio_writer.append_frame, frame)  # incl. silence
+            # ONNX inference off the event loop for the same reason.
+            is_speech = await asyncio.to_thread(detector, frame)
+            utterance = chunker.feed(frame, ts=ts, is_speech=is_speech)
+            if utterance is not None:
+                if audio_writer is not None:
+                    # mark_utterance persists the index sidecar - disk I/O, so off
+                    # the event loop like the frame writes above.
+                    await asyncio.to_thread(audio_writer.mark_utterance, utterance)
+                _offer(queue, utterance)
+    except Exception:
+        # Logged here, where the session context is still bound, rather than
+        # left for whoever eventually awaits this task.
+        log.exception("capture.failed", captured_seconds=round(stats.seconds, 1))
+        raise
+    finally:
+        try:
+            final = chunker.flush()
+            if final is not None:
+                if audio_writer is not None:
+                    await asyncio.to_thread(audio_writer.mark_utterance, final)
+                _offer(queue, final)
+        finally:
+            _offer(queue, _CAPTURE_DONE)
 
 
 async def _dequeue(queue: asyncio.Queue[object]) -> AsyncIterator[Utterance]:
