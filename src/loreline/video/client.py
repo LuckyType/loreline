@@ -7,7 +7,8 @@ module. Unlike chat completions, there is no request that returns the result:
     GET  /videos/{id}        -> {"status": pending|in_progress|completed|
                                             failed|cancelled|expired, "error", …}
     GET  /videos/{id}/content -> the encoded video bytes
-    GET  /videos/models      -> per-model parameter support
+    GET  /videos/models      -> per-model parameter support (read through
+                                the shared catalogue reader, loreline.catalog)
 
 A generation runs for minutes, so nothing here blocks a request thread; the
 polling loop lives in :mod:`loreline.video.jobs`, which owns the job row.
@@ -27,6 +28,7 @@ from typing import cast
 import httpx
 
 from loreline.capabilities import supports, surface_for
+from loreline.catalog import VendorModel, VendorVideo, probe
 from loreline.logging import get_logger
 from loreline.models import Interaction, ProviderConfig, ProviderKind, VideoModelInfo
 
@@ -103,63 +105,43 @@ async def list_video_models(
 ) -> list[VideoModelInfo]:
     """Video models and the parameters each one accepts.
 
-    Best-effort, like the chat model catalog: a failed fetch yields an empty
-    list rather than raising, so the dialog can still open and say so instead
-    of erroring the page.
+    A projection of the one catalogue reader, :mod:`loreline.catalog`: the
+    kind's video ``catalog`` surface, read once, fail soft. An unusable probe
+    (no such catalogue, vendor down, shape moved) yields an empty list rather
+    than raising, so the dialog can still open and say so instead of erroring
+    the page. The lists stay None where the vendor published none, which the
+    form reads as "this model takes no such parameter".
     """
-    client = _client(config, api_key, client_factory)
-    try:
-        response = await client.get("/videos/models")
-        response.raise_for_status()
-        return _parse_models(response.json())
-    except (httpx.HTTPError, ValueError) as exc:
-        log.warning("video.models.fetch_failed", error=str(exc))
+    answer = await probe(
+        config.kind,
+        Interaction.VIDEO,
+        api_key=api_key,
+        base_url=config.base_url,
+        client_factory=client_factory,
+        request_timeout=_TIMEOUT_S,
+    )
+    if not answer.usable:
         return []
-    finally:
-        await client.aclose()
+    return sorted((_video_row(m) for m in answer.models), key=lambda m: m.id)
 
 
-def _int_list(raw: object) -> list[int] | None:
-    if not isinstance(raw, list):
-        return None
-    return [v for v in cast("list[object]", raw) if isinstance(v, int)]
-
-
-def _str_list(raw: object) -> list[str] | None:
-    if not isinstance(raw, list):
-        return None
-    return [v for v in cast("list[object]", raw) if isinstance(v, str)]
-
-
-def _parse_models(payload: object) -> list[VideoModelInfo]:
-    data: object = payload
-    if isinstance(payload, dict):
-        data = cast("dict[str, object]", payload).get("data", [])
-    items = cast("list[object]", data) if isinstance(data, list) else []
-    models: list[VideoModelInfo] = []
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        entry = cast("dict[str, object]", item)
-        model_id = entry.get("id")
-        if not isinstance(model_id, str):
-            continue
-        name = entry.get("name")
-        description = entry.get("description")
-        models.append(
-            VideoModelInfo(
-                id=model_id,
-                name=name if isinstance(name, str) else model_id,
-                description=description if isinstance(description, str) else None,
-                supported_durations=_int_list(entry.get("supported_durations")),
-                supported_resolutions=_str_list(entry.get("supported_resolutions")),
-                supported_aspect_ratios=_str_list(entry.get("supported_aspect_ratios")),
-                supported_sizes=_str_list(entry.get("supported_sizes")),
-                generate_audio=entry.get("generate_audio") is True,
-                seed=entry.get("seed") is True,
-            )
-        )
-    return sorted(models, key=lambda m: m.id)
+def _video_row(model: VendorModel) -> VideoModelInfo:
+    video = model.video or VendorVideo()
+    return VideoModelInfo(
+        id=model.id,
+        name=model.name or model.id,
+        description=model.description,
+        supported_durations=list(video.durations) if video.durations is not None else None,
+        supported_resolutions=list(video.resolutions) if video.resolutions is not None else None,
+        supported_aspect_ratios=(
+            list(video.aspect_ratios) if video.aspect_ratios is not None else None
+        ),
+        supported_sizes=list(video.sizes) if video.sizes is not None else None,
+        # The reader keeps "the vendor said nothing" apart from "no"; a form
+        # knob the vendor did not vouch for is simply not offered.
+        generate_audio=video.audio is True,
+        seed=video.seed is True,
+    )
 
 
 def build_payload(
