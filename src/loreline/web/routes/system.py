@@ -12,7 +12,7 @@ import uuid
 from fastapi import APIRouter, Depends, Request
 from fastapi.exceptions import HTTPException
 from pydantic import BaseModel
-from starlette.status import HTTP_404_NOT_FOUND, HTTP_503_SERVICE_UNAVAILABLE
+from starlette.status import HTTP_404_NOT_FOUND, HTTP_409_CONFLICT, HTTP_503_SERVICE_UNAVAILABLE
 
 from loreline import __version__
 from loreline.diarization.remote import probe_diarizer
@@ -27,7 +27,7 @@ from loreline.monitoring import (
 )
 from loreline.secrets import SecretStore
 from loreline.services import DockerUnavailableError, ServiceState
-from loreline.updater import UpdateResult
+from loreline.updater import AutostartToggleError, AutostartUnavailableError, UpdateResult
 from loreline.web.auth import require_auth
 from loreline.web.deps import ACTION_DEFAULTS_KEY, get_state, load_action_defaults
 from loreline.web.schemas import (
@@ -160,13 +160,22 @@ async def rollback(request: Request, body: RollbackRequest) -> UpdateResult:
 @router.get("/autostart", dependencies=_auth)
 async def get_autostart(request: Request) -> AutostartState:
     """Report whether the systemd unit is enabled at boot."""
-    return AutostartState(enabled=await get_state(request).autostart.is_enabled())
+    try:
+        return AutostartState(enabled=await get_state(request).autostart.is_enabled())
+    except AutostartUnavailableError as exc:
+        raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
 
 
 @router.put("/autostart", dependencies=_auth)
 async def set_autostart(request: Request, body: AutostartUpdate) -> AutostartState:
     """Enable or disable systemd autostart."""
-    return AutostartState(enabled=await get_state(request).autostart.set_enabled(body.enabled))
+    try:
+        enabled = await get_state(request).autostart.set_enabled(body.enabled)
+    except AutostartUnavailableError as exc:
+        raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+    except AutostartToggleError as exc:
+        raise HTTPException(status_code=HTTP_409_CONFLICT, detail=str(exc)) from exc
+    return AutostartState(enabled=enabled)
 
 
 @router.get("/defaults", dependencies=_auth)

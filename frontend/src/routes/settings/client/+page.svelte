@@ -22,9 +22,39 @@ let updating = $state(false)
 let updateResult = $state<UpdateResult | null>(null)
 let autostart = $state<boolean | null>(null)
 let autostartBusy = $state(false)
+// Bumped every time a toggle attempt settles (success or failure), win or
+// lose. The <Switch> below is keyed on it purely to force a remount on every
+// settle - see the {#key} block for why that's needed even when `autostart`
+// itself settles back to the value it started at.
+let autostartGeneration = $state(0)
 let opsMessage = $state('')
 
 const meterColor = $derived(peak > 0.9 ? '#ef4444' : peak > 0.6 ? '#f59e0b' : '#22c55e')
+
+// A previously-picked device (e.g. a Bluetooth mic) can disappear from the
+// device list without the stored selection changing - flagged here instead
+// of leaving the user to find out only when the Test button fails with a raw
+// PortAudio error.
+const deviceMissing = $derived(deviceSel !== '' && !devices.some((d) => d.name === deviceSel))
+const deviceOptions = $derived([
+	{ value: '', label: 'System default' },
+	...devices.map((d) => ({ value: d.name, label: d.name })),
+	...(deviceMissing
+		? [
+				{
+					value: deviceSel,
+					label: `${deviceSel} (not found)`,
+					disabled: true,
+					title: 'This device is no longer available - pick another one.',
+				},
+			]
+		: []),
+])
+
+// The <pre> lower down would otherwise repeat a single-line opsMessage
+// verbatim (see runUpdate) - only genuinely multi-line output gets its own
+// block.
+const showUpdateOutput = $derived(Boolean(updateResult?.output?.includes('\n')))
 
 async function loadDevices() {
 	try {
@@ -129,6 +159,13 @@ async function toggleAutostart() {
 		opsMessage = err instanceof ApiError ? err.message : 'autostart toggle failed'
 	} finally {
 		autostartBusy = false
+		// The bits-ui Switch only resyncs its own optimistic state when the
+		// `checked` prop's value changes - a failed toggle settles back to the
+		// same value it started at, which it would otherwise never notice, and
+		// it would keep showing "on" even though `autostart` is correctly
+		// `false`. Bumping this every settle forces the {#key} below to remount
+		// it regardless.
+		autostartGeneration += 1
 	}
 }
 
@@ -151,10 +188,7 @@ onDestroy(stopMeter)
 			<Dropdown
 				id="device"
 				bind:value={deviceSel}
-				options={[
-          { value: '', label: 'System default' },
-          ...devices.map((d) => ({ value: d.name, label: d.name }))
-        ]}
+				options={deviceOptions}
 				onpick={() => void saveDevice()}
 			/>
 		</div>
@@ -194,14 +228,16 @@ onDestroy(stopMeter)
 			{#if autostart === null}
 				<span class="text-muted-foreground">unavailable</span>
 			{:else}
-				<Switch checked={autostart} onCheckedChange={toggleAutostart} disabled={autostartBusy} />
+				{#key autostartGeneration}
+					<Switch checked={autostart} onCheckedChange={toggleAutostart} disabled={autostartBusy} />
+				{/key}
 			{/if}
 		</div>
 		{#if opsMessage}
 			<p class="mt-2 text-sm text-muted-foreground">{opsMessage}</p>
 		{/if}
-		{#if updateResult?.output}
-			<pre class="mt-2 max-h-32 overflow-auto font-mono text-xs">{updateResult.output}</pre>
+		{#if showUpdateOutput}
+			<pre class="mt-2 max-h-32 overflow-auto font-mono text-xs">{updateResult?.output}</pre>
 		{/if}
 	</CardContent>
 </Card>

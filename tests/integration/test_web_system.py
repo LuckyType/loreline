@@ -170,6 +170,27 @@ async def test_autostart_toggle(client: AsyncClient) -> None:
     assert (await client.get("/api/system/autostart")).json()["enabled"] is True
 
 
+async def test_autostart_toggle_failure_reports_conflict(settings: Settings) -> None:
+    """A real toggle failure (e.g. the sudoers rule rejecting the call) must
+    surface as an HTTP error, not as a silent False - see AutostartToggleError
+    in loreline.updater.autostart."""
+
+    class FailingRunner:
+        async def __call__(self, argv: list[str], *, cwd: str | None = None) -> CommandResult:
+            if argv[:2] == ["systemctl", "is-enabled"]:
+                return CommandResult(1, "disabled\n", "")
+            if argv[:3] == ["sudo", "systemctl", "enable"]:
+                return CommandResult(1, "", "a password is required")
+            return CommandResult(0, "", "")
+
+    app = create_app(settings, command_runner=FailingRunner())
+    async with LifespanManager(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            resp = await ac.put("/api/system/autostart", json={"enabled": True})
+            assert resp.status_code == 409
+
+
 async def test_action_defaults_roundtrip(client: AsyncClient) -> None:
     empty = (await client.get("/api/system/defaults")).json()
     assert empty == {
