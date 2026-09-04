@@ -235,6 +235,19 @@ const videoProviders = $derived(providersFor(providers, 'video'))
 const sttSrcProvider = $derived(providers.find((p) => p.id === defaults.stt_provider))
 const llmSrcProvider = $derived(providers.find((p) => p.id === defaults.summarize_provider))
 const videoSrcProvider = $derived(providers.find((p) => p.id === defaults.video_provider))
+// A saved default is a provider/model pair: its model half earns the "default"
+// tag only while its provider half is the row currently selected above it.
+const sttSavedModel = $derived(
+	defaults.stt_provider === savedDefaults.stt_provider ? savedDefaults.stt_model : '',
+)
+const llmSavedModel = $derived(
+	defaults.summarize_provider === savedDefaults.summarize_provider
+		? savedDefaults.summarize_model
+		: '',
+)
+const videoSavedModel = $derived(
+	defaults.video_provider === savedDefaults.video_provider ? savedDefaults.video_model : '',
+)
 // The name field's placeholder is a real default, not a hint: leaving it blank
 // names the provider after its type ("OpenRouter"), which is what most people
 // want for their first one. Save stays enabled accordingly.
@@ -632,9 +645,7 @@ onMount(async () => {
 					interaction="transcribe"
 					provider={sttSrcProvider}
 					bind:value={defaults.stt_model}
-					defaultModel={savedDefaults.stt_model}
-					defaultProvider={savedDefaults.stt_provider ?? ''}
-					autoseed={false}
+					defaultModel={sttSavedModel}
 				/>
 			</div>
 
@@ -686,9 +697,7 @@ onMount(async () => {
 						interaction="summarize"
 						provider={llmSrcProvider}
 						bind:value={defaults.summarize_model}
-						defaultModel={savedDefaults.summarize_model}
-						defaultProvider={savedDefaults.summarize_provider ?? ''}
-						autoseed={false}
+						defaultModel={llmSavedModel}
 					/>
 					{#if llmEfforts.length}
 						<Label class="text-xs text-muted-foreground" for="def-llm-effort">
@@ -731,9 +740,7 @@ onMount(async () => {
 						interaction="video"
 						provider={videoSrcProvider}
 						bind:value={defaults.video_model}
-						defaultModel={savedDefaults.video_model}
-						defaultProvider={savedDefaults.video_provider ?? ''}
-						autoseed={false}
+						defaultModel={videoSavedModel}
 					/>
 				{:else}
 					<p class="m-0 text-sm text-muted-foreground">

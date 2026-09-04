@@ -55,7 +55,6 @@ let {
 } = $props()
 
 let providerId = $state('')
-let modelId = $state('')
 let prompt = $state('')
 let duration = $state<number | null>(null)
 let resolution = $state('')
@@ -71,6 +70,15 @@ const providerKind = $derived(provider?.kind)
 const offered = $derived(provider ? videoCatalog.list(provider, 'video', '') : [])
 const loadingModels = $derived(provider ? videoCatalog.loading(provider, 'video', '') : false)
 const modelsSettled = $derived(provider ? videoCatalog.settled(provider, 'video', '') : false)
+// Seeded, not stored: the saved default when this provider lists it, else the
+// first model offered. A pick overrides this until the list changes (a
+// provider switch, or the list arriving), the same rule the other pickers
+// get from preferredModel, minus favourites, which video rows do not carry.
+let modelId = $derived.by(() => {
+	const preferred = defaults?.video_model
+	if (preferred && offered.some((m) => m.id === preferred)) return preferred
+	return offered[0]?.id ?? ''
+})
 const model = $derived(offered.find((m) => m.id === modelId))
 const caps = $derived(videoCapsFor(providerKind, modelId))
 const durations = $derived(
@@ -104,22 +112,9 @@ $effect(() => {
 })
 
 // The list is wanted the moment the dialog shows, not when the model dropdown
-// opens: the parameter controls below are built from the chosen model. Once
-// it is in, a pick the list cannot serve gives way to the saved default, else
-// the first model offered.
+// opens: the parameter controls below are built from the chosen model.
 $effect(() => {
-	if (!open) return
-	const p = provider
-	if (!p) return
-	videoCatalog.load(p, 'video', '').then(() => {
-		const pickable = videoCatalog.list(p, 'video', '')
-		if (pickable.some((m) => m.id === modelId)) return
-		const preferred = defaults?.video_model
-		modelId =
-			(preferred && pickable.some((m) => m.id === preferred) ? preferred : '') ||
-			pickable[0]?.id ||
-			''
-	})
+	if (open && provider) videoCatalog.load(provider, 'video', '')
 })
 
 // Whenever the model changes, drop any parameter it does not offer and fall

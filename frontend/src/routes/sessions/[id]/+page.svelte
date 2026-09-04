@@ -6,6 +6,7 @@ import { ApiError, api } from '$lib/api'
 import {
 	featureBlockedReason,
 	glossaryDropsWarning,
+	preferredModel,
 	reasoningEffortsFor,
 } from '$lib/capabilities.svelte'
 import { Badge } from '$lib/components/ui/badge'
@@ -56,8 +57,13 @@ let detail = $state<SessionDetail | null>(null)
 let providers = $state<ProviderConfig[]>([])
 let jobs = $state<ReprocessJob[]>([])
 let error = $state('')
+let defaults = $state<ActionDefaults>({
+	stt_model: '',
+	diar_mode: '',
+	diar_endpoint: '',
+	summarize_model: '',
+})
 let rpProvider = $state('')
-let rpModel = $state('')
 let rpDiarKind = $state<DiarizationModeKind>('remote')
 let rpDiarEndpoint = $state('')
 let rpDiarMin = $state('')
@@ -78,6 +84,12 @@ const formatLabels: Record<ExportFormat, string> = {
 }
 const hasAudio = $derived(!!detail?.session.audio_path)
 const rpSelectedProvider = $derived(providers.find((p) => p.id === rpProvider))
+// The stored transcription default is a provider/model pair: its model half
+// only counts while its provider half is the one selected.
+const rpDefault = $derived(rpProvider === defaults.stt_provider ? defaults.stt_model : '')
+// Seeded, not stored: a pick overrides this until the provider changes, and a
+// provider switch starts over (see preferredModel).
+let rpModel = $derived(preferredModel(rpSelectedProvider, rpDefault))
 // Not every model can take a glossary: OpenRouter's transcription API accepts
 // a prompt field and ignores it, so the checkbox there was a silent no-op.
 // Disabled with the reason, rather than left to do nothing.
@@ -351,17 +363,15 @@ let nameForm = $state<Record<string, string>>({})
 const llmProviders = $derived(providersFor(providers, 'summarize'))
 let summarizeOpen = $state(false)
 let sumProvider = $state('')
-let sumModel = $state('')
 let sumEffort = $state('')
 let sumBusy = $state(false)
 let sumError = $state('')
-let defaults = $state<ActionDefaults>({
-	stt_model: '',
-	diar_mode: '',
-	diar_endpoint: '',
-	summarize_model: '',
-})
 const selectedLlm = $derived(llmProviders.find((p) => p.id === sumProvider))
+// The summarize default as a pair, same rule as `rpDefault` above.
+const sumDefault = $derived(
+	sumProvider === defaults.summarize_provider ? defaults.summarize_model : '',
+)
+let sumModel = $derived(preferredModel(selectedLlm, sumDefault))
 // The picked model's catalogue entry; the fallback for a model the capability
 // config does not annotate. Read from the shared catalogue rather than
 // reported by the picker, which the dialog unmounts on close: the entry must
@@ -791,8 +801,7 @@ onMount(async () => {
 						<ModelPicker
 							provider={rpSelectedProvider}
 							bind:value={rpModel}
-							defaultModel={defaults.stt_model}
-							defaultProvider={defaults.stt_provider ?? ''}
+							defaultModel={rpDefault}
 							interaction="transcribe"
 						/>
 						<label
@@ -1099,8 +1108,7 @@ onMount(async () => {
 			<ModelPicker
 				provider={selectedLlm}
 				bind:value={sumModel}
-				defaultModel={defaults.summarize_model}
-				defaultProvider={defaults.summarize_provider ?? ''}
+				defaultModel={sumDefault}
 				interaction="summarize"
 			/>
 		</div>
