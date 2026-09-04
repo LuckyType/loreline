@@ -69,6 +69,7 @@ async function clear() {
 				class="opacity-55 hover:opacity-100"
 				title="Clear transcript"
 				aria-label="Clear transcript"
+				disabled={feed.items.length === 0}
 				onclick={clear}
 			>
 				<Trash2 />
