@@ -52,6 +52,7 @@ from websockets.exceptions import ConnectionClosedOK
 
 from loreline.audio.chunker import Utterance
 from loreline.capabilities import surface_for
+from loreline.capability_config import TranscribeCapabilities
 from loreline.logging import get_logger
 from loreline.models import Glossary, Interaction, ProviderConfig, ProviderKind
 from loreline.secrets import SecretStore
@@ -105,7 +106,7 @@ _SETUP_TIMEOUT_S = 10.0
 _RECV_TIMEOUT_S = 10.0
 
 
-def _vocabulary_for(model: str | None, terms: list[str]) -> list[str]:
+def _vocabulary_for(caps: TranscribeCapabilities | None, terms: list[str]) -> list[str]:
     """Glossary terms for ``customVocabulary``, capped for this model.
 
     The ceiling is enforced here rather than discovered at the vendor because
@@ -115,7 +116,7 @@ def _vocabulary_for(model: str | None, terms: list[str]) -> list[str]:
     ack, 1001 close. The number lives in capabilities.yaml, which is also what
     the UI renders the glossary toggle from.
     """
-    return glossary_terms_for(ProviderKind.GEMINI, model, terms, realtime=True)
+    return glossary_terms_for(caps, terms, realtime=True)
 
 
 def _wire(mapping: dict[str, object], name: str, alt: str) -> object:
@@ -235,6 +236,7 @@ class GeminiLiveBackend(Connector[list[str]]):
         config: ProviderConfig,
         *,
         model: str | None = None,
+        caps: TranscribeCapabilities | None = None,
         api_key: str | None = None,
         language: str | None = None,
     ) -> None:
@@ -242,6 +244,7 @@ class GeminiLiveBackend(Connector[list[str]]):
         self._api_key = api_key
         self._language = language or config.language
         self._model = model
+        self._caps = caps
         self._endpoint = surface_for(config, Interaction.TRANSCRIBE, "realtime")
 
     def _session_url(self) -> str:
@@ -299,7 +302,7 @@ class GeminiLiveBackend(Connector[list[str]]):
         }
 
     def prepare(self, glossary: Glossary | None) -> list[str]:
-        return _vocabulary_for(self._model, glossary_terms(glossary))
+        return _vocabulary_for(self._caps, glossary_terms(glossary))
 
     async def transcribe_one(self, utterance: Utterance, prepared: list[str]) -> Transcription:
         state = _TurnState()
@@ -394,6 +397,9 @@ def _audio_chunks(pcm: bytes, sample_rate: int) -> list[bytes]:
 
 @register(ProviderKind.GEMINI, realtime=True)
 def _factory(  # pyright: ignore[reportUnusedFunction]
-    config: ProviderConfig, secrets: SecretStore, model: str | None
+    config: ProviderConfig,
+    secrets: SecretStore,
+    model: str | None,
+    caps: TranscribeCapabilities | None,
 ) -> GeminiLiveBackend:
-    return GeminiLiveBackend(config, model=model, api_key=secret_for(config, secrets))
+    return GeminiLiveBackend(config, model=model, caps=caps, api_key=secret_for(config, secrets))

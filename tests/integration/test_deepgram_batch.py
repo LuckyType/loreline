@@ -14,7 +14,6 @@ https://developers.deepgram.com/reference/speech-to-text/listen-pre-recorded.md
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
@@ -22,6 +21,7 @@ import httpx
 from loreline.audio.chunker import Utterance
 from loreline.models import Glossary, ProviderConfig, ProviderKind, TranscriptEvent
 from loreline.stt.backends.deepgram_batch import DeepgramBatchBackend
+from loreline.stt.base import transcribe_capabilities
 
 BASE_URL = "https://api.deepgram.com"
 
@@ -63,8 +63,8 @@ def _client(handler: Any) -> httpx.AsyncClient:
     )
 
 
-async def _one(start: float) -> AsyncIterator[Utterance]:
-    yield Utterance(pcm=b"\x01\x00" * 1600, start=start, end=start + 0.1)
+def _one(start: float) -> Utterance:
+    return Utterance(pcm=b"\x01\x00" * 1600, start=start, end=start + 0.1)
 
 
 async def _run(
@@ -73,13 +73,21 @@ async def _run(
     model: str | None = "whisper-large",
     glossary: Glossary | None = None,
     start: float = 0.0,
-) -> list[TranscriptEvent]:
+) -> TranscriptEvent | None:
+    """One utterance through the connector, built the way the registry builds it.
+
+    The capabilities come from the same accessor ``create_backend`` uses, so
+    the per-model biasing field these tests pin is still the yaml's answer for
+    this model and not one restated here.
+    """
     async with _client(handler) as client:
-        backend = DeepgramBatchBackend(_config(), model=model, client=client)
-        return [
-            event
-            async for event in backend.transcribe(_one(start), session_id="s1", glossary=glossary)
-        ]
+        backend = DeepgramBatchBackend(
+            _config(),
+            model=model,
+            caps=transcribe_capabilities(ProviderKind.DEEPGRAM, model),
+            client=client,
+        )
+        return await backend.transcribe(_one(start), session_id="s1", glossary=glossary)
 
 
 async def test_posts_a_wav_body_and_maps_words_onto_session_time() -> None:
@@ -89,7 +97,7 @@ async def test_posts_a_wav_body_and_maps_words_onto_session_time() -> None:
         seen.append(request)
         return httpx.Response(200, json=_reply([_word("Hallo", 0.1, 0.45, speaker=0)]))
 
-    events = await _run(handler, start=12.0)
+    event = await _run(handler, start=12.0)
 
     request = seen[0]
     assert request.method == "POST"
@@ -107,8 +115,7 @@ async def test_posts_a_wav_body_and_maps_words_onto_session_time() -> None:
     assert "encoding" not in params
     assert "sample_rate" not in params
 
-    assert len(events) == 1
-    event = events[0]
+    assert event is not None
     assert event.source == "dg-1"
     assert event.is_final
     assert event.text == "Hallo Welt"
@@ -187,14 +194,14 @@ async def test_empty_transcript_yields_no_event() -> None:
     def handler(_: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json=_reply([], text=""))
 
-    assert await _run(handler) == []
+    assert await _run(handler) is None
 
 
 async def test_missing_alternatives_yield_no_event() -> None:
     def handler(_: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"results": {"channels": []}})
 
-    assert await _run(handler) == []
+    assert await _run(handler) is None
 
 
 async def test_a_streaming_base_url_is_not_handed_to_the_http_client() -> None:

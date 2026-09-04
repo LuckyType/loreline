@@ -33,6 +33,7 @@ import httpx
 from loreline.audio.chunker import Utterance
 from loreline.audio.wav import pcm_to_wav
 from loreline.capabilities import surface_for
+from loreline.capability_config import TranscribeCapabilities
 from loreline.logging import get_logger
 from loreline.models import Glossary, Interaction, ProviderConfig, ProviderKind
 from loreline.secrets import SecretStore
@@ -68,6 +69,7 @@ class DeepgramBatchBackend(HttpConnector[_Params]):
         config: ProviderConfig,
         *,
         model: str | None = None,
+        caps: TranscribeCapabilities | None = None,
         client: httpx.AsyncClient | None = None,
         api_key: str | None = None,
         language: str | None = None,
@@ -85,11 +87,13 @@ class DeepgramBatchBackend(HttpConnector[_Params]):
         # question, not a connector constant, and omitting the parameter lets
         # Deepgram apply its own default rather than pinning one here.
         self._model = model
+        self._caps = caps
 
     def prepare(self, glossary: Glossary | None) -> _Params:
         return tuple(
             listen_params(
                 model=self._model,
+                caps=self._caps,
                 language=self._language,
                 terms=glossary_terms(glossary),
                 realtime=False,
@@ -134,11 +138,14 @@ class DeepgramBatchBackend(HttpConnector[_Params]):
 
 @register(ProviderKind.DEEPGRAM)
 def _factory(  # pyright: ignore[reportUnusedFunction]
-    config: ProviderConfig, secrets: SecretStore, model: str | None
+    config: ProviderConfig,
+    secrets: SecretStore,
+    model: str | None,
+    caps: TranscribeCapabilities | None,
 ) -> DeepgramBatchBackend:
     """Deepgram's pre-recorded models, chosen by the registry on the model.
 
     A config whose model streams (Nova, Flux) still goes to the WebSocket
     connector; only a batch-only model, or one curated batch-only, lands here.
     """
-    return DeepgramBatchBackend(config, model=model, api_key=secret_for(config, secrets))
+    return DeepgramBatchBackend(config, model=model, caps=caps, api_key=secret_for(config, secrets))

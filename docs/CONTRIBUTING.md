@@ -97,10 +97,11 @@ job's `npm run check` checks the types. The fix for either is that one command.
 
 A route in `src/loreline/web/routes/` takes the provider row and the model the
 caller named. `stt.registry.create_backend(config, secrets, model)` resolves the
-kind and the model's transport to one connector, so the transport lookup and the
-connector can never disagree about which model is running. `SttRouter` then
-feeds utterances to that connector, falls over to the fallback provider when it
-fails, and hands the events to the diarizer.
+kind and the model's transport to one connector, and resolves that model's
+`TranscribeCapabilities` once, so the transport lookup, the connector and the
+glossary policy can never disagree about which model is running. `SttRouter`
+then hands that connector one utterance at a time, falls over to the fallback
+provider when it fails, and hands the events to the diarizer.
 
 The connector itself holds no addresses. `capabilities.surface_for` returns the
 URL and the auth scheme the yaml declares for that interaction and transport,
@@ -108,10 +109,11 @@ with the provider row's `base_url` applied where the surface says it may be. The
 same accessor answers for the LLM client, the video client, the catalogue reader
 and the diarizer.
 
-Four decisions shape all of this and each has an ADR under `docs/adr/`: the
+Five decisions shape all of this and each has an ADR under `docs/adr/`: the
 connector base and what composes it, vendor surfaces living in the yaml, one
-catalogue reader behind every model list, and one health probe behind every
-"does this key work" question. Read those before moving a fact out of the yaml
+catalogue reader behind every model list, one health probe behind every "does
+this key work" question, and one utterance per transcription call with the
+model's capabilities resolved before the connector is built. Read those before moving a fact out of the yaml
 and into code. `CONTEXT.md` has the vocabulary.
 
 ## Adding an STT backend
@@ -121,12 +123,16 @@ and into code. `CONTEXT.md` has the vocabulary.
    surface, a `health` path or frame), its `interactions`, and its curated
    models with what each supports.
 2. Implement `Connector` or `HttpConnector` from `src/loreline/stt/base.py`.
-   You supply `prepare` and `transcribe_one`; the base owns the per-utterance
-   loop, the `TranscriptEvent` and the speaker rule. The `STTBackend` contract
-   is `transcribe()` and `aclose()`. There is no `health()`: probing is
+   You supply `prepare` and `transcribe_one`; the base owns the
+   `TranscriptEvent` and the speaker rule. The `STTBackend` contract is
+   `aclose()` and `transcribe()`, which takes one utterance and answers with
+   one event or None. There is no `health()`: probing is
    `loreline.health_probe`'s job, driven by the surface in the yaml.
 3. Register the factory with `@register(ProviderKind.YOURS)`, adding
-   `realtime=True` for a streaming connector. One kind can register both. See
+   `realtime=True` for a streaming connector. One kind can register both. The
+   factory receives the config, the secret store, the model and that model's
+   resolved `TranscribeCapabilities` (None when nobody curated it), which is
+   where a glossary ceiling or a declared feature conflict is read from. See
    any file in `src/loreline/stt/backends/`.
 4. Add the kind to `ProviderKind` in `src/loreline/models.py`, and its one line
    of display copy to `PRESENTATION` in

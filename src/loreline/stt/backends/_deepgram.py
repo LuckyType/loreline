@@ -15,7 +15,8 @@ Docs: https://developers.deepgram.com/reference/speech-to-text/listen-pre-record
 
 from __future__ import annotations
 
-from loreline.models import ProviderKind, Word
+from loreline.capability_config import TranscribeCapabilities
+from loreline.models import Word
 from loreline.stt.backends._ws import as_list, as_obj_dict, get_float, get_str
 from loreline.stt.base import glossary_support, glossary_terms_for
 
@@ -28,7 +29,12 @@ _DEFAULT_GLOSSARY_FIELD = "keyterm"
 
 
 def listen_params(
-    *, model: str | None, language: str, terms: list[str], realtime: bool
+    *,
+    model: str | None,
+    caps: TranscribeCapabilities | None,
+    language: str,
+    terms: list[str],
+    realtime: bool,
 ) -> list[tuple[str, str]]:
     """Query parameters both ``/v1/listen`` transports take.
 
@@ -53,12 +59,12 @@ def listen_params(
     if language:
         params.append(("language", language))
     params.extend([("diarize", "true"), ("punctuate", "true")])
-    params.extend(glossary_params(model, terms, realtime=realtime))
+    params.extend(glossary_params(caps, terms, realtime=realtime))
     return params
 
 
 def glossary_params(
-    model: str | None, terms: list[str], *, realtime: bool
+    caps: TranscribeCapabilities | None, terms: list[str], *, realtime: bool
 ) -> list[tuple[str, str]]:
     """Glossary terms as repeated query parameters, under this model's field.
 
@@ -70,9 +76,9 @@ def glossary_params(
     https://developers.deepgram.com/docs/keywords
     https://developers.deepgram.com/docs/deepgram-whisper-cloud
     """
-    support = glossary_support(ProviderKind.DEEPGRAM, model)
+    support = glossary_support(caps)
     field = support.field if support and support.field else _DEFAULT_GLOSSARY_FIELD
-    allowed = glossary_terms_for(ProviderKind.DEEPGRAM, model, terms, realtime=realtime)
+    allowed = glossary_terms_for(caps, terms, realtime=realtime)
     return [(field, term) for term in allowed]
 
 

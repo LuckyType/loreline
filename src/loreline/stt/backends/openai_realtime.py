@@ -30,6 +30,7 @@ from websockets.exceptions import WebSocketException
 from loreline.audio.chunker import Utterance
 from loreline.audio.resample import resample_pcm16
 from loreline.capabilities import surface_for
+from loreline.capability_config import TranscribeCapabilities
 from loreline.logging import get_logger
 from loreline.models import Glossary, Interaction, ProviderConfig, ProviderKind
 from loreline.secrets import SecretStore
@@ -247,6 +248,11 @@ class OpenAIRealtimeBackend(Connector[None]):
 
 @register(ProviderKind.OPENAI, realtime=True)
 def _factory(  # pyright: ignore[reportUnusedFunction]
-    config: ProviderConfig, secrets: SecretStore, model: str | None
+    config: ProviderConfig,
+    secrets: SecretStore,
+    model: str | None,
+    # Unused: this connector's prompt has no per-model ceiling in the yaml to
+    # read, so the resolved capabilities say nothing it acts on.
+    _caps: TranscribeCapabilities | None,
 ) -> OpenAIRealtimeBackend:
     return OpenAIRealtimeBackend(config, model=model, api_key=secret_for(config, secrets))

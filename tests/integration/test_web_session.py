@@ -52,21 +52,20 @@ class FakeBackend:
 
     async def transcribe(
         self,
-        audio: AsyncIterator[Utterance],
+        utterance: Utterance,
         *,
         session_id: str,
         glossary: object = None,
-    ) -> AsyncIterator[TranscriptEvent]:
+    ) -> TranscriptEvent | None:
         _ = glossary
-        async for utt in audio:
-            yield TranscriptEvent(
-                session_id=session_id,
-                source=self.config.id,
-                text="hello world",
-                start_ts=utt.start,
-                end_ts=utt.end,
-                is_final=True,
-            )
+        return TranscriptEvent(
+            session_id=session_id,
+            source=self.config.id,
+            text="hello world",
+            start_ts=utterance.start,
+            end_ts=utterance.end,
+            is_final=True,
+        )
 
     async def aclose(self) -> None:
         return None
@@ -91,14 +90,13 @@ class GlossaryRecordingBackend(FakeBackend):
 
     async def transcribe(
         self,
-        audio: AsyncIterator[Utterance],
+        utterance: Utterance,
         *,
         session_id: str,
         glossary: object = None,
-    ) -> AsyncIterator[TranscriptEvent]:
+    ) -> TranscriptEvent | None:
         self.seen.append(glossary)
-        async for event in super().transcribe(audio, session_id=session_id, glossary=glossary):
-            yield event
+        return await super().transcribe(utterance, session_id=session_id, glossary=glossary)
 
 
 class FakeSource:
@@ -442,18 +440,14 @@ class HangingBackend(FakeBackend):
 
     async def transcribe(
         self,
-        audio: AsyncIterator[Utterance],
+        utterance: Utterance,
         *,
         session_id: str,
         glossary: object = None,
-    ) -> AsyncIterator[TranscriptEvent]:
-        _ = (session_id, glossary)
-        async for _utt in audio:
-            await asyncio.sleep(3600)
-        if False:  # pragma: no cover - marks this as an async generator
-            yield TranscriptEvent(
-                session_id=session_id, source=self.config.id, text="", start_ts=0.0, end_ts=0.0
-            )
+    ) -> TranscriptEvent | None:
+        _ = (utterance, session_id, glossary)
+        await asyncio.sleep(3600)
+        return None
 
 
 async def test_stop_returns_despite_hung_backend(
@@ -587,34 +581,29 @@ class OutOfCreditBackend(FakeBackend):
 
     async def transcribe(
         self,
-        audio: AsyncIterator[Utterance],
+        utterance: Utterance,
         *,
         session_id: str,
         glossary: object = None,
-    ) -> AsyncIterator[TranscriptEvent]:
-        _ = (session_id, glossary)
-        async for _utt in audio:
-            request = httpx.Request("POST", "https://api.openai.com/v1/audio/transcriptions")
-            response = httpx.Response(
-                429,
-                json={
-                    "error": {
-                        "message": (
-                            "You have no credits remaining. Add credits to continue using "
-                            "the API at https://platform.openai.com/settings/organization/"
-                            "billing/."
-                        ),
-                        "type": "insufficient_quota",
-                        "code": "insufficient_quota",
-                    }
-                },
-                request=request,
-            )
-            raise httpx.HTTPStatusError("429", request=request, response=response)
-        if False:  # pragma: no cover - marks this as an async generator
-            yield TranscriptEvent(
-                session_id=session_id, source=self.config.id, text="", start_ts=0.0, end_ts=0.0
-            )
+    ) -> TranscriptEvent | None:
+        _ = (utterance, session_id, glossary)
+        request = httpx.Request("POST", "https://api.openai.com/v1/audio/transcriptions")
+        response = httpx.Response(
+            429,
+            json={
+                "error": {
+                    "message": (
+                        "You have no credits remaining. Add credits to continue using "
+                        "the API at https://platform.openai.com/settings/organization/"
+                        "billing/."
+                    ),
+                    "type": "insufficient_quota",
+                    "code": "insufficient_quota",
+                }
+            },
+            request=request,
+        )
+        raise httpx.HTTPStatusError("429", request=request, response=response)
 
 
 async def test_capture_keeps_recording_when_transcription_dies(

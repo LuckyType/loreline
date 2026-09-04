@@ -14,14 +14,17 @@ Docs: https://www.assemblyai.com/docs/api-reference/overview
 
 from __future__ import annotations
 
-from loreline.models import ProviderKind, Word
+from loreline.capability_config import TranscribeCapabilities
+from loreline.models import Word
 from loreline.stt.backends._ws import as_list, as_obj_dict, get_float, get_str
 from loreline.stt.base import glossary_terms_for
 
 _MS_PER_S = 1000.0
 
 
-def glossary_for(model: str | None, terms: list[str], *, realtime: bool) -> list[str]:
+def glossary_for(
+    caps: TranscribeCapabilities | None, terms: list[str], *, realtime: bool
+) -> list[str]:
     """Glossary terms for ``keyterms_prompt``, capped for this transport.
 
     Streaming rejects a request carrying more than 100 terms outright, and a
@@ -31,7 +34,7 @@ def glossary_for(model: str | None, terms: list[str], *, realtime: bool) -> list
     https://www.assemblyai.com/docs/streaming/prompting-and-keyterms
     https://www.assemblyai.com/docs/pre-recorded-audio/universal-3-5-pro/prompting
     """
-    return glossary_terms_for(ProviderKind.ASSEMBLYAI, model, terms, realtime=realtime)
+    return glossary_terms_for(caps, terms, realtime=realtime)
 
 
 def parse_words(raw_words: object, *, offset: float) -> list[Word]:

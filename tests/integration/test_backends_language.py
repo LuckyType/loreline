@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator
 
 from websockets.asyncio.server import ServerConnection, serve
 
@@ -12,8 +11,8 @@ from loreline.models import ProviderConfig, ProviderKind
 from loreline.stt.backends.deepgram import DeepgramBackend
 
 
-async def _one() -> AsyncIterator[Utterance]:
-    yield Utterance(pcm=b"\x01\x00" * 800, start=0.0, end=0.1)
+def _one() -> Utterance:
+    return Utterance(pcm=b"\x01\x00" * 800, start=0.0, end=0.1)
 
 
 async def test_deepgram_sends_config_language() -> None:
@@ -37,7 +36,6 @@ async def test_deepgram_sends_config_language() -> None:
             language="en",
         )
         backend = DeepgramBackend(config, api_key="k")
-        async for _event in backend.transcribe(_one(), session_id="s"):
-            pass
+        _ = await backend.transcribe(_one(), session_id="s")
 
     assert "language=en" in seen["path"]

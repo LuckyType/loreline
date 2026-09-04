@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Callable
+from collections.abc import Callable
 
 import httpx
 import pytest
@@ -23,11 +23,6 @@ def _backend(client: httpx.AsyncClient) -> OpenAICompatBackend:
     return OpenAICompatBackend(config, model="whisper-1", client=client, language="de")
 
 
-async def _utterances(items: list[Utterance]) -> AsyncIterator[Utterance]:
-    for item in items:
-        yield item
-
-
 async def test_transcribe_yields_final_events() -> None:
     transport = httpx.ASGITransport(app=create_app())
     async with httpx.AsyncClient(transport=transport, base_url="http://mock/v1") as client:
@@ -36,16 +31,16 @@ async def test_transcribe_yields_final_events() -> None:
             Utterance(pcm=b"\x01\x00" * 1600, start=0.0, end=0.1),
             Utterance(pcm=b"\x02\x00" * 3200, start=0.5, end=0.7),
         ]
-        events: list[TranscriptEvent] = [
-            event async for event in backend.transcribe(_utterances(utterances), session_id="s1")
-        ]
+        events = [await backend.transcribe(utterance, session_id="s1") for utterance in utterances]
 
-    assert len(events) == 2
-    assert all(e.is_final for e in events)
-    assert events[0].session_id == "s1"
-    assert events[0].source == "speaches-1"
-    assert "mock transcription" in events[0].text
-    assert events[1].start_ts == 0.5
+    assert all(e is not None for e in events)
+    first, second = events
+    assert first is not None and second is not None
+    assert first.is_final and second.is_final
+    assert first.session_id == "s1"
+    assert first.source == "speaches-1"
+    assert "mock transcription" in first.text
+    assert second.start_ts == 0.5
 
 
 async def test_transcribe_passes_glossary_prompt() -> None:
@@ -53,15 +48,11 @@ async def test_transcribe_passes_glossary_prompt() -> None:
     async with httpx.AsyncClient(transport=transport, base_url="http://mock/v1") as client:
         backend = _backend(client)
         glossary = Glossary(campaign_id="c1", terms=["Drakonia", "Thalric"])
-        utterances = [Utterance(pcm=b"\x01\x00" * 1600, start=0.0, end=0.1)]
-        events = [
-            e
-            async for e in backend.transcribe(
-                _utterances(utterances), session_id="s1", glossary=glossary
-            )
-        ]
+        utterance = Utterance(pcm=b"\x01\x00" * 1600, start=0.0, end=0.1)
+        event = await backend.transcribe(utterance, session_id="s1", glossary=glossary)
 
-    assert "prompt: Drakonia, Thalric" in events[0].text
+    assert event is not None
+    assert "prompt: Drakonia, Thalric" in event.text
 
 
 # --- verbose_json: word timings and speaker labels -----------------------
@@ -91,14 +82,12 @@ def _mock_backend(
     return OpenAICompatBackend(_verbose_config(), client=client)
 
 
-async def _single_utterance(
-    pcm: bytes = b"\x00\x00" * 800, start: float = 10.0
-) -> AsyncIterator[Utterance]:
-    yield Utterance(pcm=pcm, start=start, end=start + 0.1)
+def _single_utterance(pcm: bytes = b"\x00\x00" * 800, start: float = 10.0) -> Utterance:
+    return Utterance(pcm=pcm, start=start, end=start + 0.1)
 
 
-async def _collect_events(backend: OpenAICompatBackend) -> list[TranscriptEvent]:
-    return [e async for e in backend.transcribe(_single_utterance(), session_id="s1")]
+async def _transcribed(backend: OpenAICompatBackend) -> TranscriptEvent | None:
+    return await backend.transcribe(_single_utterance(), session_id="s1")
 
 
 _VERBOSE_BODY = {
@@ -119,7 +108,7 @@ async def test_requests_verbose_json_with_word_granularity() -> None:
         seen["body"] = request.content.decode("utf-8", "replace")
         return httpx.Response(200, json=_VERBOSE_BODY)
 
-    await _collect_events(_mock_backend(handle))
+    await _transcribed(_mock_backend(handle))
     assert "verbose_json" in seen["body"]
     assert "timestamp_granularities[]" in seen["body"]
     assert "word" in seen["body"]
@@ -129,9 +118,8 @@ async def test_word_timings_and_speakers_reach_the_event() -> None:
     def handle(_r: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json=_VERBOSE_BODY)
 
-    events = await _collect_events(_mock_backend(handle))
-    assert len(events) == 1
-    event = events[0]
+    event = await _transcribed(_mock_backend(handle))
+    assert event is not None
     assert event.text == "hello there"  # trimmed
     assert [w.text for w in event.words] == ["hello", "there"]
     # Clip-relative timings are shifted onto the session clock.
@@ -156,9 +144,10 @@ async def test_segments_are_used_when_there_are_no_words() -> None:
             },
         )
 
-    events = await _collect_events(_mock_backend(handle))
-    assert [w.speaker for w in events[0].words] == ["Speaker 2", "Speaker 3"]
-    assert events[0].words[0].start == 10.0
+    event = await _transcribed(_mock_backend(handle))
+    assert event is not None
+    assert [w.speaker for w in event.words] == ["Speaker 2", "Speaker 3"]
+    assert event.words[0].start == 10.0
 
 
 async def test_a_plain_json_body_still_works() -> None:
@@ -168,9 +157,10 @@ async def test_a_plain_json_body_still_works() -> None:
     def handle(_r: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"text": "just text"})
 
-    events = await _collect_events(_mock_backend(handle))
-    assert events[0].text == "just text"
-    assert events[0].words == []
+    event = await _transcribed(_mock_backend(handle))
+    assert event is not None
+    assert event.text == "just text"
+    assert event.words == []
 
 
 async def test_an_endpoint_rejecting_verbose_json_falls_back_once() -> None:
@@ -187,13 +177,13 @@ async def test_an_endpoint_rejecting_verbose_json_falls_back_once() -> None:
         return httpx.Response(200, json={"text": "fallback worked"})
 
     backend = _mock_backend(handle)
-    first = await _collect_events(backend)
-    assert first[0].text == "fallback worked"
+    first = await _transcribed(backend)
+    assert first is not None and first.text == "fallback worked"
     assert formats == ["verbose_json", "json"]
 
     # The downgrade sticks: the second utterance goes straight to json.
-    second = [e async for e in backend.transcribe(_single_utterance(), session_id="s1")]
-    assert second[0].text == "fallback worked"
+    second = await _transcribed(backend)
+    assert second is not None and second.text == "fallback worked"
     assert formats == ["verbose_json", "json", "json"]
 
 
@@ -204,4 +194,4 @@ async def test_a_real_error_still_raises() -> None:
         return httpx.Response(401, json={"error": {"message": "invalid api key"}})
 
     with pytest.raises(httpx.HTTPStatusError, match="invalid api key"):
-        await _collect_events(_mock_backend(handle))
+        await _transcribed(_mock_backend(handle))

@@ -31,6 +31,7 @@ import httpx
 from loreline.audio.chunker import Utterance
 from loreline.audio.wav import pcm_to_wav
 from loreline.capabilities import surface_for
+from loreline.capability_config import TranscribeCapabilities
 from loreline.logging import get_logger
 from loreline.models import Glossary, Interaction, ProviderConfig, ProviderKind, Word
 from loreline.secrets import SecretStore
@@ -85,6 +86,7 @@ class GeminiSTTBackend(HttpConnector[list[str]]):
         config: ProviderConfig,
         *,
         model: str | None = None,
+        caps: TranscribeCapabilities | None = None,
         client: httpx.AsyncClient | None = None,
         api_key: str | None = None,
         language: str | None = None,
@@ -103,15 +105,16 @@ class GeminiSTTBackend(HttpConnector[list[str]]):
         )
         self._language = language or config.language
         self._model = model
+        self._caps = caps
         self._diarize = diarize
         # capabilities.yaml declares which of the three features below this
         # model refuses to combine; the guard is what keeps them off the wire.
-        self._conflicts = FeatureConflictGuard(config, model)
+        # It reads the same resolved capabilities this connector was built with.
+        self._conflicts = FeatureConflictGuard(config, model, caps)
 
     def prepare(self, glossary: Glossary | None) -> list[str]:
         return glossary_terms_for(
-            ProviderKind.GEMINI,
-            self._model,
+            self._caps,
             glossary_terms(glossary),
             realtime=False,
             fallback_max_terms=_MAX_VOCABULARY,
@@ -221,6 +224,9 @@ class GeminiSTTBackend(HttpConnector[list[str]]):
 
 @register(ProviderKind.GEMINI)
 def _factory(  # pyright: ignore[reportUnusedFunction]
-    config: ProviderConfig, secrets: SecretStore, model: str | None
+    config: ProviderConfig,
+    secrets: SecretStore,
+    model: str | None,
+    caps: TranscribeCapabilities | None,
 ) -> GeminiSTTBackend:
-    return GeminiSTTBackend(config, model=model, api_key=secret_for(config, secrets))
+    return GeminiSTTBackend(config, model=model, caps=caps, api_key=secret_for(config, secrets))
