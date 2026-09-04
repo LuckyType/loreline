@@ -45,6 +45,7 @@ import httpx
 from loreline.audio.chunker import Utterance
 from loreline.audio.wav import pcm_to_wav
 from loreline.capabilities import surface_for
+from loreline.capability_config import TranscribeCapabilities
 from loreline.logging import get_logger
 from loreline.models import Glossary, Interaction, ProviderConfig, ProviderKind
 from loreline.secrets import SecretStore
@@ -94,6 +95,7 @@ class AssemblyAIBatchBackend(HttpConnector[list[str]]):
         config: ProviderConfig,
         *,
         model: str | None = None,
+        caps: TranscribeCapabilities | None = None,
         client: httpx.AsyncClient | None = None,
         api_key: str | None = None,
         language: str | None = None,
@@ -116,12 +118,13 @@ class AssemblyAIBatchBackend(HttpConnector[list[str]]):
         # the first does not cover), which is a better thing to inherit than a
         # value pinned here.
         self._model = model
+        self._caps = caps
         self._poll_initial_s = poll_initial_s
         self._poll_max_s = poll_max_s
         self._job_timeout_s = job_timeout_s
 
     def prepare(self, glossary: Glossary | None) -> list[str]:
-        return glossary_for(self._model, glossary_terms(glossary), realtime=False)
+        return glossary_for(self._caps, glossary_terms(glossary), realtime=False)
 
     async def transcribe_one(self, utterance: Utterance, prepared: list[str]) -> Transcription:
         wav = pcm_to_wav(utterance.pcm, sample_rate=self.config.sample_rate)
@@ -248,7 +251,10 @@ class AssemblyAIBatchBackend(HttpConnector[list[str]]):
 
 @register(ProviderKind.ASSEMBLYAI)
 def _factory(  # pyright: ignore[reportUnusedFunction]
-    config: ProviderConfig, secrets: SecretStore, model: str | None
+    config: ProviderConfig,
+    secrets: SecretStore,
+    model: str | None,
+    caps: TranscribeCapabilities | None,
 ) -> AssemblyAIBatchBackend:
     """AssemblyAI's pre-recorded models, chosen by the registry on the model.
 
@@ -256,4 +262,6 @@ def _factory(  # pyright: ignore[reportUnusedFunction]
     pair) still goes to the WebSocket connector; only a batch-only model lands
     here.
     """
-    return AssemblyAIBatchBackend(config, model=model, api_key=secret_for(config, secrets))
+    return AssemblyAIBatchBackend(
+        config, model=model, caps=caps, api_key=secret_for(config, secrets)
+    )

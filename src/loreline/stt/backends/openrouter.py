@@ -22,6 +22,7 @@ diarizer.
 
 from __future__ import annotations
 
+from loreline.capability_config import TranscribeCapabilities
 from loreline.models import ProviderConfig, ProviderKind
 from loreline.secrets import SecretStore
 from loreline.stt.backends.openai_compat import OpenAICompatBackend
@@ -31,6 +32,11 @@ from loreline.stt.registry import register
 
 @register(ProviderKind.OPENROUTER)
 def _factory(  # pyright: ignore[reportUnusedFunction]
-    config: ProviderConfig, secrets: SecretStore, model: str | None
+    config: ProviderConfig,
+    secrets: SecretStore,
+    model: str | None,
+    # Unused: this connector's prompt has no per-model ceiling in the yaml to
+    # read, so the resolved capabilities say nothing it acts on.
+    _caps: TranscribeCapabilities | None,
 ) -> OpenAICompatBackend:
     return OpenAICompatBackend(config, model=model, api_key=secret_for(config, secrets))

@@ -8,7 +8,7 @@ tests/integration keep the vendor parsing and the wire format.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Callable
+from collections.abc import Callable
 from pathlib import Path
 
 import httpx
@@ -47,11 +47,6 @@ def _word(text: str, speaker: str | None) -> Word:
     return Word(text=text, start=0.0, end=0.1, speaker=speaker)
 
 
-async def _utterances(items: list[Utterance]) -> AsyncIterator[Utterance]:
-    for item in items:
-        yield item
-
-
 class _FakeConnector(Connector[str]):
     """Answers each utterance with the next scripted result."""
 
@@ -75,25 +70,36 @@ async def _run(
     utterances: list[Utterance],
     glossary: Glossary | None = None,
 ) -> list[TranscriptEvent]:
-    return [
-        e
-        async for e in backend.transcribe(
-            _utterances(utterances), session_id="s1", glossary=glossary
-        )
-    ]
+    """Every event the connector produced for these utterances, one call each.
+
+    One call per utterance is the contract, so a test that wants two of them
+    makes two calls, exactly as the router does.
+    """
+    events: list[TranscriptEvent] = []
+    for utterance in utterances:
+        event = await backend.transcribe(utterance, session_id="s1", glossary=glossary)
+        if event is not None:
+            events.append(event)
+    return events
 
 
 # --- the loop and the event ---------------------------------------------
 
 
-async def test_prepares_once_and_hands_the_same_setup_to_every_utterance() -> None:
+async def test_prepares_the_setup_this_call_hands_to_transcribe_one() -> None:
+    """``prepare`` runs once per call, and its value is what the hook reads.
+
+    One call per utterance, so one prepare per utterance: the base no longer
+    loops, and a connector with something worth keeping between utterances
+    keeps it on the instance instead.
+    """
     first = Utterance(pcm=b"\x01\x00", start=1.0, end=1.5)
     second = Utterance(pcm=b"\x02\x00", start=2.0, end=2.5)
     backend = _FakeConnector(_config(), [Transcription("one"), Transcription("two")])
 
     events = await _run(backend, [first, second], Glossary(campaign_id="c1", terms=["a", "b"]))
 
-    assert backend.prepared_calls == 1
+    assert backend.prepared_calls == 2
     assert backend.seen == [(first, "a,b"), (second, "a,b")]
     assert [e.text for e in events] == ["one", "two"]
 
@@ -116,7 +122,7 @@ async def test_event_fields_come_from_the_config_the_utterance_and_the_result() 
     assert event.is_final is True
 
 
-async def test_none_and_empty_text_yield_no_event_but_the_stream_goes_on() -> None:
+async def test_none_and_empty_text_yield_no_event_at_all() -> None:
     results: list[Transcription | None] = [
         None,
         Transcription(""),
@@ -129,7 +135,7 @@ async def test_none_and_empty_text_yield_no_event_but_the_stream_goes_on() -> No
     events = await _run(backend, utterances)
 
     assert [e.text for e in events] == ["kept"]
-    assert len(backend.seen) == 4  # a skipped utterance does not stop the loop
+    assert len(backend.seen) == 4  # a skipped utterance costs only its own event
 
 
 async def test_a_connector_satisfies_the_backend_protocol_structurally() -> None:
@@ -200,12 +206,13 @@ async def test_a_successful_request_passes_through() -> None:
 
     async with _mock_client(handler) as client:
         backend = _FakeHttpConnector(_config(), client=client)
-        assert [e.text for e in await _run_http(backend)] == ["fine"]
+        event = await _run_http(backend)
+        assert event is not None and event.text == "fine"
 
 
-async def _run_http(backend: _FakeHttpConnector) -> list[TranscriptEvent]:
+async def _run_http(backend: _FakeHttpConnector) -> TranscriptEvent | None:
     utterance = Utterance(pcm=b"\x01\x00", start=0.0, end=0.5)
-    return [e async for e in backend.transcribe(_utterances([utterance]), session_id="s1")]
+    return await backend.transcribe(utterance, session_id="s1")
 
 
 async def test_an_injected_client_is_not_closed_by_the_connector() -> None:

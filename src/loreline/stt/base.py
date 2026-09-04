@@ -1,8 +1,8 @@
 """The STT backend contract and the Connector spine the connectors share.
 
-A backend consumes a stream of voiced ``Utterance`` chunks (from the audio
-pipeline) and yields ``TranscriptEvent`` objects, one final event per
-utterance. Two things in this module say what a backend is:
+A backend takes one voiced ``Utterance`` (from the audio pipeline) and answers
+with one final ``TranscriptEvent``, or with None when that utterance produced
+no transcript. Two things in this module say what a backend is:
 
 ``STTBackend``, the Protocol, is the contract the rest of the app consumes:
 ``SttRouter``, the session manager, the re-process jobs and every test fake
@@ -10,17 +10,25 @@ speak to it and nothing else. It is structural on purpose. Nothing subclasses
 it, the fakes in the tests satisfy it by shape, and it stays alongside the base
 class below so that a caller never has to know how a backend was built.
 
-``Connector`` is how the eight real connectors are built. Every one of them
-does the same thing per utterance: build the per-call setup once from the
-glossary, send each utterance to the vendor, turn the answer into text and
-words, and wrap that in a ``TranscriptEvent`` whose fields are the same eight
-whichever vendor answered. The base class owns that loop and the event; a
-connector supplies two hooks:
+One utterance per call, not a stream of them: every caller has always fed
+exactly one (the router drives the failover, the timeout and the diarization
+per utterance, so it could never hand over more), and a contract that promised
+a stream made eight connectors implement a loop that never ran twice. A
+connector that keeps something alive between utterances keeps it on the
+instance, as the OpenAI Realtime session's socket does.
 
-* ``prepare(glossary) -> P``: whatever one call to ``transcribe`` needs once
-  for all of its utterances (a URL with the query string built, a params tuple,
-  a capped term list, a prompt). The type ``P`` is the connector's own, and a
-  connector with nothing to prepare returns None.
+``Connector`` is how the eight real connectors are built. Every one of them
+does the same thing per utterance: build the setup from the glossary, send the
+utterance to the vendor, turn the answer into text and words, and wrap that in
+a ``TranscriptEvent`` whose fields are the same eight whichever vendor
+answered. The base class owns that shape and the event; a connector supplies
+two hooks:
+
+* ``prepare(glossary) -> P``: whatever one call to ``transcribe`` needs (a URL
+  with the query string built, a params tuple, a capped term list, a prompt).
+  The type ``P`` is the connector's own, and a connector with nothing to
+  prepare returns None. It is cheap on purpose: it shapes values already in
+  memory and talks to nobody.
 * ``transcribe_one(utterance, prepared) -> Transcription | None``: one
   utterance to the vendor and back. None means "no event for this one", which
   is what a connector says when the vendor answered but not with a transcript
@@ -44,10 +52,13 @@ connectors used to read the first word's speaker whether it had one or not,
 which turned "the first word came back unattributed" into "this utterance has
 no speaker" even when every other word was labelled.
 
-Everything below the classes is shared glossary policy read from
-capabilities.yaml, so no connector restates a per-model ceiling in code. Where
-a connector posts, and how it spells the credential, is read from the same
-file: each connector asks :func:`loreline.capabilities.surface_for` for the
+Everything below the classes is shared glossary policy applied to the model's
+``TranscribeCapabilities``, so no connector restates a per-model ceiling in
+code and none of them looks the model up again: the registry resolves the pair
+once and hands the connector the value (see
+:func:`loreline.stt.registry.create_backend`). Where a connector posts, and how
+it spells the credential, is read from the same file: each connector asks
+:func:`loreline.capabilities.surface_for` for the
 surface its kind declares for its transport, which is also where a provider
 row's ``base_url`` is applied (a socket address reaches the streaming
 connector and never the batch one, and the reverse).
@@ -56,7 +67,7 @@ connector and never the batch one, and the reverse).
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator, Iterable
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from typing import Protocol, runtime_checkable
@@ -101,14 +112,14 @@ class STTBackend(Protocol):
 
     config: ProviderConfig
 
-    def transcribe(
+    async def transcribe(
         self,
-        audio: AsyncIterator[Utterance],
+        utterance: Utterance,
         *,
         session_id: str,
         glossary: Glossary | None = None,
-    ) -> AsyncIterator[TranscriptEvent]:
-        """Transcribe a stream of utterances into transcript events."""
+    ) -> TranscriptEvent | None:
+        """Transcribe one utterance; None when it produced no transcript."""
         ...
 
     async def aclose(self) -> None:
@@ -152,9 +163,8 @@ def secret_for(config: ProviderConfig, secrets: SecretStore) -> str | None:
 class Connector[P](ABC):
     """The shared spine behind every connector: see the module docstring.
 
-    ``P`` is whatever :meth:`prepare` builds once per ``transcribe`` call and
-    :meth:`transcribe_one` reads per utterance. The base never looks inside
-    it.
+    ``P`` is whatever :meth:`prepare` builds for one ``transcribe`` call and
+    :meth:`transcribe_one` reads. The base never looks inside it.
     """
 
     config: ProviderConfig
@@ -164,7 +174,7 @@ class Connector[P](ABC):
 
     @abstractmethod
     def prepare(self, glossary: Glossary | None) -> P:
-        """Per-call setup, computed once for every utterance of one stream."""
+        """The setup one utterance's vendor call needs, from the glossary."""
 
     @abstractmethod
     async def transcribe_one(self, utterance: Utterance, prepared: P) -> Transcription | None:
@@ -172,26 +182,24 @@ class Connector[P](ABC):
 
     async def transcribe(
         self,
-        audio: AsyncIterator[Utterance],
+        utterance: Utterance,
         *,
         session_id: str,
         glossary: Glossary | None = None,
-    ) -> AsyncIterator[TranscriptEvent]:
-        prepared = self.prepare(glossary)
-        async for utterance in audio:
-            result = await self.transcribe_one(utterance, prepared)
-            if result is None or not result.text:
-                continue
-            yield TranscriptEvent(
-                session_id=session_id,
-                source=self.config.id,
-                text=result.text,
-                words=result.words,
-                speaker=first_labelled_speaker(result.words),
-                start_ts=utterance.start,
-                end_ts=utterance.end,
-                is_final=True,
-            )
+    ) -> TranscriptEvent | None:
+        result = await self.transcribe_one(utterance, self.prepare(glossary))
+        if result is None or not result.text:
+            return None
+        return TranscriptEvent(
+            session_id=session_id,
+            source=self.config.id,
+            text=result.text,
+            words=result.words,
+            speaker=first_labelled_speaker(result.words),
+            start_ts=utterance.start,
+            end_ts=utterance.end,
+            is_final=True,
+        )
 
     async def aclose(self) -> None:  # noqa: B027  (a real default, not a forgotten hook)
         """Release held resources. Nothing is held unless a connector says so."""
@@ -251,13 +259,20 @@ def transcribe_capabilities(
 ) -> TranscribeCapabilities | None:
     """Curated transcription surface for a provider+model pair.
 
-    None means "not annotated", which is not the same as "unsupported": the
-    caller keeps whatever it would have sent anyway. capabilities.yaml is where
-    the per-model traps are already written down (Deepgram nova-3 takes
-    ``keyterm`` while nova-2 takes legacy ``keywords``; AssemblyAI caps the same
-    model at 1000 terms async and 100 streaming), so a connector reads them from
-    there rather than restating them in code and drifting from the file the UI
-    renders from.
+    Called in one place, :func:`loreline.stt.registry.create_backend`, which
+    resolves the pair once per backend and hands the value to the connector.
+    Everything downstream reads the value: a connector, its glossary policy and
+    its :class:`FeatureConflictGuard` never ask the yaml which model is running,
+    so the four answers a single request used to collect cannot disagree.
+
+    None means "not annotated", which is not the same as "unsupported": an
+    unknown model, and a kind whose catalogue this repo does not curate, are
+    allowed, and the caller keeps whatever it would have sent anyway.
+    capabilities.yaml is where the per-model traps are already written down
+    (Deepgram nova-3 takes ``keyterm`` while nova-2 takes legacy ``keywords``;
+    AssemblyAI caps the same model at 1000 terms async and 100 streaming), so a
+    connector is handed them from there rather than restating them in code and
+    drifting from the file the UI renders from.
     """
     if not model:
         return None
@@ -266,9 +281,8 @@ def transcribe_capabilities(
     return entry.transcribe if entry else None
 
 
-def glossary_support(kind: ProviderKind, model: str | None) -> GlossarySupport | None:
-    """Curated keyword-biasing surface for a provider+model pair, or None."""
-    caps = transcribe_capabilities(kind, model)
+def glossary_support(caps: TranscribeCapabilities | None) -> GlossarySupport | None:
+    """The keyword-biasing surface of a resolved model, or None when unknown."""
     return caps.glossary if caps else None
 
 
@@ -292,21 +306,30 @@ class FeatureConflictGuard:
     once per *utterance*, so a log line emitted where the decision is made
     would reproduce the flood it replaces, one line per utterance for hours.
     The guard is built once with the backend, which lives for the session or
-    the job, and reports the first time it drops anything.
+    the job, and reports the first time it drops anything. It is built with the
+    model's resolved capabilities for the same reason: the conflict groups are
+    a fact about the run, read once, not a lookup per utterance.
     """
 
-    def __init__(self, config: ProviderConfig, model: str | None) -> None:
+    def __init__(
+        self,
+        config: ProviderConfig,
+        model: str | None,
+        caps: TranscribeCapabilities | None,
+    ) -> None:
         self._config = config
+        # Kept for the log line only: the caps say what conflicts, the id says
+        # which model the GM is paying for.
         self._model = model
+        self._caps = caps
         self._reported = False
 
     def allowed(self, requested: Iterable[str]) -> frozenset[str]:
         """Which of ``requested`` may be sent, reporting a drop once."""
         wanted = frozenset(requested)
-        caps = transcribe_capabilities(self._config.kind, self._model)
-        if caps is None:
+        if self._caps is None:
             return wanted
-        kept = caps.resolve_conflicts(wanted)
+        kept = self._caps.resolve_conflicts(wanted)
         dropped = wanted - kept
         if dropped and not self._reported:
             self._reported = True
@@ -339,8 +362,7 @@ def capped_terms(terms: list[str], support: GlossarySupport | None, *, realtime:
 
 
 def glossary_terms_for(
-    kind: ProviderKind,
-    model: str | None,
+    caps: TranscribeCapabilities | None,
     terms: list[str],
     *,
     realtime: bool,
@@ -348,7 +370,7 @@ def glossary_terms_for(
 ) -> list[str]:
     """The glossary terms this model will actually accept on this transport.
 
-    Two rules, both read from capabilities.yaml so no connector restates them:
+    Two rules, both facts from capabilities.yaml so no connector restates them:
     a model annotated ``glossary.supported: false`` is sent nothing at all
     rather than a parameter its endpoint ignores or rejects, and anything over
     the model's documented ceiling for this transport is trimmed here (see
@@ -359,7 +381,7 @@ def glossary_terms_for(
     that service rejects the request outright over 1000 entries, so an
     uncurated Gemini id still has to be trimmed somewhere.
     """
-    support = glossary_support(kind, model)
+    support = glossary_support(caps)
     if support is not None and not support.supported:
         return []
     limit = support.max_terms_for(realtime=realtime) if support else None

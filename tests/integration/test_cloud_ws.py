@@ -2,25 +2,25 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
-
 from websockets.asyncio.server import ServerConnection, serve
 
 from loreline.audio.chunker import Utterance
-from loreline.models import Glossary, ProviderConfig, ProviderKind, TranscriptEvent
+from loreline.models import Glossary, ProviderConfig, ProviderKind
 from loreline.stt.backends.assemblyai import AssemblyAIBackend
 from loreline.stt.backends.deepgram import DeepgramBackend
 from mocks.assemblyai_ws import assemblyai_handler
 from mocks.deepgram_ws import deepgram_handler
 
 
-async def _one_utterance() -> AsyncIterator[Utterance]:
-    yield Utterance(pcm=b"\x01\x00" * 1600, start=10.0, end=10.1)
+def _one_utterance() -> Utterance:
+    return Utterance(pcm=b"\x01\x00" * 1600, start=10.0, end=10.1)
 
 
-async def _two_utterances() -> AsyncIterator[Utterance]:
-    yield Utterance(pcm=b"\x01\x00" * 1600, start=0.0, end=0.1)
-    yield Utterance(pcm=b"\x02\x00" * 1600, start=0.5, end=0.6)
+def _two_utterances() -> list[Utterance]:
+    return [
+        Utterance(pcm=b"\x01\x00" * 1600, start=0.0, end=0.1),
+        Utterance(pcm=b"\x02\x00" * 1600, start=0.5, end=0.6),
+    ]
 
 
 def _dg_config(port: int) -> ProviderConfig:
@@ -52,13 +52,9 @@ async def test_deepgram_streaming_with_diarization() -> None:
         )
         backend = DeepgramBackend(config, api_key="secret")
         glossary = Glossary(campaign_id="c1", terms=["Drakonia"])
-        events: list[TranscriptEvent] = [
-            e
-            async for e in backend.transcribe(_one_utterance(), session_id="s1", glossary=glossary)
-        ]
+        event = await backend.transcribe(_one_utterance(), session_id="s1", glossary=glossary)
 
-    assert len(events) == 1
-    event = events[0]
+    assert event is not None
     assert event.is_final
     assert event.source == "dg-1"
     # all finals of the flush accumulated (empty lead-in dropped, both content
@@ -80,12 +76,9 @@ async def test_assemblyai_streaming_with_diarization() -> None:
             base_url=f"ws://127.0.0.1:{port}",
         )
         backend = AssemblyAIBackend(config, api_key="secret")
-        events: list[TranscriptEvent] = [
-            e async for e in backend.transcribe(_one_utterance(), session_id="s1")
-        ]
+        event = await backend.transcribe(_one_utterance(), session_id="s1")
 
-    assert len(events) == 1
-    event = events[0]
+    assert event is not None
     assert event.is_final
     # both turns of the flush accumulated (not just the first), and turn 0's
     # formatted duplicate deduplicated by turn_order (not counted twice).
@@ -99,16 +92,15 @@ async def test_assemblyai_rechunks_long_utterances() -> None:
     # The v3 endpoint rejects any single audio message outside 50-1000 ms
     # (the mock enforces it with close code 3007, like the real service), so a
     # 5 s utterance only survives if the backend re-chunks it before sending.
-    async def _long_utterance() -> AsyncIterator[Utterance]:
-        yield Utterance(pcm=b"\x01\x00" * 80000, start=0.0, end=5.0)
+    long_utterance = Utterance(pcm=b"\x01\x00" * 80000, start=0.0, end=5.0)
 
     async with serve(assemblyai_handler, "127.0.0.1", 0) as server:
         port = server.sockets[0].getsockname()[1]
         backend = AssemblyAIBackend(_aai_config(port), api_key="secret")
-        events = [e async for e in backend.transcribe(_long_utterance(), session_id="s1")]
+        event = await backend.transcribe(long_utterance, session_id="s1")
 
-    assert len(events) == 1
-    assert events[0].text == "assemblyai mock 80000 samples"
+    assert event is not None
+    assert event.text == "assemblyai mock 80000 samples"
 
 
 async def test_deepgram_one_connection_per_utterance() -> None:
@@ -125,11 +117,12 @@ async def test_deepgram_one_connection_per_utterance() -> None:
     async with serve(counting, "127.0.0.1", 0) as server:
         port = server.sockets[0].getsockname()[1]
         backend = DeepgramBackend(_dg_config(port), api_key="secret")
-        events = [e async for e in backend.transcribe(_two_utterances(), session_id="s1")]
+        events = [
+            await backend.transcribe(utterance, session_id="s1") for utterance in _two_utterances()
+        ]
         await backend.aclose()
 
-    assert len(events) == 2
-    assert events[0].text == events[1].text == "deepgram mock 1600 samples"
+    assert [e.text for e in events if e] == ["deepgram mock 1600 samples"] * 2
     assert connections == 2
 
 
@@ -146,9 +139,10 @@ async def test_assemblyai_one_session_per_utterance() -> None:
     async with serve(counting, "127.0.0.1", 0) as server:
         port = server.sockets[0].getsockname()[1]
         backend = AssemblyAIBackend(_aai_config(port), api_key="secret")
-        events = [e async for e in backend.transcribe(_two_utterances(), session_id="s1")]
+        events = [
+            await backend.transcribe(utterance, session_id="s1") for utterance in _two_utterances()
+        ]
         await backend.aclose()
 
-    assert len(events) == 2
-    assert events[0].text == events[1].text == "assemblyai mock 1600 samples"
+    assert [e.text for e in events if e] == ["assemblyai mock 1600 samples"] * 2
     assert connections == 2

@@ -30,7 +30,9 @@ _Avoid_: endpoint constant, default base URL (each was one connector's copy)
 transports served, speakers, word timings, glossary ceiling.
 
 **Connector**: The adapter for one kind over one transport, built on the `Connector` base
-and satisfying the `STTBackend` contract.
+and satisfying the `STTBackend` contract: one utterance in, one transcript event or nothing
+back. It is built with its model's capabilities already resolved, so it never asks the yaml
+which model is running.
 _Avoid_: backend (kept only in class names and the contract), provider class
 
 **Health probe**: One question per provider row, "does this key work at this surface",

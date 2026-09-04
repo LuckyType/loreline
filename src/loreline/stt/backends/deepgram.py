@@ -20,6 +20,7 @@ from websockets.exceptions import ConnectionClosedOK
 
 from loreline.audio.chunker import Utterance
 from loreline.capabilities import surface_for
+from loreline.capability_config import TranscribeCapabilities
 from loreline.logging import get_logger
 from loreline.models import Glossary, Interaction, ProviderConfig, ProviderKind, Word
 from loreline.secrets import SecretStore
@@ -52,6 +53,7 @@ class DeepgramBackend(Connector[str]):
         config: ProviderConfig,
         *,
         model: str | None = None,
+        caps: TranscribeCapabilities | None = None,
         api_key: str | None = None,
         language: str | None = None,
     ) -> None:
@@ -59,12 +61,14 @@ class DeepgramBackend(Connector[str]):
         self._api_key = api_key
         self._language = language or config.language
         self._model = model
+        self._caps = caps
         self._endpoint = surface_for(config, Interaction.TRANSCRIBE, "realtime")
         self._url = self._endpoint.url
 
     def prepare(self, glossary: Glossary | None) -> str:
         params = listen_params(
             model=self._model,
+            caps=self._caps,
             language=self._language,
             terms=glossary_terms(glossary),
             realtime=True,
@@ -128,6 +132,9 @@ def _parse_results(message: dict[str, object], *, offset: float) -> tuple[str, l
 
 @register(ProviderKind.DEEPGRAM, realtime=True)
 def _factory(  # pyright: ignore[reportUnusedFunction]
-    config: ProviderConfig, secrets: SecretStore, model: str | None
+    config: ProviderConfig,
+    secrets: SecretStore,
+    model: str | None,
+    caps: TranscribeCapabilities | None,
 ) -> DeepgramBackend:
-    return DeepgramBackend(config, model=model, api_key=secret_for(config, secrets))
+    return DeepgramBackend(config, model=model, caps=caps, api_key=secret_for(config, secrets))

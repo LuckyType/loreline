@@ -535,16 +535,15 @@ class _GatedBackend(FakeBackend):
 
     async def transcribe(
         self,
-        audio: AsyncIterator[Utterance],
+        utterance: Utterance,
         *,
         session_id: str,
         glossary: object = None,
-    ) -> AsyncIterator[TranscriptEvent]:
+    ) -> TranscriptEvent | None:
         self._seen += 1
         if self._seen > 1:
             await self._gate.wait()
-        async for event in super().transcribe(audio, session_id=session_id, glossary=glossary):
-            yield event
+        return await super().transcribe(utterance, session_id=session_id, glossary=glossary)
 
 
 def _two_utterance_capture(_req: object, _sample_rate: int) -> tuple[FakeSource, SpeechDetector]:

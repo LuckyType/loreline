@@ -9,20 +9,30 @@ shape, and the ``word_info`` annotations come back mapped onto session time.
 from __future__ import annotations
 
 import base64
-from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
 from structlog.testing import capture_logs
 
 from loreline.audio.chunker import Utterance
-from loreline.models import Glossary, ProviderConfig, ProviderKind, TranscriptEvent
+from loreline.capability_config import TranscribeCapabilities
+from loreline.models import Glossary, ProviderConfig, ProviderKind
 from loreline.stt.backends.gemini import GeminiSTTBackend
+from loreline.stt.base import transcribe_capabilities
 
 BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 # Passed in explicitly, the way the registry passes it: the connector carries no
 # default of its own any more (capabilities.yaml holds the one default there is).
 MODEL = "gemini-3.5-transcribe"
+
+
+def _caps() -> TranscribeCapabilities | None:
+    """What the registry resolves for this model and hands to the connector.
+
+    Read from capabilities.yaml exactly as ``create_backend`` reads it, so the
+    conflicts these tests exercise are the file's rule, not one restated here.
+    """
+    return transcribe_capabilities(ProviderKind.GEMINI, MODEL)
 
 
 def _config() -> ProviderConfig:
@@ -67,9 +77,8 @@ def _client(handler: Any) -> httpx.AsyncClient:
     )
 
 
-async def _utterances(items: list[Utterance]) -> AsyncIterator[Utterance]:
-    for item in items:
-        yield item
+def _utterance(start: float = 0.0) -> Utterance:
+    return Utterance(pcm=b"\x01\x00" * 1600, start=start, end=start + 0.1)
 
 
 async def test_transcribe_maps_words_onto_session_time() -> None:
@@ -85,17 +94,12 @@ async def test_transcribe_maps_words_onto_session_time() -> None:
         )
 
     async with _client(handler) as client:
-        backend = GeminiSTTBackend(_config(), model=MODEL, client=client, language="de-DE")
-        events: list[TranscriptEvent] = [
-            e
-            async for e in backend.transcribe(
-                _utterances([Utterance(pcm=b"\x01\x00" * 1600, start=12.0, end=12.5)]),
-                session_id="s1",
-            )
-        ]
+        backend = GeminiSTTBackend(
+            _config(), model=MODEL, caps=_caps(), client=client, language="de-DE"
+        )
+        event = await backend.transcribe(_utterance(12.0), session_id="s1")
 
-    assert len(events) == 1
-    event = events[0]
+    assert event is not None
     assert event.source == "gemini-1"
     assert event.is_final
     assert event.text == "Hallo Welt"
@@ -128,14 +132,7 @@ async def test_glossary_becomes_custom_vocabulary() -> None:
     async with _client(handler) as client:
         backend = GeminiSTTBackend(_config(), client=client)
         glossary = Glossary(campaign_id="c1", terms=["Drakonia", "Thalric"])
-        _ = [
-            e
-            async for e in backend.transcribe(
-                _utterances([Utterance(pcm=b"\x01\x00" * 1600, start=0.0, end=0.1)]),
-                session_id="s1",
-                glossary=glossary,
-            )
-        ]
+        _ = await backend.transcribe(_utterance(), session_id="s1", glossary=glossary)
 
     config = captured[0]["generation_config"]["transcription_config"]
     assert config["custom_vocabulary"] == ["Drakonia", "Thalric"]
@@ -163,15 +160,14 @@ async def test_glossary_and_timestamps_never_reach_the_wire_together() -> None:
         return httpx.Response(200, json=_reply([]))
 
     async with _client(handler) as client:
-        backend = GeminiSTTBackend(_config(), model=MODEL, client=client, diarize=True)
-        _ = [
-            e
-            async for e in backend.transcribe(
-                _utterances([Utterance(pcm=b"\x01\x00" * 1600, start=0.0, end=0.1)]),
-                session_id="s1",
-                glossary=Glossary(campaign_id="c1", terms=["Drakonia"]),
-            )
-        ]
+        backend = GeminiSTTBackend(
+            _config(), model=MODEL, caps=_caps(), client=client, diarize=True
+        )
+        _ = await backend.transcribe(
+            _utterance(),
+            session_id="s1",
+            glossary=Glossary(campaign_id="c1", terms=["Drakonia"]),
+        )
 
     config = captured[0]["generation_config"]["transcription_config"]
     # The glossary wins: it is what the GM switched the toggle on for.
@@ -193,14 +189,10 @@ async def test_without_a_glossary_nothing_is_dropped() -> None:
         return httpx.Response(200, json=_reply([]))
 
     async with _client(handler) as client:
-        backend = GeminiSTTBackend(_config(), model=MODEL, client=client, diarize=True)
-        _ = [
-            e
-            async for e in backend.transcribe(
-                _utterances([Utterance(pcm=b"\x01\x00" * 1600, start=0.0, end=0.1)]),
-                session_id="s1",
-            )
-        ]
+        backend = GeminiSTTBackend(
+            _config(), model=MODEL, caps=_caps(), client=client, diarize=True
+        )
+        _ = await backend.transcribe(_utterance(), session_id="s1")
 
     mode = captured[0]["generation_config"]["transcription_config"]["mode"]
     assert mode["timestamp_granularities"] == ["word"]
@@ -220,16 +212,10 @@ async def test_the_dropped_features_are_reported_once_not_per_utterance() -> Non
 
     glossary = Glossary(campaign_id="c1", terms=["Drakonia"])
     async with _client(handler) as client:
-        backend = GeminiSTTBackend(_config(), model=MODEL, client=client)
+        backend = GeminiSTTBackend(_config(), model=MODEL, caps=_caps(), client=client)
         with capture_logs() as logs:
             for start in (0.0, 1.0, 2.0):
-                utterance = Utterance(pcm=b"\x01\x00" * 1600, start=start, end=start + 0.1)
-                _ = [
-                    e
-                    async for e in backend.transcribe(
-                        _utterances([utterance]), session_id="s1", glossary=glossary
-                    )
-                ]
+                _ = await backend.transcribe(_utterance(start), session_id="s1", glossary=glossary)
 
     dropped = [line for line in logs if line["event"] == "stt.features.dropped"]
     assert len(dropped) == 1
@@ -250,13 +236,7 @@ async def test_blank_language_omits_codes_for_auto_detection() -> None:
     config.language = ""
     async with _client(handler) as client:
         backend = GeminiSTTBackend(config, client=client)
-        _ = [
-            e
-            async for e in backend.transcribe(
-                _utterances([Utterance(pcm=b"\x01\x00" * 1600, start=0.0, end=0.1)]),
-                session_id="s1",
-            )
-        ]
+        _ = await backend.transcribe(_utterance(), session_id="s1")
 
     assert "language_codes" not in captured[0]["generation_config"]["transcription_config"]
 
@@ -267,15 +247,9 @@ async def test_empty_transcript_yields_no_event() -> None:
 
     async with _client(handler) as client:
         backend = GeminiSTTBackend(_config(), client=client)
-        events = [
-            e
-            async for e in backend.transcribe(
-                _utterances([Utterance(pcm=b"\x01\x00" * 1600, start=0.0, end=0.1)]),
-                session_id="s1",
-            )
-        ]
+        event = await backend.transcribe(_utterance(), session_id="s1")
 
-    assert events == []
+    assert event is None
 
 
 async def test_incomplete_status_yields_no_event() -> None:
@@ -284,12 +258,6 @@ async def test_incomplete_status_yields_no_event() -> None:
 
     async with _client(handler) as client:
         backend = GeminiSTTBackend(_config(), client=client)
-        events = [
-            e
-            async for e in backend.transcribe(
-                _utterances([Utterance(pcm=b"\x01\x00" * 1600, start=0.0, end=0.1)]),
-                session_id="s1",
-            )
-        ]
+        event = await backend.transcribe(_utterance(), session_id="s1")
 
-    assert events == []
+    assert event is None
