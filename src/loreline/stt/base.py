@@ -27,8 +27,10 @@ connector supplies two hooks:
   (an incomplete status, an empty channel list). Empty text is skipped by the
   base, so a hook may also return a ``Transcription`` with nothing in it.
 
-``health`` stays per connector: probing is a separate concern with its own
-vendor quirks, and ``aclose`` is a no-op until a connector holds something.
+A connector has no health method. Whether a provider row works is a question
+about its declared surface and its key, not about a connector, and
+:mod:`loreline.health_probe` answers it without building one; ``aclose`` is a
+no-op until a connector holds something.
 
 ``HttpConnector`` is the one level below ``Connector`` and the last: it serves
 the four batch connectors, which post through an ``httpx.AsyncClient`` that is
@@ -64,7 +66,7 @@ import httpx
 from loreline.audio.chunker import Utterance
 from loreline.capabilities import config as capability_config
 from loreline.capability_config import GlossarySupport, TranscribeCapabilities
-from loreline.health import HealthReport, error_detail
+from loreline.health import error_detail
 from loreline.httpclient import ClientHandle
 from loreline.logging import get_logger
 from loreline.models import Glossary, ProviderConfig, ProviderKind, TranscriptEvent, Word
@@ -107,16 +109,6 @@ class STTBackend(Protocol):
         glossary: Glossary | None = None,
     ) -> AsyncIterator[TranscriptEvent]:
         """Transcribe a stream of utterances into transcript events."""
-        ...
-
-    async def health(self) -> HealthReport:
-        """Probe the endpoint and the credential, without raising.
-
-        Returns a graded :class:`~loreline.health.HealthReport` rather than a
-        bool: "reachable" and "the key works" are separate facts and used to be
-        collapsed into one, inconsistently, per connector. See
-        :mod:`loreline.health`.
-        """
         ...
 
     async def aclose(self) -> None:
@@ -177,10 +169,6 @@ class Connector[P](ABC):
     @abstractmethod
     async def transcribe_one(self, utterance: Utterance, prepared: P) -> Transcription | None:
         """One utterance to the vendor and back; None means no event for it."""
-
-    @abstractmethod
-    async def health(self) -> HealthReport:
-        """Probe the endpoint and the credential, without raising."""
 
     async def transcribe(
         self,

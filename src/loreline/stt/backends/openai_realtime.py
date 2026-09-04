@@ -30,16 +30,13 @@ from websockets.exceptions import WebSocketException
 from loreline.audio.chunker import Utterance
 from loreline.audio.resample import resample_pcm16
 from loreline.capabilities import surface_for
-from loreline.health import PROBE_TIMEOUT_S, HealthReport, HealthStatus
 from loreline.logging import get_logger
 from loreline.models import Glossary, Interaction, ProviderConfig, ProviderKind
 from loreline.secrets import SecretStore
 from loreline.stt.backends._ws import (
     as_dict,
     as_obj_dict,
-    classify_handshake_error,
     get_str,
-    probe_health,
 )
 from loreline.stt.base import Connector, Transcription, glossary_terms, secret_for
 from loreline.stt.registry import register
@@ -108,9 +105,7 @@ class OpenAIRealtimeBackend(Connector[None]):
     def _session_update(self) -> str:
         transcription: dict[str, object] = {"language": self._language}
         # A transcription session with no model named runs OpenAI's own
-        # default, which is the right thing to inherit when nobody chose - and
-        # nobody can reach this connector without choosing except the health
-        # probe, whose point is the handshake rather than the model.
+        # default, which is the right thing to inherit when nobody chose.
         if self._model:
             transcription["model"] = self._model
         if self._prompt and not self._prompt_rejected:
@@ -245,23 +240,6 @@ class OpenAIRealtimeBackend(Connector[None]):
             await self._reset_ws()  # drop the dead session; the next utterance reconnects
             raise
         return Transcription(text=transcript)
-
-    async def health(self) -> HealthReport:
-        """Open the socket and read one frame, without raising.
-
-        A rejected upgrade is a plain HTTP response, so a bad key surfaces as a
-        status code on the handshake and grades exactly like an HTTP probe -
-        which is what makes "wrong key" distinguishable from "wrong host" here
-        at all. Before, both were a bare False.
-        """
-        try:
-            async with asyncio.timeout(PROBE_TIMEOUT_S):
-                async with connect(self._url, additional_headers=self._headers) as ws:
-                    return await probe_health(ws, self._session_update())
-        except TimeoutError:
-            return HealthReport(HealthStatus.UNREACHABLE, "the socket did not open in time")
-        except (OSError, WebSocketException) as exc:
-            return classify_handshake_error(exc)
 
     async def aclose(self) -> None:
         await self._reset_ws()

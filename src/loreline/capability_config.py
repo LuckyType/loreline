@@ -357,9 +357,10 @@ class ModelSpec(_Strict):
     # connector that is written but unverified against the real API: flipping
     # one flag here is the whole release step.
     hidden: bool = False
-    # The model this file vouches for when a connector must name one and
-    # nobody chose: the health probe in POST /providers/{id}/test is the only
-    # caller left, since every action route now requires a model. Marked here,
+    # The model this file vouches for on this kind: what decides the kind's
+    # house transport (which surface the health probe asks, where an
+    # unannotated model is routed) and which model a diarizing pass runs, now
+    # that every action route requires a chosen model. Marked here,
     # per model, rather than derived from list order, because "first entry
     # wins" is silently wrong the moment someone reorders the list, and it is
     # scoped by interaction because one provider row serves several: an
@@ -772,12 +773,12 @@ class ProviderSpec(_Strict):
         """Exactly one default wherever this provider offers models at all.
 
         Two would make the answer depend on list order, which is the failure
-        the marker exists to avoid; none would leave a connector with no model
-        to name. A kind whose catalogue is discovered at runtime lists no
+        the marker exists to avoid; none would leave the kind with no house
+        transport. A kind whose catalogue is discovered at runtime lists no
         models and therefore marks none: the self-hosted one is the case where
         any default we could write down would be a guess about someone else's
-        server, and its connector needs none (its health probe is
-        ``GET /models``, and every action route now carries a chosen model).
+        server, and its connector needs none (every action route carries a
+        chosen model, and the health probe names none).
         """
         for interaction in self.interactions:
             offered = self.models_for(interaction)

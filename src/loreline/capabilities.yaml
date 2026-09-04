@@ -12,7 +12,10 @@
 # strict-filtering setting decides whether unknown models are offered.
 #
 # One model per provider and interaction carries `default: true`: the model
-# this file vouches for when a connector must name one and nobody chose. It is
+# this file vouches for on that kind. Nobody is handed it unasked (every action
+# route requires a chosen model); it decides the kind's house transport, which
+# is the surface the health probe asks and where an unannotated model is
+# routed, and which model a diarizing pass runs. It is
 # scoped by interaction because a provider row serves several at once, and it
 # is marked rather than inferred from list order so reordering a list cannot
 # silently change what runs. The loader enforces exactly one per offered

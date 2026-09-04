@@ -48,21 +48,18 @@ import json
 from dataclasses import dataclass, field
 
 from websockets.asyncio.client import ClientConnection, connect
-from websockets.exceptions import ConnectionClosedOK, WebSocketException
+from websockets.exceptions import ConnectionClosedOK
 
 from loreline.audio.chunker import Utterance
 from loreline.capabilities import surface_for
-from loreline.health import PROBE_TIMEOUT_S, HealthReport, HealthStatus
 from loreline.logging import get_logger
 from loreline.models import Glossary, Interaction, ProviderConfig, ProviderKind
 from loreline.secrets import SecretStore
 from loreline.stt.backends._ws import (
     as_dict,
     as_obj_dict,
-    classify_handshake_error,
     get_bool,
     get_str,
-    probe_health,
 )
 from loreline.stt.base import (
     Connector,
@@ -283,11 +280,10 @@ class GeminiLiveBackend(Connector[list[str]]):
             "generationConfig": {"responseModalities": ["TEXT"]},
             "inputAudioTranscription": transcription,
         }
-        # Required by the protocol, and this kind always resolves one (see the
-        # Gemini default in capabilities.yaml). Omitted rather than replaced
-        # with a guess if that marker ever goes missing: the service then says
-        # which field is absent, where a substituted model id would run the
-        # wrong one silently.
+        # Required by the protocol, and every caller of this connector has
+        # chosen one. Omitted rather than replaced with a guess if none came:
+        # the service then says which field is absent, where a substituted
+        # model id would run the wrong one silently.
         if self._model:
             setup["model"] = self._model if "/" in self._model else f"models/{self._model}"
         return {"setup": setup}
@@ -388,29 +384,6 @@ class GeminiLiveBackend(Connector[list[str]]):
                 message = as_dict(await ws.recv())
                 if _wire(message, "setupComplete", "setup_complete") is not None:
                     return
-
-    async def health(self) -> HealthReport:
-        """Open the Live session and send the setup frame, without raising.
-
-        A bad key fails the HTTP handshake before the socket upgrades, so the
-        rejection arrives as a status code on the upgrade response and is
-        graded like any other probe answer; a session that accepts the setup,
-        or that simply stays quiet, is healthy.
-
-        Note the key rides in the query string of the session URL here, which
-        is why nothing in this path echoes the URL into a detail message.
-        """
-        try:
-            async with asyncio.timeout(PROBE_TIMEOUT_S):
-                async with connect(self._session_url()) as ws:
-                    # No vocabulary: a health probe should ask the smallest
-                    # question the protocol allows, not carry a campaign's
-                    # terms.
-                    return await probe_health(ws, json.dumps(self._setup([])))
-        except TimeoutError:
-            return HealthReport(HealthStatus.UNREACHABLE, "the socket did not open in time")
-        except (OSError, WebSocketException) as exc:
-            return classify_handshake_error(exc)
 
 
 def _audio_chunks(pcm: bytes, sample_rate: int) -> list[bytes]:

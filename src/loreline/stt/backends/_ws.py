@@ -77,7 +77,7 @@ async def probe_socket(
     A rejected upgrade is a plain HTTP response, so a bad key surfaces as a
     status code on the handshake and grades exactly like an HTTP probe, which
     is what makes "wrong key" distinguishable from "wrong host" here at all.
-    What arrives after the upgrade is graded by :func:`probe_health`.
+    What arrives after the upgrade is graded by :func:`_grade_first_frame`.
 
     ``read_timeout_s`` bounds the wait for the first reply and defaults to
     :data:`SOCKET_READ_TIMEOUT_S` at call time, so a test can shorten the
@@ -88,14 +88,14 @@ async def probe_socket(
     try:
         async with asyncio.timeout(timeout_s):
             async with connect(url, additional_headers=headers) as ws:
-                return await probe_health(ws, first_frame, timeout_s=read_timeout_s)
+                return await _grade_first_frame(ws, first_frame, timeout_s=read_timeout_s)
     except TimeoutError:
         return HealthReport(HealthStatus.UNREACHABLE, "the socket did not open in time")
     except (OSError, WebSocketException) as exc:
         return classify_handshake_error(exc)
 
 
-async def probe_health(
+async def _grade_first_frame(
     ws: ClientConnection, prompt: str | None, *, timeout_s: float = SOCKET_READ_TIMEOUT_S
 ) -> HealthReport:
     """Decide reachability/auth from an already-connected STT socket.
