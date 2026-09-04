@@ -14,8 +14,6 @@ from loreline.models import (
     Glossary,
     JobStatus,
     OpenRouterRouting,
-    Protocol,
-    ProviderCaps,
     ProviderConfig,
     ProviderKind,
     ReprocessJob,
@@ -52,16 +50,14 @@ class ProviderRepository:
         await self._db.connection.execute(
             """
             INSERT INTO providers
-                (id, name, kind, base_url, auth_ref, protocol, sample_rate,
-                 language, capabilities, enabled, favorite_models, routing)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (id, name, kind, base_url, auth_ref, sample_rate,
+                 language, enabled, favorite_models, routing)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 name=excluded.name, kind=excluded.kind, base_url=excluded.base_url,
-                auth_ref=excluded.auth_ref, protocol=excluded.protocol,
-                sample_rate=excluded.sample_rate,
-                language=excluded.language, capabilities=excluded.capabilities,
-                enabled=excluded.enabled, favorite_models=excluded.favorite_models,
-                routing=excluded.routing;
+                auth_ref=excluded.auth_ref, sample_rate=excluded.sample_rate,
+                language=excluded.language, enabled=excluded.enabled,
+                favorite_models=excluded.favorite_models, routing=excluded.routing;
             """,
             (
                 provider.id,
@@ -69,10 +65,8 @@ class ProviderRepository:
                 provider.kind.value,
                 provider.base_url,
                 provider.auth_ref,
-                provider.protocol.value,
                 provider.sample_rate,
                 provider.language,
-                provider.capabilities.model_dump_json(),
                 int(provider.enabled),
                 json.dumps(provider.favorite_models),
                 provider.routing.model_dump_json() if provider.routing else None,
@@ -396,10 +390,8 @@ def _row_to_provider(row: aiosqlite.Row) -> ProviderConfig:
         kind=ProviderKind(row["kind"]),
         base_url=row["base_url"],
         auth_ref=row["auth_ref"],
-        protocol=Protocol(row["protocol"]),
         sample_rate=row["sample_rate"],
         language=row["language"],
-        capabilities=ProviderCaps.model_validate_json(row["capabilities"]),
         routing=(OpenRouterRouting.model_validate_json(row["routing"]) if row["routing"] else None),
         enabled=bool(row["enabled"]),
         favorite_models=json.loads(row["favorite_models"]),

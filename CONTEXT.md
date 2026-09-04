@@ -17,11 +17,13 @@ or generate video. Models are never interchangeable across interactions.
 
 **Transport**: How audio reaches a model: realtime (a socket that answers
 while audio is still going out) or batch (one request per utterance). A model
-may serve one or both.
-_Avoid_: protocol (that is `Protocol`, the wire enum on a ProviderConfig)
+may serve one or both. It follows the chosen model, never the provider row.
+_Avoid_: protocol (was a stored enum on a ProviderConfig that nothing read)
 
 **ProviderConfig**: One stored provider row a GM configured: a kind, a
-credential reference, an optional base URL and language.
+credential reference, an optional base URL, a language and a shortlist of
+favourite models. Nothing about what the kind can do lives on the row; that
+is the yaml's.
 
 **Surface**: How to reach a vendor for one interaction over one transport:
 the URL and the auth scheme, declared once in the yaml under the provider,
@@ -87,3 +89,11 @@ _Avoid_: prompt, vocabulary, keyterms (each is one vendor's wire name for it)
 
 **SttRouter**: Runs a session's utterances through a primary connector, fails
 over to a fallback, and applies diarization.
+
+**Diarizer**: The adapter that turns words or audio into speaker segments for
+one DiarizationMode (inline from the STT's labels, a remote sherpa-onnx
+service, OpenAI's batch model, or none). One factory, `DiarizerFactory`,
+owns construction and credential precedence: a configured OpenAI row's stored
+key, else the environment. A live session and a reprocess job get the same
+diarizer from the same factory.
+_Avoid_: diarization provider (the class name it keeps in `DiarizationProvider`)

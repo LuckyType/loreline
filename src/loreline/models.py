@@ -36,15 +36,6 @@ class Interaction(StrEnum):
     VIDEO = "video"
 
 
-class Protocol(StrEnum):
-    """Transport protocol used by a provider connector."""
-
-    WS = "ws"
-    GRPC = "grpc"
-    HTTP_SSE = "http_sse"
-    HTTP_BATCH = "http_batch"
-
-
 class DiarizationMode(StrEnum):
     """How speaker labels are produced."""
 
@@ -71,14 +62,6 @@ class JobStatus(StrEnum):
     RUNNING = "running"
     DONE = "done"
     ERROR = "error"
-
-
-class ProviderCaps(BaseModel):
-    """Declared capabilities of a provider connector."""
-
-    streaming: bool = True
-    inline_diarization: bool = False
-    vocab_param: str | None = None  # e.g. "keyterm", "word_boost", "speech_contexts"
 
 
 class ModelPrice(BaseModel):
@@ -171,7 +154,6 @@ class ProviderConfig(BaseModel):
         default=None,
         description="Secret name in the secret store; never the raw key.",
     )
-    protocol: Protocol
     # No `model` field, deliberately. One row serves every interaction its kind
     # declares - an OpenRouter provider transcribes, summarizes and generates
     # video - so a single stored model is the wrong answer for at least two of
@@ -183,7 +165,6 @@ class ProviderConfig(BaseModel):
     favorite_models: list[str] = Field(default_factory=list[str])  # picked from the live model list
     sample_rate: int = 16000
     language: str = "de"
-    capabilities: ProviderCaps = Field(default_factory=ProviderCaps)
     # OpenRouter-only, and None until the GM opts in - so the seven STT kinds'
     # stored JSON gains no field they have no use for.
     routing: OpenRouterRouting | None = None

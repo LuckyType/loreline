@@ -14,7 +14,7 @@ from loreline.llm import (
     routing_payload,
     summarize_transcript,
 )
-from loreline.models import OpenRouterRouting, Protocol, ProviderConfig, ProviderKind
+from loreline.models import OpenRouterRouting, ProviderConfig, ProviderKind
 
 _BASE_URL = "http://llm:1234/v1"
 # The injected test client keeps the base URL's path, so a probe of "/models"
@@ -27,7 +27,6 @@ def _config() -> ProviderConfig:
         id="l1",
         name="LLM",
         kind=ProviderKind.OPENAI_COMPAT,
-        protocol=Protocol.HTTP_BATCH,
         base_url=_BASE_URL,
     )
 
@@ -39,7 +38,6 @@ def _openrouter_config() -> ProviderConfig:
         id="l2",
         name="OpenRouter",
         kind=ProviderKind.OPENROUTER,
-        protocol=Protocol.HTTP_BATCH,
     )
 
 
@@ -51,7 +49,6 @@ def _gemini_config() -> ProviderConfig:
         id="l3",
         name="Gemini",
         kind=ProviderKind.GEMINI,
-        protocol=Protocol.HTTP_BATCH,
     )
 
 

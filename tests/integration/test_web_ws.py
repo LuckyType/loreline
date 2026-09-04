@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 from starlette.testclient import TestClient
-from test_web_session import FakeBackend, FakeDiarizer, capture_factory
+from test_web_session import FakeBackend, capture_factory, fake_diarizers
 
 from loreline.settings import Settings
 from loreline.web.app import create_app
@@ -26,7 +26,7 @@ def ws_client(tmp_path: Path) -> Iterator[TestClient]:
         settings,
         capture_factory=capture_factory,  # type: ignore[arg-type]
         backend_factory=FakeBackend,  # type: ignore[arg-type]
-        diarizer_factory=lambda _cfg: FakeDiarizer(),
+        diarizer_factory=fake_diarizers,
     )
     with TestClient(app) as client:
         yield client
@@ -35,7 +35,7 @@ def ws_client(tmp_path: Path) -> Iterator[TestClient]:
 def _create_provider(client: TestClient) -> str:
     resp = client.post(
         "/api/providers",
-        json={"name": "Fake", "kind": "openai_compat", "protocol": "http_batch"},
+        json={"name": "Fake", "kind": "openai_compat"},
     )
     return resp.json()["id"]
 

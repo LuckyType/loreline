@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 from starlette.testclient import TestClient
-from test_web_session import FakeBackend, FakeDiarizer, capture_factory
+from test_web_session import FakeBackend, capture_factory, fake_diarizers
 
 from loreline.audio.chunker import Utterance
 from loreline.logging import get_logger
@@ -50,7 +50,7 @@ def client(tmp_path: Path) -> Iterator[TestClient]:
         settings,
         capture_factory=capture_factory,  # type: ignore[arg-type]
         backend_factory=ChattyBackend,  # type: ignore[arg-type]
-        diarizer_factory=lambda _cfg: FakeDiarizer(),
+        diarizer_factory=fake_diarizers,
     )
     with TestClient(app) as test_client:
         yield test_client
@@ -59,7 +59,7 @@ def client(tmp_path: Path) -> Iterator[TestClient]:
 def _provider(client: TestClient) -> str:
     resp = client.post(
         "/api/providers",
-        json={"name": "Fake", "kind": "openai_compat", "protocol": "http_batch"},
+        json={"name": "Fake", "kind": "openai_compat"},
     )
     return resp.json()["id"]
 

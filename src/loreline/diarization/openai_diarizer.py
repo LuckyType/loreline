@@ -14,7 +14,8 @@ reprocess operation as a cloud alternative to the self-hosted sherpa-onnx servic
 The model only exists as a batch endpoint (not in the Realtime API), which is why
 this is a post-session pass. The upload is capped at 25 MB, so longer sessions are
 transcoded to Opus with ffmpeg first (≈25 MB ~ 13 min as 16 kHz WAV, hours as
-Opus). Auth uses the ``OPENAI_API_KEY`` environment variable.
+Opus). The key is whatever the diarizer factory resolved (a configured OpenAI
+provider's stored key, else ``OPENAI_API_KEY``); nothing is read here.
 
 Docs: https://developers.openai.com/api/docs/guides/speech-to-text#speaker-diarization
 """
@@ -22,7 +23,6 @@ Docs: https://developers.openai.com/api/docs/guides/speech-to-text#speaker-diari
 from __future__ import annotations
 
 import asyncio
-import os
 from typing import cast
 
 import httpx
@@ -48,7 +48,7 @@ class OpenAIDiarizer:
         model: str | None = None,
         client: httpx.AsyncClient | None = None,
     ) -> None:
-        self._api_key = api_key if api_key is not None else os.environ.get("OPENAI_API_KEY")
+        self._api_key = api_key
         resolved = model or default_diarizing_model(ProviderKind.OPENAI)
         if resolved is None:
             # Every OpenAI model that returns speakers has been removed from

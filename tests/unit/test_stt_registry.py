@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from loreline.models import Protocol, ProviderConfig, ProviderKind
+from loreline.models import ProviderConfig, ProviderKind
 from loreline.secrets import SecretStore
 from loreline.stt import create_backend, registry
 from loreline.stt.backends.assemblyai import AssemblyAIBackend
@@ -28,7 +28,6 @@ def _config(
         name="test",
         kind=kind,
         base_url=base_url,
-        protocol=Protocol.HTTP_BATCH,
     )
 
 

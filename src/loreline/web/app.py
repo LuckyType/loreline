@@ -15,6 +15,7 @@ from fastapi import FastAPI
 
 from loreline import __version__
 from loreline.bus import EventBus
+from loreline.diarization import BuildDiarizer, DiarizerFactory
 from loreline.logbus import LogBroadcaster
 from loreline.logging import configure_logging, get_logger
 from loreline.models import TranscriptEvent
@@ -36,7 +37,7 @@ from loreline.reprocess import ReprocessManager
 from loreline.secrets import SecretStore
 from loreline.services import ServiceManager
 from loreline.session import SessionManager
-from loreline.session.manager import BackendFactory, CaptureFactory, DiarizerFactory
+from loreline.session.manager import BackendFactory, CaptureFactory
 from loreline.session.recovery import recover_orphaned_indexes
 from loreline.settings import Settings, get_settings
 from loreline.staleness import warn_about_stale_favorites
@@ -97,7 +98,7 @@ def _build_state(
     *,
     capture_factory: CaptureFactory | None,
     backend_factory: BackendFactory | None,
-    diarizer_factory: DiarizerFactory | None,
+    diarizer_factory: BuildDiarizer | None,
     command_runner: CommandRunner | None,
     alert_client_factory: ClientFactory | None,
     video_client_factory: VideoClientFactory | None,
@@ -121,6 +122,9 @@ def _build_state(
     updater = Updater(app_dir=settings.app_dir, unit=settings.systemd_unit, runner=command_runner)
     autostart = Autostart(unit=settings.systemd_unit, runner=command_runner)
     transcript_bus: EventBus[TranscriptEvent] = EventBus()
+    # One factory for both managers, so a live session and a reprocess job
+    # build their diarizer, and resolve its key, the same way.
+    diarizers = diarizer_factory or DiarizerFactory(provider_repo, secrets)
     manager = SessionManager(
         providers=provider_repo,
         glossaries=glossary_repo,
@@ -132,7 +136,7 @@ def _build_state(
         alerter=alert_manager,
         capture_factory=capture_factory,
         backend_factory=backend_factory,
-        diarizer_factory=diarizer_factory,
+        diarizer_factory=diarizers,
     )
     reprocess_manager = ReprocessManager(
         providers=provider_repo,
@@ -144,7 +148,7 @@ def _build_state(
         audio_store=audio_store,
         transcript_bus=transcript_bus,
         backend_factory=backend_factory,
-        diarizer_factory=diarizer_factory,
+        diarizer_factory=diarizers,
     )
     video_manager = VideoManager(
         providers=provider_repo,
@@ -216,7 +220,7 @@ def create_app(
     *,
     capture_factory: CaptureFactory | None = None,
     backend_factory: BackendFactory | None = None,
-    diarizer_factory: DiarizerFactory | None = None,
+    diarizer_factory: BuildDiarizer | None = None,
     command_runner: CommandRunner | None = None,
     alert_client_factory: ClientFactory | None = None,
     video_client_factory: VideoClientFactory | None = None,
