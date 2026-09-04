@@ -5,7 +5,10 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
+import pytest
+
 from loreline.updater import Autostart, Updater
+from loreline.updater.autostart import AutostartToggleError, AutostartUnavailableError
 from loreline.updater.process import CommandResult
 
 
@@ -149,3 +152,33 @@ async def test_autostart_toggle() -> None:
     assert await autostart.set_enabled(True) is True
     assert await autostart.is_enabled() is True
     assert await autostart.set_enabled(False) is False
+
+
+async def test_autostart_unavailable_in_container() -> None:
+    def handle(argv: list[str]) -> CommandResult:
+        raise AssertionError(f"should never run a command in a container: {argv}")
+
+    autostart = Autostart(unit="loreline", runner=FakeRunner(handle), in_container=True)
+
+    with pytest.raises(AutostartUnavailableError, match="Docker deployment"):
+        await autostart.is_enabled()
+    with pytest.raises(AutostartUnavailableError, match="Docker deployment"):
+        await autostart.set_enabled(True)
+
+
+async def test_autostart_toggle_failure() -> None:
+    """The unit exists (is-enabled works) but the sudoers rule rejects the
+    enable call - a real failure, distinct from autostart being unavailable
+    on this platform, and distinct from the unit simply being disabled."""
+
+    def handle(argv: list[str]) -> CommandResult:
+        if argv[:2] == ["systemctl", "is-enabled"]:
+            return CommandResult(1, "disabled\n", "")
+        if argv[:3] == ["sudo", "systemctl", "enable"]:
+            return CommandResult(1, "", "a password is required")
+        return CommandResult(0, "", "")
+
+    autostart = Autostart(unit="loreline", runner=FakeRunner(handle))
+
+    with pytest.raises(AutostartToggleError, match="password"):
+        await autostart.set_enabled(True)

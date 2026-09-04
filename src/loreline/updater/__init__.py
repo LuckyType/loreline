@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-from loreline.updater.autostart import Autostart
+from loreline.updater.autostart import Autostart, AutostartToggleError, AutostartUnavailableError
 from loreline.updater.process import CommandResult, CommandRunner, run_command
 from loreline.updater.updater import Updater, UpdateResult
 
 __all__ = [
     "Autostart",
+    "AutostartToggleError",
+    "AutostartUnavailableError",
     "CommandResult",
     "CommandRunner",
     "UpdateResult",
