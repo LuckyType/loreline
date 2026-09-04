@@ -140,12 +140,21 @@ export type AuthScheme =
 /** How to reach a vendor for one interaction over one transport. A null url
  *  (or a `{base_url}` template) is an address only the operator can supply,
  *  through the provider row's base_url. */
+/** The cheap question the health probe asks of a surface: a path (and query)
+ *  for an HTTP surface, the first frame to send for a socket one. Null means
+ *  the default question (GET /models, or read the socket's greeting). */
+export interface HealthProbe {
+	path: string | null
+	params: Record<string, string>
+	frame: Record<string, unknown> | null
+}
+
 export interface Surface {
 	url: string | null
 	auth: AuthScheme
 	overridable: boolean
 	headers: Record<string, string>
-	health: string | null
+	health: HealthProbe | null
 	public: boolean
 }
 

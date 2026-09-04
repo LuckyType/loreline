@@ -86,11 +86,22 @@ providers:
         # wss://api.deepgram.com/v1/listen (Nova streaming); Flux streams on /v2/listen.
         # https://developers.deepgram.com/reference/speech-to-text-api/listen-streaming
         # https://developers.deepgram.com/docs/flux/quickstart
-        realtime: {url: "wss://api.deepgram.com/v1/listen", auth: token_header, overridable: true}
+        # The health probe opens this socket and sends CloseStream, which makes the
+        # service answer (Metadata) and hang up at once instead of waiting for audio.
+        realtime:
+          url: "wss://api.deepgram.com/v1/listen"
+          auth: token_header
+          overridable: true
+          health: {frame: {type: CloseStream}}
         # POST https://api.deepgram.com/v1/listen (pre-recorded): same host and path as the
         # socket, so the surface is the host and the connector adds the path.
         # https://developers.deepgram.com/reference/speech-to-text/listen-pre-recorded.md
-        batch: {url: "https://api.deepgram.com", auth: token_header, overridable: true}
+        # Probed at /v1/auth/token, which describes the calling key and answers a bad or
+        # absent one with 401 "Invalid credentials." (plain text; verified live). Not at
+        # /v1/models: that list is served to anonymous callers, 200 and the full catalogue
+        # with no Authorization header at all, so grading it would call every key healthy.
+        # https://developers.deepgram.com/reference/token-based-auth-api/grant-token
+        batch: {url: "https://api.deepgram.com", auth: token_header, overridable: true, health: /v1/auth/token}
       # GET https://api.deepgram.com/v1/models -- returns STT models with name/canonical_name/uuid/
       # architecture/languages/version.
       # https://developers.deepgram.com/reference/manage/models/list
@@ -308,11 +319,22 @@ providers:
       transcribe:
         # Streaming is a separate host from the REST API.
         # https://www.assemblyai.com/docs/speech-to-text/universal-streaming
+        # No health frame: the service greets first (a Begin message), which is what
+        # the probe reads.
         realtime: {url: "wss://streaming.assemblyai.com/v3/ws", auth: raw_header, overridable: true}
         # REST base URL (US). EU accounts use https://api.eu.assemblyai.com, which an
         # operator sets as the provider row's base_url.
         # https://www.assemblyai.com/docs/api-reference/overview  (OpenAPI server: https://api.assemblyai.com)
-        batch: {url: "https://api.assemblyai.com", auth: raw_header, overridable: true}
+        # Probed by listing one transcript, which exercises the credential: a bad or
+        # absent key is 401 {"error": "Authentication error, API token missing/invalid"}
+        # (verified live). There is no model list to ask instead; the only /models route
+        # AssemblyAI serves is its LLM gateway's.
+        # https://www.assemblyai.com/docs/api-reference/transcripts/list
+        batch:
+          url: "https://api.assemblyai.com"
+          auth: raw_header
+          overridable: true
+          health: {path: /v2/transcript, params: {limit: "1"}}
       # No catalog: no STT model-list endpoint exists. The only /models endpoint in AssemblyAI's
       # OpenAPI specs is GET https://llm-gateway.assemblyai.com/v1/models, which lists LLM Gateway
       # chat models, not STT models.
@@ -1256,7 +1278,10 @@ providers:
         # https://ai.google.dev/gemini-api/docs/live-api/live-transcribe
         realtime: {url: "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent", auth: query_key, overridable: true}
         # Native REST base, `x-goog-api-key` header; the current generation surface is the
-        # Interactions API (POST {base}/interactions). It does not serve chat.
+        # Interactions API (POST {base}/interactions). It does not serve chat. Its /models
+        # is the default health path and grades unlike the OpenAI-compatible sibling below
+        # (bad key 400 API_KEY_INVALID, no key 403; verified live), which is why the grading
+        # reads the body and not only the status.
         # https://ai.google.dev/gemini-api/docs/transcribe
         batch: {url: "https://generativelanguage.googleapis.com/v1beta", auth: goog_header, overridable: true}
       # Google's OpenAI-compatible shim, a sibling path the native base does not serve: Bearer auth.
@@ -1517,9 +1542,8 @@ providers:
     interactions: [transcribe, summarize]
     # No curated models, so no `default: true` anywhere below, and none is
     # missing: any id written here would be a guess about a server we have
-    # never seen. The connector sends no model when it has none, and the one
-    # caller that reaches it without one is the health probe
-    # (GET {base_url}/v1/models), which names no model either way.
+    # never seen. Every action route carries a chosen model, and the health
+    # probe (GET {base_url}/models) names none.
     models: []                # discovered at runtime
     # Ordered most specific first, because find() takes the first match. The
     # English-only rule has to precede the general one or "*whisper*" swallows

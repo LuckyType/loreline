@@ -75,7 +75,8 @@ class OpenAICompatBackend(HttpConnector[str | None]):
         )
         self._language = language or config.language
         self._model = model
-        self._health_path = endpoint.health or _DEFAULT_HEALTH_PATH
+        probe = endpoint.health
+        self._health_path = probe.path if probe and probe.path else _DEFAULT_HEALTH_PATH
         # None until the first response tells us whether this endpoint honours
         # verbose_json; False pins it to plain json from then on.
         self._verbose_json: bool | None = None

@@ -35,6 +35,7 @@ from urllib.parse import urlencode
 
 from loreline.capability_config import (
     CapabilityConfig,
+    HealthProbe,
     ModelPattern,
     ModelSpec,
     ProviderSpec,
@@ -78,8 +79,8 @@ class Endpoint:
     surface: Surface
 
     @property
-    def health(self) -> str | None:
-        """The probe path the surface declares, if it declares one."""
+    def health(self) -> HealthProbe | None:
+        """What the health probe asks here, if the surface says; see HealthProbe."""
         return self.surface.health
 
     def request_headers(self, api_key: str | None) -> dict[str, str]:

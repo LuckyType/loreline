@@ -6,10 +6,11 @@ import asyncio
 import json
 from typing import cast
 
-from websockets.asyncio.client import ClientConnection
+from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import InvalidHandshake, InvalidStatus, InvalidURI, WebSocketException
 
 from loreline.health import (
+    PROBE_TIMEOUT_S,
     SOCKET_READ_TIMEOUT_S,
     HealthReport,
     HealthStatus,
@@ -54,6 +55,44 @@ def get_float(mapping: dict[str, object], key: str, default: float = 0.0) -> flo
 def get_bool(mapping: dict[str, object], key: str, *, default: bool = False) -> bool:
     value = mapping.get(key)
     return value if isinstance(value, bool) else default
+
+
+async def probe_socket(
+    url: str,
+    headers: dict[str, str],
+    first_frame: str | None,
+    *,
+    timeout_s: float = PROBE_TIMEOUT_S,
+    read_timeout_s: float | None = None,
+) -> HealthReport:
+    """Open a socket, say ``first_frame`` if there is one, grade what happens.
+
+    Never raises. This is the whole of a streaming vendor's health probe, and
+    the four connectors used to carry it as four byte-identical methods that
+    differed only in the connect target and the first frame, which are now
+    the arguments: the surface's URL (the key already in the query string
+    where that is how the vendor authenticates) and headers, and the frame
+    the surface declares in capabilities.yaml, if any.
+
+    A rejected upgrade is a plain HTTP response, so a bad key surfaces as a
+    status code on the handshake and grades exactly like an HTTP probe, which
+    is what makes "wrong key" distinguishable from "wrong host" here at all.
+    What arrives after the upgrade is graded by :func:`probe_health`.
+
+    ``read_timeout_s`` bounds the wait for the first reply and defaults to
+    :data:`SOCKET_READ_TIMEOUT_S` at call time, so a test can shorten the
+    quiet-server case without waiting the real five seconds.
+    """
+    if read_timeout_s is None:
+        read_timeout_s = SOCKET_READ_TIMEOUT_S
+    try:
+        async with asyncio.timeout(timeout_s):
+            async with connect(url, additional_headers=headers) as ws:
+                return await probe_health(ws, first_frame, timeout_s=read_timeout_s)
+    except TimeoutError:
+        return HealthReport(HealthStatus.UNREACHABLE, "the socket did not open in time")
+    except (OSError, WebSocketException) as exc:
+        return classify_handshake_error(exc)
 
 
 async def probe_health(
