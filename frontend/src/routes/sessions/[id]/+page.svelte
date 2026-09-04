@@ -1,7 +1,7 @@
 <script lang="ts">
 import { ChevronDown, TriangleAlert } from '@lucide/svelte'
 import { onMount } from 'svelte'
-import { page } from '$app/stores'
+import { page } from '$app/state'
 import { actionSetup } from '$lib/actionSetup.svelte'
 import { ApiError, api } from '$lib/api'
 import {
@@ -62,7 +62,7 @@ let rpDiarMax = $state('')
 let rpUseGlossary = $state(true)
 let rpBusy = $state(false)
 
-const id = $derived($page.params.id ?? '')
+const id = $derived(page.params.id ?? '')
 const formats: ExportFormat[] = ['txt', 'md', 'srt', 'vtt', 'json']
 const formatLabels: Record<ExportFormat, string> = {
 	txt: 'Text (.txt)',
@@ -1046,10 +1046,10 @@ onMount(async () => {
 			</DialogDescription>
 		</DialogHeader>
 		<div class="flex flex-col gap-3">
-			{#each speakers as s (s)}
+			{#each speakers as s, i (s)}
 				<div class="flex flex-col gap-2">
-					<Label>{s}</Label>
-					<Input bind:value={nameForm[s]} placeholder={s} />
+					<Label for="speaker-name-{i}">{s}</Label>
+					<Input id="speaker-name-{i}" bind:value={nameForm[s]} placeholder={s} />
 				</div>
 			{/each}
 		</div>
@@ -1071,8 +1071,9 @@ onMount(async () => {
 			{/if}
 		</DialogHeader>
 		<div class="flex flex-col gap-2">
-			<Label>LLM provider</Label>
+			<Label for="summarize-provider">LLM provider</Label>
 			<Dropdown
+				id="summarize-provider"
 				bind:value={sumProvider}
 				defaultValue={actionSetup.defaults.summarize_provider}
 				options={llmProviders.map((p) => ({ value: p.id, label: p.name }))}
@@ -1080,8 +1081,9 @@ onMount(async () => {
 			/>
 		</div>
 		<div class="mt-3 flex flex-col gap-2">
-			<Label>Model</Label>
+			<Label for="summarize-model">Model</Label>
 			<ModelPicker
+				id="summarize-model"
 				provider={selectedLlm}
 				bind:value={sumModel}
 				defaultModel={sumDefault}
@@ -1090,8 +1092,9 @@ onMount(async () => {
 		</div>
 		{#if sumEfforts.length}
 			<div class="mt-3 flex flex-col gap-2">
-				<Label>Reasoning effort</Label>
+				<Label for="summarize-effort">Reasoning effort</Label>
 				<Dropdown
+					id="summarize-effort"
 					bind:value={sumEffort}
 					defaultValue={actionSetup.defaults.summarize_reasoning_effort}
 					options={[
