@@ -4,75 +4,95 @@
 
 # Loreline
 
-**Headless tabletop session transcriber** - put it in the middle of the table,
-get a speaker-attributed transcript of your session.
+Headless tabletop session transcriber. Put it in the middle of the table, get a
+speaker-attributed transcript of your session.
 
 [![CI](https://github.com/LuckyType/loreline/actions/workflows/ci.yml/badge.svg)](https://github.com/LuckyType/loreline/actions/workflows/ci.yml)
 [![License: AGPL v3](https://img.shields.io/badge/license-AGPL--3.0-blue)](./LICENSE)
 
-[![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](https://www.python.org/)
-[![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
-[![Svelte](https://img.shields.io/badge/Svelte%205-FF3E00?logo=svelte&logoColor=white)](https://svelte.dev/)
-[![Tailwind CSS](https://img.shields.io/badge/Tailwind%20CSS%204-06B6D4?logo=tailwindcss&logoColor=white)](https://tailwindcss.com/)
-[![SQLite](https://img.shields.io/badge/SQLite-003B57?logo=sqlite&logoColor=white)](https://www.sqlite.org/)
-[![Docker](https://img.shields.io/badge/Docker-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
-[![uv](https://img.shields.io/badge/uv-DE5FE9?logo=uv&logoColor=white)](https://docs.astral.sh/uv/)
-[![Ruff](https://img.shields.io/badge/Ruff-D7FF64?logo=ruff&logoColor=black)](https://docs.astral.sh/ruff/)
-
 </div>
 
-Captures the full dialog of a Pen & Paper session through a connected microphone and
-transcribes it via pluggable cloud or self-hosted speech-to-text backends, with optional
-speaker diarization. A web UI provides the live transcript, configuration, logs,
-monitoring and updates.
+Loreline records a Pen & Paper session through a connected microphone, cuts the
+audio into utterances, and sends each one to a speech-to-text vendor. Speaker
+labels are optional and come either from the vendor or from a diarization
+service you host yourself. A SvelteKit web UI shows the live transcript and
+carries the configuration, the logs and the health view.
 
-Runs on Linux x86 and Raspberry Pi ARM64. The device is a **capture + orchestrator only** -
-all STT and diarization run on remote endpoints (cloud APIs or self-hosted LAN services).
+The box that runs it captures and orchestrates, nothing more. Every STT and
+diarization model runs on a remote endpoint, a cloud API or a service on your
+LAN, so the app needs no GPU and has no GPU code path at all. It runs on Linux
+x86_64 and on a Raspberry Pi (ARM64). Python 3.12 and FastAPI on the server
+side, Svelte 5 and Tailwind 4 in the browser, SQLite for storage.
 
-## Features
+## What it does
 
-- **Capture** - continuous recording with Silero VAD utterance chunking.
-- **Pluggable STT** - Deepgram, AssemblyAI, Google Gemini, OpenAI Realtime, and any OpenAI-compatible endpoint (Speaches, whisper.cpp). A primary/fallback
-  router handles failover.
-  OpenRouter transcription (Whisper, Nova, Chirp, Voxtral…) is available for post-session
-  re-processing only - its API has no streaming mode, so it can't drive a live capture.
-  Providers are configured one per vendor, and each declares what it supports (Realtime,
-  Batch, Summarizing, Video) rather than needing a separate entry per role.
-- **Capability-scoped pickers** - every provider and model list is scoped to what it can
-  actually do, so a chat or image model is never offered for transcription. Toggleable in
-  Settings (on by default) for a model too new to be recognised, or a self-hosted server
-  with its own naming.
-- **Speaker diarization** - inline (from the STT provider), or a self-hosted sherpa-onnx
-  service (included), or off.
-- **Sessions** - SQLite persistence with per-session audio, post-session re-processing
-  (re-transcribe or re-diarize with a different provider/model), speaker renaming, and
-  LLM-generated summaries (OpenAI, OpenRouter, or any OpenAI-compatible chat endpoint -
-  Ollama, LM Studio, vLLM). OpenRouter providers can additionally pick their routing:
-  prefer the cheapest upstream provider, and/or restrict to providers that don't store
-  or train on the transcript (Zero Data Retention).
-- **Video generation** - turn a session summary into a video prompt and generate a clip via
-  OpenRouter's video models (length, resolution and aspect ratio offered per model). Runs in
-  the background; the finished file is stored alongside the session and plays in the UI
-  Default provider/model are configurable in Settings.
-- **Exports** - txt, md, srt, vtt, json.
-- **Web UI** - SvelteKit SPA served by FastAPI: live transcript, session history,
-  provider/glossary config, live logs, health and alerting. The Dashboard's transcript and
-  log panels show the running capture only; every transcript version (the live capture and
-  each re-processing run) keeps its own log file, readable from the session page.
-- **Ops** - JWT-cookie auth, push alerts, health endpoint, and self-update.
+**Capture.** Continuous recording, cut into utterances by Silero VAD.
+
+**Transcription.** Deepgram, AssemblyAI, Gemini, OpenAI and any
+OpenAI-compatible endpoint you host yourself, such as Speaches or whisper.cpp.
+Deepgram, AssemblyAI, Gemini and OpenAI each have both a streaming and a batch
+connector; the model you pick decides which one runs. A router sends utterances
+to a primary provider and fails over to a fallback.
+
+OpenRouter transcription (Whisper, Nova, Chirp, Voxtral) is batch only. Its API
+has no streaming mode, so it cannot drive a live capture and is offered for
+re-processing stored audio instead.
+
+**One row per vendor.** A configured provider is an account, not a role: a
+credential, an optional base URL, a language and a shortlist of favourite
+models. What that vendor can do, and at which URL with which auth scheme, is
+declared in `src/loreline/capabilities.yaml`, so one OpenRouter row transcribes,
+summarizes and generates video without three separate entries.
+
+**Capability-scoped pickers.** Every provider and model list is filtered to what
+the model can actually do, so a chat model is never offered for transcription.
+The "Only show compatible models" toggle under Settings, Providers turns that
+off when you need a model too new to be listed, or a self-hosted server with its
+own naming. It is on by default.
+
+**Diarization.** Inline from the STT vendor's own speaker labels, a self-hosted
+sherpa-onnx service that ships with this repo, OpenAI's batch diarization model,
+or off.
+
+**Sessions.** SQLite persistence with the audio kept per session. A stored
+session can be re-transcribed or re-diarized later with a different provider or
+model, speakers can be renamed, and a summary can be generated by OpenAI,
+OpenRouter, Gemini or any OpenAI-compatible chat endpoint such as Ollama, LM
+Studio or vLLM. An OpenRouter row can also constrain its routing: sort upstream
+providers by price, throughput or latency, refuse providers that store or train
+on the transcript, and require Zero Data Retention.
+
+**Video.** Turn a session summary into a video prompt and generate a clip
+through OpenRouter's video models, with the length, resolution and aspect ratio
+each model offers. The job runs in the background and the finished file is
+stored with the session and plays in the UI. Settings holds the default provider
+and model.
+
+**Exports.** txt, md, srt, vtt, json.
+
+**Web UI.** A SvelteKit SPA served by FastAPI: live transcript, session history,
+provider and glossary config, live logs, health and alerting. The dashboard's
+transcript and log panels follow the running capture only. Every transcript
+version, the live capture and each re-processing run, keeps its own log file,
+readable from the session page.
+
+**Ops.** JWT cookie auth, push alerts, a `/api/system/healthz` endpoint, and
+self-update on the source deployment.
 
 ## Configuration
 
-Settings come from environment variables (prefix `LORELINE_`) or a `.env` file. See
-[`.env.example`](./.env.example). API keys entered via the UI are stored in
-`data/secrets.json` (`0600`); environment variables override stored secrets.
+Settings come from environment variables with the `LORELINE_` prefix, or from a
+`.env` file. See [`.env.example`](./.env.example). API keys entered in the UI
+are stored in `data/secrets.json` with mode `0600`; a `LORELINE_SECRET_<NAME>`
+environment variable overrides the stored value.
 
 ## Deployment
 
-**Docker Compose is the recommended path** - `deploy/install.sh` installs Docker if it's
-missing and brings the whole stack up; nothing else needs installing on the host. A
-source+systemd deployment (no container runtime at all) is also supported for boxes where
-that's a hard requirement - see [Source + systemd](#source--systemd) below.
+Docker Compose is the recommended path. `deploy/install.sh` installs Docker if
+it is missing and brings the whole stack up, so nothing else needs installing on
+the host. A source plus systemd deployment with no container runtime is also
+supported, for boxes where that is a hard requirement. See
+[Source and systemd](#source-and-systemd).
 
 ### Docker Compose
 
@@ -82,51 +102,51 @@ cd /opt/loreline
 bash deploy/install.sh
 ```
 
-The installer is interactive with sensible defaults - confirm once and it installs Docker
-Engine + the Compose plugin (via apt) if needed, generates a login password, detects
-whether the host has a microphone, brings the stack up, and prints where to reach it.
-Answer "no" at the first prompt to choose the port, password, mic passthrough, self-hosted
-STT/diarization, and auto-updates individually. `bash deploy/install.sh --defaults` skips
-all prompts, for scripted installs.
+The installer is interactive. Confirm once and it installs Docker Engine and the
+Compose plugin from apt if needed, generates a login password, detects whether
+the host has a microphone, brings the stack up, and prints where to reach it.
+Answer "no" at the first prompt to choose the port, password, mic passthrough,
+self-hosted STT and diarization, and auto-updates one at a time.
+`bash deploy/install.sh --defaults` skips every prompt, for scripted installs.
 
-The app, its dependencies, and the built UI all live inside the image; nothing else goes
-on the host.
+The app, its dependencies and the built UI all live inside the image.
 
-- The app is reachable directly at `http://<host>:8000`, or via Caddy at
-  `https://<host>` (self-signed on-demand TLS - expect a browser warning until you trust
-  Caddy's local CA) / `http://<host>` (plain, no redirect, so you're never locked out
-  before trusting that CA).
-- `./data` is bind-mounted in, so the SQLite DB and secrets persist across
-  `docker compose up`/`down`.
-- Real microphone capture needs `/dev/snd` passed through - already on by default in
-  `docker-compose.yml`. **Linux Docker host only**: Docker Desktop on macOS/Windows runs
-  containers in a VM with no path to the host's native audio devices, so mic capture can't
-  work there regardless - comment that line out there (or on a Linux box with no local mic
-  at all, e.g. one only orchestrating remote STT).
-- A Bluetooth mic (or anything else only reachable via the host's PipeWire/PulseAudio
-  session, not a raw ALSA `hw:` device) needs its own setup -
-  `deploy/setup-bluetooth-audio.sh` walks through pairing and wiring the host session into
-  the container. Not needed for a wired/USB mic.
-- The image is CPU-only (no CUDA) and works on any x86_64/ARM64 host, including an
-  AMD-GPU or GPU-less mini PC - nothing in this app has a GPU-accelerated code path.
-- Self-hosted STT/diarization are opt-in (a multi-GB model download or manual ONNX files
-  otherwise), not part of the default `up`:
-  `docker compose --profile local-stt up -d` / `--profile diarization`.
+- The app answers directly on `http://<host>:8000`, and through Caddy on
+  `https://<host>` and `http://<host>`. TLS is self-signed on demand, so expect
+  a browser warning until you trust Caddy's local CA. The plain HTTP port does
+  not redirect, so you are never locked out before trusting that CA.
+- `./data` is bind-mounted, so the SQLite database and the secrets survive
+  `docker compose down` and `up`.
+- Microphone capture needs `/dev/snd` passed through, which
+  `docker-compose.yml` already does. This works on a Linux Docker host only.
+  Docker Desktop on macOS and Windows runs containers in a VM with no path to
+  the host's audio devices, so comment that line out there, and on any box with
+  no local mic.
+- A Bluetooth mic, or anything else reachable only through the host's
+  PipeWire/PulseAudio session rather than as a raw ALSA `hw:` device, needs
+  more setup. `deploy/setup-bluetooth-audio.sh` handles the pairing and wires
+  the host session into the container. A wired or USB mic needs none of it. See
+  [`docs/DEPLOYMENT-NOTES.md`](./docs/DEPLOYMENT-NOTES.md) for why.
+- The image is CPU-only, no CUDA, and runs on any x86_64 or ARM64 host.
+- Self-hosted STT and diarization are opt-in, since each pulls a multi-GB model
+  download or manual ONNX files: `docker compose --profile local-stt up -d` and
+  `--profile diarization`.
 
-**Updating:** self-update from the web UI isn't available in a Docker deployment - handing
-the container the Docker-socket access it'd need to restart itself is effectively root on
-the host, not a trade this project makes for you silently. Update from the host instead:
+The web UI's update button is not available in a Docker deployment. Handing the
+container the Docker socket access it would need to restart itself is
+effectively root on the host, and that is not a trade this project makes for you
+silently. Update from the host instead:
 
 ```bash
-deploy/update.sh                                          # git pull + compose pull + up -d
-sudo systemctl enable --now loreline-update.timer          # or: daily, automatic
+deploy/update.sh                                   # git pull + compose pull + up -d
+sudo systemctl enable --now loreline-update.timer  # or: daily, automatic
 ```
 
-### Source + systemd
+### Source and systemd
 
-For a box where a container runtime is a hard no. Needs `uv` and Node on the host directly
-(`deploy/install-source.sh` installs the system packages; `uv` itself needs installing
-first):
+For a box where a container runtime is a hard no. This needs `uv` and Node on
+the host. `deploy/install-source.sh` installs the system packages, but `uv`
+itself has to be there first:
 
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -141,44 +161,44 @@ cd /opt/loreline
 bash deploy/install-source.sh
 ```
 
-`APP_DIR` (default `/opt/loreline`) and `SERVICE_USER` (default `loreline`) are overridable
-via env vars. The script creates the system user (in the `audio` group), installs
-`libportaudio2`/`libgomp1` (native deps for the `audio` extra) and `nodejs`/`npm`, runs
-`uv sync --extra audio --extra providers`, builds the SvelteKit UI (`frontend/build` - the
-app serves nothing at `/` without this), and installs the systemd unit +
-`deploy/sudoers.d/loreline` (grants the service user passwordless `systemctl {start,stop,
-restart,enable,disable,is-enabled,is-active} loreline` only - nothing broader - for the
-web UI's autostart toggle and self-update).
+`APP_DIR` defaults to `/opt/loreline` and `SERVICE_USER` to `loreline`; both are
+overridable through environment variables. The script creates the system user in
+the `audio` group, installs `libportaudio2` and `libgomp1` for the `audio`
+extra plus `nodejs` and `npm`, runs `uv sync --extra audio --extra providers`,
+builds the SvelteKit UI into `frontend/build`, and installs the systemd unit and
+`deploy/sudoers.d/loreline`. Without that frontend build the app serves nothing
+at `/`. The sudoers rule grants the service user passwordless `systemctl` for
+`start`, `stop`, `restart`, `enable`, `disable`, `is-enabled` and `is-active` on
+the `loreline` unit and nothing else, which is what the autostart toggle and the
+self-update need.
 
-**Configure.** Copy `.env.example` to `/opt/loreline/.env` and adjust at least:
+Copy `.env.example` to `/opt/loreline/.env` and adjust it:
 
 ```bash
 sudo -u loreline cp /opt/loreline/.env.example /opt/loreline/.env
 sudo -u loreline "$EDITOR" /opt/loreline/.env
 ```
 
-- `LORELINE_HOST=0.0.0.0` - the default `127.0.0.1` only accepts local connections;
-  without this the app won't be reachable from elsewhere on the LAN.
-- `LORELINE_AUTH_PASSWORD` - set this before exposing the box beyond a trusted LAN; empty
-  disables login entirely. Leave `LORELINE_JWT_SECRET` unset - a random one is generated
-  and persisted to `data/secrets.json` on first start.
-- `LORELINE_ENVIRONMENT=prod`, `LORELINE_LOG_JSON=true` for structured logs.
+- `LORELINE_HOST=0.0.0.0`. The default `127.0.0.1` accepts local connections
+  only, so without this the app is unreachable from the rest of the LAN.
+- `LORELINE_AUTH_PASSWORD`. Set this before exposing the box beyond a trusted
+  LAN; an empty value disables login entirely. Leave `LORELINE_JWT_SECRET`
+  unset, since a random one is generated and persisted to `data/secrets.json` on
+  first start.
+- `LORELINE_ENVIRONMENT=prod` and `LORELINE_LOG_JSON=true` for structured logs.
 
-See [Configuration](#configuration) for the full variable list, including
-`LORELINE_SECRET_<NAME>` overrides for provider API keys.
-
-**Start it:**
+Start it:
 
 ```bash
 sudo systemctl start loreline
 curl http://127.0.0.1:8000/api/system/healthz
 ```
 
-Autostart-on-boot is installed but disabled by default - enable it from the web UI
-(Settings → System) or with `sudo systemctl enable loreline`.
+Autostart on boot is installed but disabled. Enable it from Settings, System in
+the web UI, or with `sudo systemctl enable loreline`.
 
-**Migrating an existing `data/` dir** (e.g. moving providers/sessions from a dev machine
-so they don't need to be recreated): stop the service, checkpoint the WAL so the DB file is
+To move an existing `data/` directory, say to carry providers and sessions over
+from a dev machine, stop the service, checkpoint the WAL so the database file is
 self-consistent, copy both files, fix ownership, restart:
 
 ```bash
@@ -194,25 +214,26 @@ sudo chmod 600 /opt/loreline/data/secrets.json
 sudo systemctl start loreline
 ```
 
-**Self-update:** the web UI's Update button runs `deploy/update-source.sh` as the service
-user - `git pull --ff-only`, `uv sync`, rebuild the frontend, then restart itself via the
-sudoers rule above. A rollback to any prior commit is available from the same page.
+Here the web UI's update button does work. It runs `deploy/update-source.sh` as
+the service user: `git pull --ff-only`, `uv sync`, a frontend rebuild, then a
+restart through the sudoers rule above. The same page rolls back to any earlier
+commit.
 
-**LXC-specific note:** if the container needs to capture audio itself, the host's sound
-device has to be passed through explicitly (e.g. an `lxc.mount.entry` / Proxmox `dev0:`
-line for `/dev/snd`) and the container's `loreline` user added to the `audio` group, same
-as on bare metal. A container used purely as an orchestrator against remote STT - no local
-mic - needs no audio passthrough at all.
+On LXC, a container that captures audio itself needs the host's sound device
+passed through explicitly, through an `lxc.mount.entry` or a Proxmox `dev0:`
+line for `/dev/snd`, and its `loreline` user added to the `audio` group, the
+same as on bare metal. A container that only orchestrates remote STT needs no
+audio passthrough.
 
 ## Contributing
 
-Bug reports and pull requests are welcome - see
-[`docs/CONTRIBUTING.md`](./docs/CONTRIBUTING.md) for local setup, the checks CI runs, a
-map of the codebase, and how to add a new STT backend.
+Bug reports and pull requests are welcome. See
+[`docs/CONTRIBUTING.md`](./docs/CONTRIBUTING.md) for local setup, the checks CI
+runs, a map of the codebase, and how to add an STT backend.
 
 ## License
 
-[GNU AGPL-3.0](./LICENSE) - free to use, modify and distribute, including commercially.
-
-If you modify Loreline and make it available to others over a network, AGPL section 13
-requires you to offer those users the corresponding source of your modified version.
+[GNU AGPL-3.0](./LICENSE). Free to use, modify and distribute, including
+commercially. If you modify Loreline and make it available to others over a
+network, AGPL section 13 requires you to offer those users the corresponding
+source of your modified version.
