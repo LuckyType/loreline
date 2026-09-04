@@ -15,13 +15,24 @@ import httpx
 from structlog.testing import capture_logs
 
 from loreline.audio.chunker import Utterance
+from loreline.capability_config import TranscribeCapabilities
 from loreline.models import Glossary, ProviderConfig, ProviderKind
 from loreline.stt.backends.gemini import GeminiSTTBackend
+from loreline.stt.base import transcribe_capabilities
 
 BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 # Passed in explicitly, the way the registry passes it: the connector carries no
 # default of its own any more (capabilities.yaml holds the one default there is).
 MODEL = "gemini-3.5-transcribe"
+
+
+def _caps() -> TranscribeCapabilities | None:
+    """What the registry resolves for this model and hands to the connector.
+
+    Read from capabilities.yaml exactly as ``create_backend`` reads it, so the
+    conflicts these tests exercise are the file's rule, not one restated here.
+    """
+    return transcribe_capabilities(ProviderKind.GEMINI, MODEL)
 
 
 def _config() -> ProviderConfig:
@@ -83,7 +94,9 @@ async def test_transcribe_maps_words_onto_session_time() -> None:
         )
 
     async with _client(handler) as client:
-        backend = GeminiSTTBackend(_config(), model=MODEL, client=client, language="de-DE")
+        backend = GeminiSTTBackend(
+            _config(), model=MODEL, caps=_caps(), client=client, language="de-DE"
+        )
         event = await backend.transcribe(_utterance(12.0), session_id="s1")
 
     assert event is not None
@@ -147,7 +160,9 @@ async def test_glossary_and_timestamps_never_reach_the_wire_together() -> None:
         return httpx.Response(200, json=_reply([]))
 
     async with _client(handler) as client:
-        backend = GeminiSTTBackend(_config(), model=MODEL, client=client, diarize=True)
+        backend = GeminiSTTBackend(
+            _config(), model=MODEL, caps=_caps(), client=client, diarize=True
+        )
         _ = await backend.transcribe(
             _utterance(),
             session_id="s1",
@@ -174,7 +189,9 @@ async def test_without_a_glossary_nothing_is_dropped() -> None:
         return httpx.Response(200, json=_reply([]))
 
     async with _client(handler) as client:
-        backend = GeminiSTTBackend(_config(), model=MODEL, client=client, diarize=True)
+        backend = GeminiSTTBackend(
+            _config(), model=MODEL, caps=_caps(), client=client, diarize=True
+        )
         _ = await backend.transcribe(_utterance(), session_id="s1")
 
     mode = captured[0]["generation_config"]["transcription_config"]["mode"]
@@ -195,7 +212,7 @@ async def test_the_dropped_features_are_reported_once_not_per_utterance() -> Non
 
     glossary = Glossary(campaign_id="c1", terms=["Drakonia"])
     async with _client(handler) as client:
-        backend = GeminiSTTBackend(_config(), model=MODEL, client=client)
+        backend = GeminiSTTBackend(_config(), model=MODEL, caps=_caps(), client=client)
         with capture_logs() as logs:
             for start in (0.0, 1.0, 2.0):
                 _ = await backend.transcribe(_utterance(start), session_id="s1", glossary=glossary)

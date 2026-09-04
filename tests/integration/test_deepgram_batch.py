@@ -21,6 +21,7 @@ import httpx
 from loreline.audio.chunker import Utterance
 from loreline.models import Glossary, ProviderConfig, ProviderKind, TranscriptEvent
 from loreline.stt.backends.deepgram_batch import DeepgramBatchBackend
+from loreline.stt.base import transcribe_capabilities
 
 BASE_URL = "https://api.deepgram.com"
 
@@ -73,8 +74,19 @@ async def _run(
     glossary: Glossary | None = None,
     start: float = 0.0,
 ) -> TranscriptEvent | None:
+    """One utterance through the connector, built the way the registry builds it.
+
+    The capabilities come from the same accessor ``create_backend`` uses, so
+    the per-model biasing field these tests pin is still the yaml's answer for
+    this model and not one restated here.
+    """
     async with _client(handler) as client:
-        backend = DeepgramBatchBackend(_config(), model=model, client=client)
+        backend = DeepgramBatchBackend(
+            _config(),
+            model=model,
+            caps=transcribe_capabilities(ProviderKind.DEEPGRAM, model),
+            client=client,
+        )
         return await backend.transcribe(_one(start), session_id="s1", glossary=glossary)
 
 

@@ -23,6 +23,7 @@ import httpx
 from loreline.audio.chunker import Utterance
 from loreline.audio.wav import pcm_to_wav
 from loreline.capabilities import surface_for
+from loreline.capability_config import TranscribeCapabilities
 from loreline.logging import get_logger
 from loreline.models import Glossary, Interaction, ProviderConfig, ProviderKind, Word
 from loreline.secrets import SecretStore
@@ -127,14 +128,24 @@ class OpenAICompatBackend(HttpConnector[str | None]):
 
 @register(ProviderKind.OPENAI_COMPAT)
 def _factory(  # pyright: ignore[reportUnusedFunction]
-    config: ProviderConfig, secrets: SecretStore, model: str | None
+    config: ProviderConfig,
+    secrets: SecretStore,
+    model: str | None,
+    # Unused: this connector's prompt has no per-model ceiling in the yaml to
+    # read, so the resolved capabilities say nothing it acts on.
+    _caps: TranscribeCapabilities | None,
 ) -> OpenAICompatBackend:
     return OpenAICompatBackend(config, model=model, api_key=secret_for(config, secrets))
 
 
 @register(ProviderKind.OPENAI)
 def _openai_batch_factory(  # pyright: ignore[reportUnusedFunction]
-    config: ProviderConfig, secrets: SecretStore, model: str | None
+    config: ProviderConfig,
+    secrets: SecretStore,
+    model: str | None,
+    # Unused: this connector's prompt has no per-model ceiling in the yaml to
+    # read, so the resolved capabilities say nothing it acts on.
+    _caps: TranscribeCapabilities | None,
 ) -> OpenAICompatBackend:
     """OpenAI cloud's batch transcription models (whisper-1, gpt-transcribe).
 

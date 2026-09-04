@@ -28,6 +28,7 @@ import pytest
 from loreline.audio.chunker import Utterance
 from loreline.models import Glossary, ProviderConfig, ProviderKind, TranscriptEvent
 from loreline.stt.backends.assemblyai_batch import AssemblyAIBatchBackend
+from loreline.stt.base import transcribe_capabilities
 
 BASE_URL = "https://api.assemblyai.com"
 UPLOAD_URL = "https://cdn.assemblyai.com/upload/abc123"
@@ -114,6 +115,9 @@ def _backend(
     return AssemblyAIBatchBackend(
         _config(),
         model=model,
+        # Resolved the way create_backend resolves it, so the per-model
+        # keyterm ceiling these tests pin stays the yaml's answer.
+        caps=transcribe_capabilities(ProviderKind.ASSEMBLYAI, model),
         client=client,
         poll_initial_s=0.001,
         poll_max_s=poll_max_s,

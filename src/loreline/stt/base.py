@@ -52,10 +52,13 @@ connectors used to read the first word's speaker whether it had one or not,
 which turned "the first word came back unattributed" into "this utterance has
 no speaker" even when every other word was labelled.
 
-Everything below the classes is shared glossary policy read from
-capabilities.yaml, so no connector restates a per-model ceiling in code. Where
-a connector posts, and how it spells the credential, is read from the same
-file: each connector asks :func:`loreline.capabilities.surface_for` for the
+Everything below the classes is shared glossary policy applied to the model's
+``TranscribeCapabilities``, so no connector restates a per-model ceiling in
+code and none of them looks the model up again: the registry resolves the pair
+once and hands the connector the value (see
+:func:`loreline.stt.registry.create_backend`). Where a connector posts, and how
+it spells the credential, is read from the same file: each connector asks
+:func:`loreline.capabilities.surface_for` for the
 surface its kind declares for its transport, which is also where a provider
 row's ``base_url`` is applied (a socket address reaches the streaming
 connector and never the batch one, and the reverse).
@@ -256,13 +259,20 @@ def transcribe_capabilities(
 ) -> TranscribeCapabilities | None:
     """Curated transcription surface for a provider+model pair.
 
-    None means "not annotated", which is not the same as "unsupported": the
-    caller keeps whatever it would have sent anyway. capabilities.yaml is where
-    the per-model traps are already written down (Deepgram nova-3 takes
-    ``keyterm`` while nova-2 takes legacy ``keywords``; AssemblyAI caps the same
-    model at 1000 terms async and 100 streaming), so a connector reads them from
-    there rather than restating them in code and drifting from the file the UI
-    renders from.
+    Called in one place, :func:`loreline.stt.registry.create_backend`, which
+    resolves the pair once per backend and hands the value to the connector.
+    Everything downstream reads the value: a connector, its glossary policy and
+    its :class:`FeatureConflictGuard` never ask the yaml which model is running,
+    so the four answers a single request used to collect cannot disagree.
+
+    None means "not annotated", which is not the same as "unsupported": an
+    unknown model, and a kind whose catalogue this repo does not curate, are
+    allowed, and the caller keeps whatever it would have sent anyway.
+    capabilities.yaml is where the per-model traps are already written down
+    (Deepgram nova-3 takes ``keyterm`` while nova-2 takes legacy ``keywords``;
+    AssemblyAI caps the same model at 1000 terms async and 100 streaming), so a
+    connector is handed them from there rather than restating them in code and
+    drifting from the file the UI renders from.
     """
     if not model:
         return None
@@ -271,9 +281,8 @@ def transcribe_capabilities(
     return entry.transcribe if entry else None
 
 
-def glossary_support(kind: ProviderKind, model: str | None) -> GlossarySupport | None:
-    """Curated keyword-biasing surface for a provider+model pair, or None."""
-    caps = transcribe_capabilities(kind, model)
+def glossary_support(caps: TranscribeCapabilities | None) -> GlossarySupport | None:
+    """The keyword-biasing surface of a resolved model, or None when unknown."""
     return caps.glossary if caps else None
 
 
@@ -297,21 +306,30 @@ class FeatureConflictGuard:
     once per *utterance*, so a log line emitted where the decision is made
     would reproduce the flood it replaces, one line per utterance for hours.
     The guard is built once with the backend, which lives for the session or
-    the job, and reports the first time it drops anything.
+    the job, and reports the first time it drops anything. It is built with the
+    model's resolved capabilities for the same reason: the conflict groups are
+    a fact about the run, read once, not a lookup per utterance.
     """
 
-    def __init__(self, config: ProviderConfig, model: str | None) -> None:
+    def __init__(
+        self,
+        config: ProviderConfig,
+        model: str | None,
+        caps: TranscribeCapabilities | None,
+    ) -> None:
         self._config = config
+        # Kept for the log line only: the caps say what conflicts, the id says
+        # which model the GM is paying for.
         self._model = model
+        self._caps = caps
         self._reported = False
 
     def allowed(self, requested: Iterable[str]) -> frozenset[str]:
         """Which of ``requested`` may be sent, reporting a drop once."""
         wanted = frozenset(requested)
-        caps = transcribe_capabilities(self._config.kind, self._model)
-        if caps is None:
+        if self._caps is None:
             return wanted
-        kept = caps.resolve_conflicts(wanted)
+        kept = self._caps.resolve_conflicts(wanted)
         dropped = wanted - kept
         if dropped and not self._reported:
             self._reported = True
@@ -344,8 +362,7 @@ def capped_terms(terms: list[str], support: GlossarySupport | None, *, realtime:
 
 
 def glossary_terms_for(
-    kind: ProviderKind,
-    model: str | None,
+    caps: TranscribeCapabilities | None,
     terms: list[str],
     *,
     realtime: bool,
@@ -353,7 +370,7 @@ def glossary_terms_for(
 ) -> list[str]:
     """The glossary terms this model will actually accept on this transport.
 
-    Two rules, both read from capabilities.yaml so no connector restates them:
+    Two rules, both facts from capabilities.yaml so no connector restates them:
     a model annotated ``glossary.supported: false`` is sent nothing at all
     rather than a parameter its endpoint ignores or rejects, and anything over
     the model's documented ceiling for this transport is trimmed here (see
@@ -364,7 +381,7 @@ def glossary_terms_for(
     that service rejects the request outright over 1000 entries, so an
     uncurated Gemini id still has to be trimmed somewhere.
     """
-    support = glossary_support(kind, model)
+    support = glossary_support(caps)
     if support is not None and not support.supported:
         return []
     limit = support.max_terms_for(realtime=realtime) if support else None

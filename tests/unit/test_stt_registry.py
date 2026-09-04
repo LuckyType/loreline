@@ -17,6 +17,7 @@ from loreline.stt.backends.gemini import GeminiSTTBackend
 from loreline.stt.backends.gemini_live import GeminiLiveBackend
 from loreline.stt.backends.openai_compat import OpenAICompatBackend
 from loreline.stt.backends.openai_realtime import OpenAIRealtimeBackend
+from loreline.stt.base import transcribe_capabilities
 from loreline.stt.registry import registered_kinds
 
 
@@ -178,3 +179,38 @@ class TestModelResolution:
             "universal-3-5-pro",
         )
         assert isinstance(backend, AssemblyAIBackend)
+
+
+class TestResolvedCapabilities:
+    """The pair is looked up once, here, and the value reaches the connector.
+
+    Before this, a start request resolved the same model four times: the
+    session manager, this registry, and twice inside the connector (its
+    glossary policy and its conflict guard). Four readings of one fact are
+    four chances to answer differently about which model is running.
+    """
+
+    def _secrets(self, tmp_path: Path) -> SecretStore:
+        return SecretStore(tmp_path / "secrets.json")
+
+    def test_a_curated_model_arrives_as_its_capabilities(self, tmp_path: Path) -> None:
+        backend = create_backend(
+            _config(ProviderKind.DEEPGRAM, base_url=None), self._secrets(tmp_path), "nova-3"
+        )
+        assert isinstance(backend, DeepgramBackend)
+        caps = backend._caps  # pyright: ignore[reportPrivateUsage]
+        assert caps is transcribe_capabilities(ProviderKind.DEEPGRAM, "nova-3")
+        # The per-model trap the connector now reads off the value it was
+        # given rather than looking up again: nova-3 biases with `keyterm`.
+        assert caps is not None
+        assert caps.glossary.field == "keyterm"
+
+    def test_an_unknown_model_is_allowed_and_carries_no_capabilities(self, tmp_path: Path) -> None:
+        """A model nobody curated still runs; it just annotates nothing."""
+        backend = create_backend(
+            _config(ProviderKind.DEEPGRAM, base_url=None),
+            self._secrets(tmp_path),
+            "some-unreleased-model",
+        )
+        assert isinstance(backend, DeepgramBackend)
+        assert backend._caps is None  # pyright: ignore[reportPrivateUsage]

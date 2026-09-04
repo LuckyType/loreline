@@ -15,11 +15,13 @@ from typing import cast
 from websockets.asyncio.server import ServerConnection, serve
 
 from loreline.audio.chunker import Utterance
+from loreline.capability_config import TranscribeCapabilities
 from loreline.models import Glossary, ProviderConfig, ProviderKind
 from loreline.stt.backends.gemini_live import (
     _RECV_TIMEOUT_S,  # pyright: ignore[reportPrivateUsage]
     GeminiLiveBackend,
 )
+from loreline.stt.base import transcribe_capabilities
 from mocks.gemini_live_ws import gemini_live_handler
 
 # 8000 samples is 0.5 s at 16 kHz, which the connector sends as five paced
@@ -46,6 +48,16 @@ def _two_utterances() -> list[Utterance]:
 MODEL = "gemini-3.5-transcribe-live"
 
 
+def _caps() -> TranscribeCapabilities | None:
+    """What the registry resolves for this model and hands to the connector.
+
+    Read from capabilities.yaml exactly as ``create_backend`` reads it, so the
+    glossary ceiling these tests exercise is the file's, not a number restated
+    here.
+    """
+    return transcribe_capabilities(ProviderKind.GEMINI, MODEL)
+
+
 def _config(port: int, language: str = "de") -> ProviderConfig:
     return ProviderConfig(
         id="gem-live-1",
@@ -59,7 +71,7 @@ def _config(port: int, language: str = "de") -> ProviderConfig:
 async def test_gemini_live_streaming_transcribe() -> None:
     async with serve(gemini_live_handler, "127.0.0.1", 0) as server:
         port = server.sockets[0].getsockname()[1]
-        backend = GeminiLiveBackend(_config(port), model=MODEL, api_key="secret")
+        backend = GeminiLiveBackend(_config(port), model=MODEL, caps=_caps(), api_key="secret")
         glossary = Glossary(campaign_id="c1", terms=["Drakonia"])
         event = await backend.transcribe(_one_utterance(), session_id="s1", glossary=glossary)
 
@@ -126,7 +138,7 @@ async def test_gemini_live_setup_and_key_on_the_wire() -> None:
 
     async with serve(recording, "127.0.0.1", 0) as server:
         port = server.sockets[0].getsockname()[1]
-        backend = GeminiLiveBackend(_config(port), model=MODEL, api_key="sekret")
+        backend = GeminiLiveBackend(_config(port), model=MODEL, caps=_caps(), api_key="sekret")
         _ = await backend.transcribe(_one_utterance(), session_id="s1")
 
     assert "key=sekret" in cast("str", seen["path"])
@@ -152,7 +164,7 @@ async def test_gemini_live_setup_and_key_on_the_wire() -> None:
 async def _setup_frame(
     port: int, glossary: Glossary | None, setups: list[dict[str, object]]
 ) -> dict[str, object]:
-    backend = GeminiLiveBackend(_config(port), model=MODEL, api_key="secret")
+    backend = GeminiLiveBackend(_config(port), model=MODEL, caps=_caps(), api_key="secret")
     _ = await backend.transcribe(_one_utterance(), session_id="s1", glossary=glossary)
     return cast("dict[str, object]", setups[0]["inputAudioTranscription"])
 
@@ -214,7 +226,7 @@ async def test_gemini_live_one_session_per_utterance() -> None:
 
     async with serve(counting, "127.0.0.1", 0) as server:
         port = server.sockets[0].getsockname()[1]
-        backend = GeminiLiveBackend(_config(port), model=MODEL, api_key="secret")
+        backend = GeminiLiveBackend(_config(port), model=MODEL, caps=_caps(), api_key="secret")
         events = [
             await backend.transcribe(utterance, session_id="s1") for utterance in _two_utterances()
         ]

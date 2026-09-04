@@ -25,6 +25,7 @@ from websockets.exceptions import ConnectionClosedOK
 
 from loreline.audio.chunker import Utterance
 from loreline.capabilities import surface_for
+from loreline.capability_config import TranscribeCapabilities
 from loreline.logging import get_logger
 from loreline.models import Glossary, Interaction, ProviderConfig, ProviderKind, Word
 from loreline.secrets import SecretStore
@@ -58,11 +59,17 @@ class AssemblyAIBackend(Connector[str]):
     """
 
     def __init__(
-        self, config: ProviderConfig, *, model: str | None = None, api_key: str | None = None
+        self,
+        config: ProviderConfig,
+        *,
+        model: str | None = None,
+        caps: TranscribeCapabilities | None = None,
+        api_key: str | None = None,
     ) -> None:
         super().__init__(config)
         self._api_key = api_key
         self._model = model
+        self._caps = caps
         self._language = config.language
         self._endpoint = surface_for(config, Interaction.TRANSCRIBE, "realtime")
         self._url = self._endpoint.url
@@ -86,7 +93,7 @@ class AssemblyAIBackend(Connector[str]):
         # words already carry labels whichever mode the session ends up in.
         # Note AssemblyAI bills streaming diarization as a paid add-on.
         params.append(("speaker_labels", "true"))
-        terms = glossary_for(self._model, glossary_terms(glossary), realtime=True)
+        terms = glossary_for(self._caps, glossary_terms(glossary), realtime=True)
         if terms:
             params.append(("keyterms_prompt", json.dumps(terms)))
         return f"{self._url}?{urlencode(params)}"
@@ -152,6 +159,9 @@ def _audio_chunks(pcm: bytes, sample_rate: int) -> list[bytes]:
 
 @register(ProviderKind.ASSEMBLYAI, realtime=True)
 def _factory(  # pyright: ignore[reportUnusedFunction]
-    config: ProviderConfig, secrets: SecretStore, model: str | None
+    config: ProviderConfig,
+    secrets: SecretStore,
+    model: str | None,
+    caps: TranscribeCapabilities | None,
 ) -> AssemblyAIBackend:
-    return AssemblyAIBackend(config, model=model, api_key=secret_for(config, secrets))
+    return AssemblyAIBackend(config, model=model, caps=caps, api_key=secret_for(config, secrets))
