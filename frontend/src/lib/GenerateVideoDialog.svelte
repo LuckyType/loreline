@@ -18,7 +18,7 @@
  */
 
 import { ApiError, api } from '$lib/api'
-import { deprecationNote, isHiddenModel, videoCapsFor } from '$lib/capabilities.svelte'
+import { deprecationNote, videoCapsFor } from '$lib/capabilities.svelte'
 import Dropdown from '$lib/Dropdown.svelte'
 import { Button } from '$lib/components/ui/button'
 import { Checkbox } from '$lib/components/ui/checkbox'
@@ -31,8 +31,9 @@ import {
 	DialogTitle,
 } from '$lib/components/ui/dialog'
 import { Label } from '$lib/components/ui/label'
+import { videoCatalog } from '$lib/modelCatalog.svelte'
 import { Textarea } from '$lib/components/ui/textarea'
-import type { ActionDefaults, ProviderConfig, VideoJob, VideoModelInfo } from '$lib/types'
+import type { ActionDefaults, ProviderConfig, VideoJob } from '$lib/types'
 
 let {
 	open = $bindable(false),
@@ -60,15 +61,16 @@ let duration = $state<number | null>(null)
 let resolution = $state('')
 let aspectRatio = $state('')
 let generateAudio = $state(false)
-let models = $state<VideoModelInfo[]>([])
-let modelsFor = $state('')
-let loadingModels = $state(false)
 let busy = $state(false)
 let error = $state('')
 
-const providerKind = $derived(providers.find((p) => p.id === providerId)?.kind)
-// A hidden model is one whose connector is unverified; it must never be listed.
-const offered = $derived(models.filter((m) => !isHiddenModel(providerKind, m.id)))
+const provider = $derived(providers.find((p) => p.id === providerId))
+const providerKind = $derived(provider?.kind)
+// A view over the shared video catalogue, which has already dropped hidden
+// models (a hidden model is one whose connector is unverified).
+const offered = $derived(provider ? videoCatalog.list(provider, 'video', '') : [])
+const loadingModels = $derived(provider ? videoCatalog.loading(provider, 'video', '') : false)
+const modelsSettled = $derived(provider ? videoCatalog.settled(provider, 'video', '') : false)
 const model = $derived(offered.find((m) => m.id === modelId))
 const caps = $derived(videoCapsFor(providerKind, modelId))
 const durations = $derived(
@@ -101,33 +103,23 @@ $effect(() => {
 	}
 })
 
+// The list is wanted the moment the dialog shows, not when the model dropdown
+// opens: the parameter controls below are built from the chosen model. Once
+// it is in, a pick the list cannot serve gives way to the saved default, else
+// the first model offered.
 $effect(() => {
-	const pid = providerId
-	if (!open || !pid || modelsFor === pid || loadingModels) return
-	loadingModels = true
-	api
-		.videoModels(pid)
-		.then((loaded) => {
-			models = loaded
-			modelsFor = pid
-			const pickable = loaded.filter(
-				(m) => !isHiddenModel(providers.find((p) => p.id === pid)?.kind, m.id),
-			)
-			if (!pickable.some((m) => m.id === modelId)) {
-				const preferred = defaults?.video_model
-				modelId =
-					(preferred && pickable.some((m) => m.id === preferred) ? preferred : '') ||
-					pickable[0]?.id ||
-					''
-			}
-		})
-		.catch(() => {
-			models = []
-			modelsFor = pid
-		})
-		.finally(() => {
-			loadingModels = false
-		})
+	if (!open) return
+	const p = provider
+	if (!p) return
+	videoCatalog.load(p, 'video', '').then(() => {
+		const pickable = videoCatalog.list(p, 'video', '')
+		if (pickable.some((m) => m.id === modelId)) return
+		const preferred = defaults?.video_model
+		modelId =
+			(preferred && pickable.some((m) => m.id === preferred) ? preferred : '') ||
+			pickable[0]?.id ||
+			''
+	})
 })
 
 // Whenever the model changes, drop any parameter it does not offer and fall
@@ -203,7 +195,7 @@ async function submit() {
 						options={offered.map((m) => ({ value: m.id, label: m.name || m.id }))}
 						placeholder={loadingModels ? 'Loading models…' : 'Select model…'}
 					/>
-					{#if !loadingModels && offered.length === 0 && modelsFor}
+					{#if !loadingModels && offered.length === 0 && modelsSettled}
 						<span class="text-xs text-muted-foreground">
 							No video models available - check the provider's API key.
 						</span>

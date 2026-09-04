@@ -35,6 +35,7 @@ import Dropdown from '$lib/Dropdown.svelte'
 import Foldable from '$lib/Foldable.svelte'
 import GenerateVideoDialog from '$lib/GenerateVideoDialog.svelte'
 import LogLine from '$lib/LogLine.svelte'
+import { modelInfoFor } from '$lib/modelCatalog.svelte'
 import ModelPicker from '$lib/ModelPicker.svelte'
 import { providerName } from '$lib/stores'
 import TranscriptList from '$lib/TranscriptList.svelte'
@@ -45,7 +46,6 @@ import {
 	type ExportFormat,
 	type ProviderConfig,
 	type ReprocessJob,
-	type ModelInfo,
 	type SessionDetail,
 	type TranscriptEvent,
 	type VideoJob,
@@ -353,9 +353,6 @@ let summarizeOpen = $state(false)
 let sumProvider = $state('')
 let sumModel = $state('')
 let sumEffort = $state('')
-// Set by the model picker; the fallback for a model the capability config
-// does not annotate.
-let sumModelInfo = $state<ModelInfo | undefined>(undefined)
 let sumBusy = $state(false)
 let sumError = $state('')
 let defaults = $state<ActionDefaults>({
@@ -365,6 +362,11 @@ let defaults = $state<ActionDefaults>({
 	summarize_model: '',
 })
 const selectedLlm = $derived(llmProviders.find((p) => p.id === sumProvider))
+// The picked model's catalogue entry; the fallback for a model the capability
+// config does not annotate. Read from the shared catalogue rather than
+// reported by the picker, which the dialog unmounts on close: the entry must
+// outlive the picker or the effort selector vanishes on reopen.
+const sumModelInfo = $derived(modelInfoFor(selectedLlm, 'summarize', '', sumModel))
 // The levels this model actually accepts, in config order. Empty means no
 // dropdown at all: either it does not reason, or it reasons without exposing
 // levels, and an empty selector would be a dead control in both cases.
@@ -1100,7 +1102,6 @@ onMount(async () => {
 				defaultModel={defaults.summarize_model}
 				defaultProvider={defaults.summarize_provider ?? ''}
 				interaction="summarize"
-				onselect={(m) => (sumModelInfo = m)}
 			/>
 		</div>
 		{#if sumEfforts.length}

@@ -208,6 +208,17 @@ export function withoutHidden(kind: ProviderKind | undefined, ids: string[]): st
 	return hidden.size ? ids.filter((id) => !hidden.has(id)) : ids
 }
 
+/** The row-shaped twin of `withoutHidden`, for a catalogue list. */
+export function withoutHiddenRows<T extends { id: string }>(
+	kind: ProviderKind | undefined,
+	rows: T[],
+): T[] {
+	const spec = capabilities.provider(kind)
+	if (!spec) return rows
+	const hidden = new Set(spec.models.filter((m) => m.hidden).map((m) => m.id))
+	return hidden.size ? rows.filter((m) => !hidden.has(m.id)) : rows
+}
+
 /** Vendor-announced sunset date, or null. The model stays selectable: a GM
  *  mid-campaign should not lose it the day the announcement lands. */
 export function deprecationFor(

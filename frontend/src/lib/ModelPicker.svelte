@@ -1,9 +1,9 @@
 <script lang="ts">
-import { api } from '$lib/api'
-import { deprecationFor, deprecationNote, withoutHidden } from '$lib/capabilities.svelte'
+import { deprecationNote, withoutHidden } from '$lib/capabilities.svelte'
 import Dropdown from '$lib/Dropdown.svelte'
-import { hintFor, priceTitle } from '$lib/modelInfo'
-import type { Interaction, ModelInfo, ProviderConfig } from '$lib/types'
+import { modelCatalog, type RefreshToken } from '$lib/modelCatalog.svelte'
+import { optionFor } from '$lib/modelInfo'
+import type { Interaction, ProviderConfig } from '$lib/types'
 
 let {
 	provider,
@@ -15,7 +15,6 @@ let {
 	autoseed = true,
 	interaction = 'transcribe',
 	refreshToken = '',
-	onselect = undefined,
 	onpick = undefined,
 }: {
 	provider: ProviderConfig | undefined
@@ -34,51 +33,33 @@ let {
 	/** Scopes the model list - a transcription picker must never offer a chat
 	 *  or image model. See src/loreline/capabilities.py. */
 	interaction?: Interaction
-	/** Any value that should invalidate the cached list when it changes - the
-	 *  server applies the "only show compatible models" setting, so a picker
-	 *  loaded before that toggle flipped would otherwise stay stale. */
-	refreshToken?: unknown
-	/** Fires with the selected model's full metadata whenever it resolves -
-	 *  lets a caller offer model-dependent controls (e.g. reasoning effort)
-	 *  without fetching the list a second time. */
-	onselect?: (model: ModelInfo | undefined) => void
+	/** Invalidates the cached list when it changes; see RefreshToken. */
+	refreshToken?: RefreshToken
 	onpick?: (model: string) => void
 } = $props()
 
-let all = $state<ModelInfo[]>([])
-let loadedFor = $state('')
-let loading = $state(false)
 // Seeding bookkeeping. Deliberately plain variables rather than $state:
 // nothing outside the seeding effect reads them, and keeping them inert stops
 // the effect from re-running on its own writes.
 let seededFor = ''
 let picked = false
 
-// `all` is fetched per provider and must not leak across a provider switch:
-// it's only valid while it matches the provider it was loaded for.
-const cacheKey = $derived(`${provider?.id ?? ''}:${interaction}:${String(refreshToken)}`)
-const loaded = $derived(provider && loadedFor === cacheKey ? all : [])
 const kind = $derived(provider?.kind)
-// A hidden model is one whose connector is written but unverified against the
-// real API (see capabilities.yaml). It must never reach a picker - listing it
-// is exactly what the flag exists to prevent - so every source of ids here is
-// filtered, the live catalogue and the stored favourites alike.
-const fetched = $derived(
-	withoutHidden(
-		kind,
-		loaded.map((m) => m.id),
-	),
+// This picker is a view over the shared catalogue, which answers per provider
+// row, interaction and refresh token: a previous provider's list never shows
+// under the next one, and a picker that unmounts forgets nothing. Hidden
+// models are already dropped there; the favourites are filtered here.
+const loaded = $derived(provider ? modelCatalog.list(provider, interaction, refreshToken) : [])
+const loading = $derived(
+	provider ? modelCatalog.loading(provider, interaction, refreshToken) : false,
 )
+const fetched = $derived(loaded.map((m) => m.id))
 // Price/context hints are only known for models the live list actually
 // returned - a favourite or stored default that predates the fetch (or that
 // the provider no longer serves) simply renders without one.
 const detail = $derived(new Map(loaded.map((m) => [m.id, m])))
 const favorites = $derived(withoutHidden(kind, provider?.favorite_models ?? []))
 
-// Report the selected model's metadata upward once the list has resolved.
-$effect(() => {
-	onselect?.(detail.get(value))
-})
 // The stored default is global: it can name a model belonging to a different
 // provider entirely, so it only earns a place here once it can be attributed
 // to this one. A caller that passes `defaultProvider` has said so outright;
@@ -98,21 +79,9 @@ const defaultForThisProvider = $derived(
 // A retiring model keeps its place in the list - a GM mid-campaign should not
 // lose it - but says so, in the row and again under the trigger once picked.
 const options = $derived(
-	[
-		...new Set(
-			[...defaultForThisProvider, ...favorites, ...fetched].filter((m): m is string => !!m),
-		),
-	].map((m) => {
-		const sunset = deprecationFor(kind, m)
-		return {
-			value: m,
-			label: m,
-			hint: [hintFor(detail.get(m)), sunset ? `retiring ${sunset}` : '']
-				.filter(Boolean)
-				.join(' · '),
-			title: [priceTitle(detail.get(m)), deprecationNote(kind, m)].filter(Boolean).join(' '),
-		}
-	}),
+	[...new Set([...defaultForThisProvider, ...favorites, ...fetched].filter(Boolean))].map((m) =>
+		optionFor(kind, m, detail.get(m)),
+	),
 )
 
 const selectedSunset = $derived(deprecationNote(kind, value))
@@ -148,34 +117,10 @@ function pick(model: string) {
 	onpick?.(model)
 }
 
-async function loadAll() {
-	const key = cacheKey
-	if (!provider || loading || loadedFor === key) return
-	loading = true
-	try {
-		// Video models live on their own endpoint with their own capability
-		// metadata (durations, resolutions); the generate dialog consumes that
-		// shape directly, while this picker only needs the ids.
-		all =
-			interaction === 'video'
-				? (await api.videoModels(provider.id)).map((m) => ({
-						id: m.id,
-						context_length: null,
-						pricing: null,
-						price_tiers: [],
-					}))
-				: await api.providerModels({
-						kind: provider.kind,
-						interaction,
-						base_url: provider.base_url,
-						provider_id: provider.id,
-					})
-		loadedFor = key
-	} catch {
-		all = []
-	} finally {
-		loading = false
-	}
+// The list is loaded lazily, on first open: some catalogues (OpenRouter's) are
+// large, and most pickers are never opened.
+function load() {
+	if (provider) modelCatalog.load(provider, interaction, refreshToken)
 }
 </script>
 
@@ -190,7 +135,7 @@ async function loadAll() {
 		defaultValue={defaultForThisProvider[0] ?? ''}
 		filterable
 		placeholder="Select model…"
-		onopen={loadAll}
+		onopen={load}
 		onpick={pick}
 	/>
 	{#if selectedSunset}
