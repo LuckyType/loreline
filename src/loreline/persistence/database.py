@@ -273,6 +273,19 @@ MIGRATIONS: list[str] = [
     """
     ALTER TABLE providers DROP COLUMN model;
     """,
+    # v17 - drop providers.protocol and providers.capabilities. Both were
+    # written on every save and read back on every load, and consulted by
+    # nothing in between: which transport a request uses follows from the
+    # model it chose (see loreline.capabilities.is_realtime_model), and what a
+    # kind can do is declared in capabilities.yaml, so the stored copies could
+    # only ever be stale or ignored. The browser hard-coded the protocol per
+    # kind and showed it as a label; the label goes with the column.
+    #
+    # Same DROP COLUMN as v16 (SQLite 3.35+).
+    """
+    ALTER TABLE providers DROP COLUMN protocol;
+    ALTER TABLE providers DROP COLUMN capabilities;
+    """,
 ]
 
 

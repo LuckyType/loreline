@@ -41,7 +41,7 @@ async def _session_with_transcript(client: AsyncClient) -> str:
     stt = (
         await client.post(
             "/api/providers",
-            json={"name": "STT", "kind": "openai_compat", "protocol": "http_batch"},
+            json={"name": "STT", "kind": "openai_compat"},
         )
     ).json()["id"]
     sid = (
@@ -58,7 +58,6 @@ async def _llm_provider(client: AsyncClient) -> str:
             json={
                 "name": "LLM",
                 "kind": "openai_compat",
-                "protocol": "http_batch",
                 "base_url": "http://llm:1234/v1",
             },
         )
@@ -140,7 +139,7 @@ async def test_summarize_rejects_non_llm_provider(client: AsyncClient) -> None:
         await client.post(
             "/api/providers",
             # Deepgram transcribes only; openai_compat now summarizes too.
-            json={"name": "STT2", "kind": "deepgram", "protocol": "ws"},
+            json={"name": "STT2", "kind": "deepgram"},
         )
     ).json()["id"]
     resp = await client.post(
@@ -176,7 +175,7 @@ async def test_summarize_with_openrouter_provider(
     llm = (
         await client.post(
             "/api/providers",
-            json={"name": "OpenRouter", "kind": "openrouter", "protocol": "http_batch"},
+            json={"name": "OpenRouter", "kind": "openrouter"},
         )
     ).json()["id"]
 

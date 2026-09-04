@@ -16,7 +16,7 @@ import httpx
 import pytest
 
 from loreline.capability_config import CapabilityConfig
-from loreline.models import Protocol, ProviderConfig, ProviderKind
+from loreline.models import ProviderConfig, ProviderKind
 from loreline.staleness.report import Code, Severity
 from loreline.staleness.startup import stale_favorites, warn_about_stale_favorites
 
@@ -48,7 +48,6 @@ def _provider(
         name="Table provider",
         kind=kind,
         auth_ref="provider:p1",
-        protocol=Protocol.HTTP_BATCH,
         favorite_models=favorites if favorites is not None else ["openai/whisper-large-v3-turbo"],
         enabled=enabled,
     )

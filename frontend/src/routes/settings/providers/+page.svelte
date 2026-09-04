@@ -62,7 +62,6 @@ import {
 	type ActionDefaults,
 	type AuthKind,
 	type Hosting,
-	type ProtocolKind,
 	capabilityBadges,
 	type HealthStatus,
 	type ModelInfo,
@@ -73,14 +72,12 @@ import {
 } from '$lib/types'
 
 /**
- * Copy the capability config does not carry, and only that: which transport
- * this kind's connector speaks, what its base-URL box should suggest, and the
- * one-line pitch in the wizard's list. Label, hosting, key URL and base URL
+ * Copy the capability config does not carry, and only that: what this kind's
+ * base-URL box should suggest, and the one-line pitch in the wizard's list. Label, hosting, key URL and base URL
  * come from /api/capabilities - keeping a second copy of those here is what
  * let the two drift apart in the first place.
  */
 interface ProviderPresentation {
-	protocol: ProtocolKind
 	/** Only for a kind the operator has to point somewhere. */
 	baseUrlPlaceholder?: string
 	note: string
@@ -89,16 +86,12 @@ interface ProviderPresentation {
 // Also the wizard's running order, which stays put whether or not the config
 // loaded.
 const PRESENTATION: Record<ProviderKind, ProviderPresentation> = {
-	deepgram: { protocol: 'ws', note: 'Streaming WS · inline diarization.' },
-	assemblyai: { protocol: 'ws', note: 'Streaming WS · inline diarization.' },
-	openai: { protocol: 'ws', note: 'Realtime transcription and session summaries.' },
-	gemini: { protocol: 'http_batch', note: 'API key · diarization · word timestamps.' },
-	openrouter: {
-		protocol: 'http_batch',
-		note: 'One key for many vendors. Transcription, summaries and video.',
-	},
+	deepgram: { note: 'Streaming WS · inline diarization.' },
+	assemblyai: { note: 'Streaming WS · inline diarization.' },
+	openai: { note: 'Realtime transcription and session summaries.' },
+	gemini: { note: 'API key · diarization · word timestamps.' },
+	openrouter: { note: 'One key for many vendors. Transcription, summaries and video.' },
 	openai_compat: {
-		protocol: 'http_batch',
 		baseUrlPlaceholder: 'http://localhost:8000/v1',
 		note: 'Speaches, whisper.cpp, Ollama, LM Studio, vLLM. Transcription and/or summaries.',
 	},
@@ -113,7 +106,6 @@ interface ProviderChoice {
 	hosting: Hosting | null
 	auth: AuthKind
 	keyUrl: string | null
-	protocol: ProtocolKind
 	baseUrlPlaceholder: string | null
 	note: string
 }
@@ -130,7 +122,6 @@ const catalog = $derived(
 			hosting: spec?.hosting ?? null,
 			auth: spec?.auth ?? 'optional',
 			keyUrl: spec?.key_url ?? null,
-			protocol: copy.protocol,
 			baseUrlPlaceholder: needsBaseUrl ? (copy.baseUrlPlaceholder ?? '') : null,
 			note: copy.note,
 		}
@@ -148,7 +139,6 @@ const blankRouting = (): OpenRouterRouting => ({
 const blank = (): ProviderCreate => ({
 	name: '',
 	kind: 'openai_compat',
-	protocol: 'http_batch',
 	base_url: '',
 	favorite_models: [],
 	sample_rate: 16000,
@@ -424,7 +414,7 @@ function pickProvider(meta: ProviderChoice) {
 	// answer for every picker but one. Each interaction-scoped picker chooses
 	// per request instead, and capabilities.yaml carries the one default a
 	// connector still needs when nobody chose (the health probe).
-	form = { ...blank(), kind: meta.kind, protocol: meta.protocol }
+	form = { ...blank(), kind: meta.kind }
 	step = 3
 }
 
@@ -442,7 +432,6 @@ function edit(p: ProviderConfig) {
 	form = {
 		name: p.name,
 		kind: p.kind,
-		protocol: p.protocol,
 		base_url: p.base_url ?? '',
 		favorite_models: [...p.favorite_models],
 		sample_rate: p.sample_rate,
@@ -826,10 +815,7 @@ onMount(async () => {
 		{:else if selected}
 			{@const sel = selected}
 			<div class="flex items-center justify-between">
-				<span>
-					<strong>{sel.label}</strong>
-					<span class="text-muted-foreground">· {sel.protocol}</span>
-				</span>
+				<strong>{sel.label}</strong>
 				{#if !editing}
 					<Button variant="outline" size="sm" onclick={() => (step = 2)}>← Back</Button>
 				{/if}

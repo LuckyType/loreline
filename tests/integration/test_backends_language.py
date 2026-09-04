@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator
 from websockets.asyncio.server import ServerConnection, serve
 
 from loreline.audio.chunker import Utterance
-from loreline.models import Protocol, ProviderConfig, ProviderKind
+from loreline.models import ProviderConfig, ProviderKind
 from loreline.stt.backends.deepgram import DeepgramBackend
 
 
@@ -34,7 +34,6 @@ async def test_deepgram_sends_config_language() -> None:
             name="dg",
             kind=ProviderKind.DEEPGRAM,
             base_url=f"ws://127.0.0.1:{port}",
-            protocol=Protocol.WS,
             language="en",
         )
         backend = DeepgramBackend(config, api_key="k")

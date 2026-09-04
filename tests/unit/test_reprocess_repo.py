@@ -14,7 +14,6 @@ from loreline.models import (
     DiarizationConfig,
     DiarizationMode,
     JobStatus,
-    Protocol,
     ProviderConfig,
     ProviderKind,
     ReprocessJob,
@@ -77,9 +76,7 @@ def test_resolve_openai_key_prefers_configured_provider(tmp_path: Path) -> None:
     secrets.set("provider:oai", "sk-from-store")
 
     def provider(kind: ProviderKind, auth_ref: str | None) -> ProviderConfig:
-        return ProviderConfig(
-            id=kind.value, name=kind.value, kind=kind, protocol=Protocol.WS, auth_ref=auth_ref
-        )
+        return ProviderConfig(id=kind.value, name=kind.value, kind=kind, auth_ref=auth_ref)
 
     providers = [
         provider(ProviderKind.DEEPGRAM, "provider:dg"),
@@ -102,7 +99,6 @@ async def test_build_diarizer_openai_mode_reuses_stored_key(db: Database, tmp_pa
             id="oai",
             name="OpenAI",
             kind=ProviderKind.OPENAI,
-            protocol=Protocol.WS,
             auth_ref="provider:oai",
         )
     )

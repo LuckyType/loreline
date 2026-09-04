@@ -17,7 +17,6 @@ import pytest
 from loreline.audio.chunker import Utterance
 from loreline.models import (
     Glossary,
-    Protocol,
     ProviderConfig,
     ProviderKind,
     TranscriptEvent,
@@ -40,7 +39,6 @@ def _config(auth_ref: str | None = None) -> ProviderConfig:
         id="fake-1",
         name="Fake",
         kind=ProviderKind.OPENAI_COMPAT,
-        protocol=Protocol.HTTP_BATCH,
         auth_ref=auth_ref,
     )
 

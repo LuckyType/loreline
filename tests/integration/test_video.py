@@ -24,7 +24,6 @@ from test_web_session import FakeBackend, FakeDiarizer, capture_factory
 from loreline.models import (
     Interaction,
     JobStatus,
-    Protocol,
     ProviderConfig,
     ProviderKind,
     Session,
@@ -61,9 +60,7 @@ from loreline.web.schemas import VideoGenerateRequest
 
 
 def _openrouter() -> ProviderConfig:
-    return ProviderConfig(
-        id="v1", name="OpenRouter", kind=ProviderKind.OPENROUTER, protocol=Protocol.HTTP_BATCH
-    )
+    return ProviderConfig(id="v1", name="OpenRouter", kind=ProviderKind.OPENROUTER)
 
 
 def _client(transport: httpx.MockTransport) -> httpx.AsyncClient:
@@ -93,9 +90,7 @@ async def video_repos(tmp_path: Path) -> AsyncIterator[Repos]:
     )
     await repos.providers.upsert(_openrouter())
     await repos.providers.upsert(
-        ProviderConfig(
-            id="chat", name="Ollama", kind=ProviderKind.OPENAI_COMPAT, protocol=Protocol.HTTP_BATCH
-        )
+        ProviderConfig(id="chat", name="Ollama", kind=ProviderKind.OPENAI_COMPAT)
     )
     await repos.sessions.create(Session(id="s1", started_at=0.0))
     yield repos
@@ -505,7 +500,7 @@ class TestVideoRoutes:
         provider = (
             await client.post(
                 "/api/providers",
-                json={"name": "OpenRouter", "kind": "openrouter", "protocol": "http_batch"},
+                json={"name": "OpenRouter", "kind": "openrouter"},
             )
         ).json()
         state = _ctx(client)
@@ -522,7 +517,7 @@ class TestVideoRoutes:
         chat = (
             await client.post(
                 "/api/providers",
-                json={"name": "Ollama", "kind": "openai_compat", "protocol": "http_batch"},
+                json={"name": "Ollama", "kind": "openai_compat"},
             )
         ).json()
         resp = await client.get("/api/video/models", params={"provider_id": chat["id"]})
@@ -680,7 +675,6 @@ class TestLiveCaptureGuard:
                         json={
                             "name": "OpenRouter STT",
                             "kind": "openrouter",
-                            "protocol": "http_batch",
                         },
                     )
                 ).json()
@@ -726,7 +720,7 @@ class TestInlineDiarizationGuard:
         return (
             await client.post(
                 "/api/providers",
-                json={"name": "Deepgram", "kind": "deepgram", "protocol": "ws"},
+                json={"name": "Deepgram", "kind": "deepgram"},
             )
         ).json()["id"]
 

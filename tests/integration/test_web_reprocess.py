@@ -47,7 +47,7 @@ async def client(tmp_path: Path) -> AsyncIterator[AsyncClient]:
 async def _provider(client: AsyncClient) -> str:
     resp = await client.post(
         "/api/providers",
-        json={"name": "Fake", "kind": "openai_compat", "protocol": "http_batch"},
+        json={"name": "Fake", "kind": "openai_compat"},
     )
     return resp.json()["id"]
 
@@ -264,7 +264,7 @@ async def test_reprocess_accepts_a_kind_barred_from_live_capture(client: AsyncCl
     sid = await _run_session(client, live_pid)
     batch = await client.post(
         "/api/providers",
-        json={"name": "OpenRouter", "kind": "openrouter", "protocol": "http_batch"},
+        json={"name": "OpenRouter", "kind": "openrouter"},
     )
     batch_pid = batch.json()["id"]
 

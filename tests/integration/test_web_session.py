@@ -157,7 +157,7 @@ async def session_client(session_settings: Settings) -> AsyncIterator[AsyncClien
 async def _create_provider(client: AsyncClient) -> str:
     resp = await client.post(
         "/api/providers",
-        json={"name": "Fake", "kind": "openai_compat", "protocol": "http_batch"},
+        json={"name": "Fake", "kind": "openai_compat"},
     )
     return resp.json()["id"]
 
@@ -316,7 +316,7 @@ async def test_start_disabled_provider_conflicts(session_client: AsyncClient) ->
     pid = await _create_provider(session_client)
     disabled = await session_client.put(
         f"/api/providers/{pid}",
-        json={"name": "Fake", "kind": "openai_compat", "protocol": "http_batch", "enabled": False},
+        json={"name": "Fake", "kind": "openai_compat", "enabled": False},
     )
     assert disabled.status_code == 200
     resp = await session_client.post(
@@ -341,7 +341,7 @@ async def test_merge_concatenates_audio(tmp_path: Path) -> None:
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             resp = await client.post(
                 "/api/providers",
-                json={"name": "Fake", "kind": "openai_compat", "protocol": "http_batch"},
+                json={"name": "Fake", "kind": "openai_compat"},
             )
             pid = resp.json()["id"]
 

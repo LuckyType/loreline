@@ -13,7 +13,6 @@ from loreline.bus import EventBus
 from loreline.models import (
     DiarizationConfig,
     DiarizationMode,
-    Protocol,
     ProviderConfig,
     ProviderKind,
     SpeakerSegment,
@@ -28,7 +27,6 @@ def _config(provider_id: str) -> ProviderConfig:
         id=provider_id,
         name=provider_id,
         kind=ProviderKind.OPENAI_COMPAT,
-        protocol=Protocol.HTTP_BATCH,
     )
 
 

@@ -35,7 +35,7 @@ def ws_client(tmp_path: Path) -> Iterator[TestClient]:
 def _create_provider(client: TestClient) -> str:
     resp = client.post(
         "/api/providers",
-        json={"name": "Fake", "kind": "openai_compat", "protocol": "http_batch"},
+        json={"name": "Fake", "kind": "openai_compat"},
     )
     return resp.json()["id"]
 

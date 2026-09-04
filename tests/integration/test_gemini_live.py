@@ -16,7 +16,7 @@ from typing import cast
 from websockets.asyncio.server import ServerConnection, serve
 
 from loreline.audio.chunker import Utterance
-from loreline.models import Glossary, Protocol, ProviderConfig, ProviderKind, TranscriptEvent
+from loreline.models import Glossary, ProviderConfig, ProviderKind, TranscriptEvent
 from loreline.stt.backends.gemini_live import (
     _RECV_TIMEOUT_S,  # pyright: ignore[reportPrivateUsage]
     GeminiLiveBackend,
@@ -51,7 +51,6 @@ def _config(port: int, language: str = "de") -> ProviderConfig:
         name="Gemini Live",
         kind=ProviderKind.GEMINI,
         base_url=f"ws://127.0.0.1:{port}",
-        protocol=Protocol.WS,
         language=language,
     )
 

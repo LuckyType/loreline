@@ -27,7 +27,7 @@ import httpx
 import pytest
 
 from loreline.audio.chunker import Utterance
-from loreline.models import Glossary, Protocol, ProviderConfig, ProviderKind, TranscriptEvent
+from loreline.models import Glossary, ProviderConfig, ProviderKind, TranscriptEvent
 from loreline.stt.backends.assemblyai_batch import AssemblyAIBatchBackend
 
 BASE_URL = "https://api.assemblyai.com"
@@ -40,7 +40,6 @@ def _config() -> ProviderConfig:
         id="aai-1",
         name="AssemblyAI",
         kind=ProviderKind.ASSEMBLYAI,
-        protocol=Protocol.HTTP_BATCH,
         language="de",
     )
 

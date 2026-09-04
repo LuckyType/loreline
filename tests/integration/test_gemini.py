@@ -16,7 +16,7 @@ import httpx
 from structlog.testing import capture_logs
 
 from loreline.audio.chunker import Utterance
-from loreline.models import Glossary, Protocol, ProviderConfig, ProviderKind, TranscriptEvent
+from loreline.models import Glossary, ProviderConfig, ProviderKind, TranscriptEvent
 from loreline.stt.backends.gemini import GeminiSTTBackend
 
 BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
@@ -30,7 +30,6 @@ def _config() -> ProviderConfig:
         id="gemini-1",
         name="Gemini",
         kind=ProviderKind.GEMINI,
-        protocol=Protocol.HTTP_BATCH,
     )
 
 
