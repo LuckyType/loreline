@@ -40,14 +40,14 @@ import { modelInfoFor } from '$lib/modelCatalog.svelte'
 import ModelPicker from '$lib/ModelPicker.svelte'
 import { providerName } from '$lib/stores'
 import TranscriptList from '$lib/TranscriptList.svelte'
+import type { ExportFormat } from '$lib/types'
 import type {
 	DiarizationModeKind,
-	ExportFormat,
 	ReprocessJob,
 	SessionDetail,
 	TranscriptEvent,
 	VideoJob,
-} from '$lib/types'
+} from '$lib/wire'
 import { connect } from '$lib/ws'
 
 let detail = $state<SessionDetail | null>(null)
@@ -308,9 +308,7 @@ function diarizerLabel(job: ReprocessJob): string {
 
 // What the table's Diarization column says about one version.
 function diarizeInfo(version: string): string {
-	const targeting = jobs.filter(
-		(j) => j.operation === 'diarize' && (j.target ?? 'original') === version,
-	)
+	const targeting = jobs.filter((j) => j.operation === 'diarize' && j.target === version)
 	// A running pass counts the segments it has relabeled so far, for the same
 	// reason a running transcription does: something has to move.
 	const running = targeting.find(inFlight)

@@ -40,6 +40,8 @@ export default ts.config(
 		},
 	},
 	{
-		ignores: ['build/', '.svelte-kit/', 'dist/'],
+		// The API document and the wire types generated from it: not written
+		// here, not formatted here (see `npm run gen:api`).
+		ignores: ['build/', '.svelte-kit/', 'dist/', 'openapi.json', 'src/lib/api.generated.d.ts'],
 	},
 )

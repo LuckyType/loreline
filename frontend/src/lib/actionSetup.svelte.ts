@@ -24,34 +24,36 @@ import {
 	preferredModel,
 	supportsInteraction,
 } from './capabilities.svelte'
-import type { ActionDefaults, Interaction, ProviderConfig, ProviderKind } from './types'
+import type { ActionDefaults, Interaction, ProviderConfig, ProviderKind } from './wire'
 
 /** What a page is picking a provider for: one of the wire interactions, or a
  *  live capture, which is transcription narrowed to the rows that can stream a
  *  session (OpenRouter transcribes stored audio only). */
 export type Action = Interaction | 'capture'
 
-/** The wire type leaves some fields optional; every reader here gets all of
- *  them, so no picker needs a `?? ''` and no page needs its own blank literal. */
-export type CompleteDefaults = Required<ActionDefaults>
+/** What a page shows before the stored defaults land, and what a fresh
+ *  install has: every field blank, nothing preselected. */
+const NO_DEFAULTS: ActionDefaults = {
+	stt_provider: '',
+	stt_model: '',
+	diar_mode: 'none',
+	diar_endpoint: '',
+	summarize_provider: '',
+	summarize_model: '',
+	summarize_prompt: '',
+	summarize_reasoning_effort: '',
+	video_provider: '',
+	video_model: '',
+	strict_model_filtering: true,
+}
 
-/** Fill in every field. Also the one place a legacy stored "" diarization
- *  mode becomes the explicit "none" it means, so a picker shows one spelling
- *  of "no diarization for new sessions" rather than two options. */
-export function completeDefaults(raw?: Partial<ActionDefaults> | null): CompleteDefaults {
-	return {
-		stt_provider: raw?.stt_provider ?? '',
-		stt_model: raw?.stt_model ?? '',
-		diar_mode: raw?.diar_mode || 'none',
-		diar_endpoint: raw?.diar_endpoint ?? '',
-		summarize_provider: raw?.summarize_provider ?? '',
-		summarize_model: raw?.summarize_model ?? '',
-		summarize_prompt: raw?.summarize_prompt ?? '',
-		summarize_reasoning_effort: raw?.summarize_reasoning_effort ?? '',
-		video_provider: raw?.video_provider ?? '',
-		video_model: raw?.video_model ?? '',
-		strict_model_filtering: raw?.strict_model_filtering ?? true,
-	}
+/** The stored defaults, or blank ones where there are none. Also the one place
+ *  a legacy stored "" diarization mode becomes the explicit "none" it means,
+ *  so a picker shows one spelling of "no diarization for new sessions" rather
+ *  than two options. */
+export function completeDefaults(raw?: ActionDefaults | null): ActionDefaults {
+	if (!raw) return { ...NO_DEFAULTS }
+	return { ...raw, diar_mode: raw.diar_mode || 'none' }
 }
 
 type ProviderKey = 'stt_provider' | 'summarize_provider' | 'video_provider'
@@ -79,7 +81,7 @@ class ActionSetupStore {
 	/** Empty until the first successful fetch. Replaced whole, never mutated. */
 	providers = $state.raw<ProviderConfig[]>([])
 	/** Always complete: blank until loaded, then whatever the server stores. */
-	defaults = $state.raw<CompleteDefaults>(completeDefaults())
+	defaults = $state.raw<ActionDefaults>(completeDefaults())
 	/** Non-empty when the provider list could not be fetched. The defaults
 	 *  failing is not an error: a fresh install has none. */
 	error = $state('')

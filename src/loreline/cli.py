@@ -205,6 +205,25 @@ def sync_capabilities(
 
 
 @app.command()
+def openapi() -> None:
+    """Print the API's OpenAPI document as JSON.
+
+    The frontend's wire types are generated from it, so this is the seam
+    between the two halves of the repo: `npm run gen:api` in frontend/ pipes
+    this into openapi.json and re-runs the generator, and pre-commit fails a
+    schema change that was not followed by one.
+
+    Needs no server, no database and no credentials - the app is built against
+    a throwaway data directory purely so it can describe itself.
+    """
+    from loreline.web.openapi import openapi_json  # noqa: PLC0415
+
+    # `nl=False`: the document already ends in exactly one newline, and the
+    # committed file has to match this byte for byte for the drift check.
+    typer.echo(openapi_json(), nl=False)
+
+
+@app.command()
 def devices() -> None:
     """List available audio input devices (requires the 'audio' extra)."""
     try:

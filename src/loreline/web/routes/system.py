@@ -18,6 +18,7 @@ from loreline import __version__
 from loreline.diarization.remote import probe_diarizer
 from loreline.health import HealthReport, HealthStatus
 from loreline.llm import DEFAULT_SYSTEM_PROMPT
+from loreline.models import SessionStatus
 from loreline.monitoring import (
     AlertChannel,
     channel_token_secret,
@@ -71,7 +72,11 @@ class HealthResponse(BaseModel):
     status: str
     version: str
     uptime_seconds: float
-    capture_status: str
+    capture_status: SessionStatus
+    """The capture lifecycle state, as the enum rather than a bare string: the
+    settings page and the header badge both switch on it, and a typed field is
+    what makes a renamed state a compile error in the browser rather than a
+    condition that silently stops matching."""
     active_session_id: str | None = None
     disk_free_bytes: int = 0
     disk_total_bytes: int = 0
@@ -103,7 +108,7 @@ class HealthResponse(BaseModel):
 async def healthz(request: Request) -> HealthResponse:
     """Return service health. Used by UI badge, push alerts, and external polling."""
     state = get_state(request)
-    capture_status = state.manager.status().value
+    capture_status = state.manager.status()
     free, total = disk_usage(state.settings.data_dir)
     threshold = state.settings.disk_alert_threshold_mb * 1024 * 1024
     alert_config = await state.alerts.get_config()
@@ -114,7 +119,7 @@ async def healthz(request: Request) -> HealthResponse:
 
     return HealthResponse(
         status=overall_status(
-            capture_status=capture_status, disk_free=free, disk_threshold_bytes=threshold
+            capture_status=capture_status.value, disk_free=free, disk_threshold_bytes=threshold
         ),
         version=__version__,
         uptime_seconds=round(time.monotonic() - state.started_at, 3),

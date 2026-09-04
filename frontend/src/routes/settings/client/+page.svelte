@@ -7,7 +7,7 @@ import { Label } from '$lib/components/ui/label'
 import { Separator } from '$lib/components/ui/separator'
 import { Switch } from '$lib/components/ui/switch'
 import Dropdown from '$lib/Dropdown.svelte'
-import type { InputDevice, UpdateResult } from '$lib/types'
+import type { InputDevice, UpdateResult } from '$lib/wire'
 
 let devices = $state<InputDevice[]>([])
 let deviceSel = $state('')

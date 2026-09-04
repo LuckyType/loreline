@@ -1,22 +1,23 @@
 import { goto } from '$app/navigation'
 import { authed } from './stores'
+import type { ExportFormat } from './types'
 import type {
 	ActionDefaults,
 	AlertChannel,
 	AlertChannelWrite,
 	AlertTestResult,
-	ProviderTestResult,
 	AutostartState,
 	CapabilityConfig,
 	DeviceSetting,
-	ExportFormat,
 	Glossary,
 	Health,
 	InputDevice,
 	ModelInfo,
+	OkResponse,
 	ProviderConfig,
 	ProviderCreate,
 	ProviderModelsRequest,
+	ProviderTestResult,
 	ReprocessJob,
 	ReprocessRequest,
 	RevisionResponse,
@@ -33,7 +34,7 @@ import type {
 	VideoGenerateRequest,
 	VideoJob,
 	VideoModelInfo,
-} from './types'
+} from './wire'
 
 export class ApiError extends Error {
 	constructor(
@@ -78,11 +79,11 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 export const api = {
 	// --- auth ---
 	login: (password: string) =>
-		request<{ ok: boolean }>('/api/auth/login', {
+		request<OkResponse>('/api/auth/login', {
 			method: 'POST',
 			body: JSON.stringify({ password }),
 		}),
-	logout: () => request<{ ok: boolean }>('/api/auth/logout', { method: 'POST' }),
+	logout: () => request<OkResponse>('/api/auth/logout', { method: 'POST' }),
 
 	// --- system ---
 	health: () => request<Health>('/api/system/healthz'),
@@ -117,7 +118,7 @@ export const api = {
 			body: JSON.stringify(body),
 		}),
 	deleteAlertChannel: (id: string) =>
-		request<{ ok: boolean }>(`/api/system/alerts/channels/${id}`, { method: 'DELETE' }),
+		request<OkResponse>(`/api/system/alerts/channels/${id}`, { method: 'DELETE' }),
 	testAlertChannel: (id: string) =>
 		request<AlertTestResult>(`/api/system/alerts/channels/${id}/test`, { method: 'POST' }),
 
@@ -125,7 +126,7 @@ export const api = {
 	listDevices: () => request<InputDevice[]>('/api/audio/devices'),
 	getInputDevice: () => request<DeviceSetting>('/api/audio/device'),
 	setInputDevice: (device: string | null) =>
-		request<{ ok: boolean }>('/api/audio/device', {
+		request<OkResponse>('/api/audio/device', {
 			method: 'PUT',
 			body: JSON.stringify({ device }),
 		}),
@@ -151,10 +152,9 @@ export const api = {
 			method: 'PUT',
 			body: JSON.stringify(body),
 		}),
-	deleteProvider: (id: string) =>
-		request<{ ok: boolean }>(`/api/providers/${id}`, { method: 'DELETE' }),
+	deleteProvider: (id: string) => request<OkResponse>(`/api/providers/${id}`, { method: 'DELETE' }),
 	setProviderSecret: (id: string, value: string) =>
-		request<{ ok: boolean }>(`/api/providers/${id}/secret`, {
+		request<OkResponse>(`/api/providers/${id}/secret`, {
 			method: 'POST',
 			body: JSON.stringify({ value }),
 		}),
@@ -185,16 +185,15 @@ export const api = {
 	/** Delete one re-transcription version (segments + job rows). The server
 	 *  refuses 'original', which is the live capture and cannot be remade. */
 	deleteTranscriptVersion: (id: string, version: string) =>
-		request<{ ok: boolean }>(
-			`/api/session/${id}/transcript?version=${encodeURIComponent(version)}`,
-			{ method: 'DELETE' },
-		),
+		request<OkResponse>(`/api/session/${id}/transcript?version=${encodeURIComponent(version)}`, {
+			method: 'DELETE',
+		}),
 	/** The log lines one transcript version was produced by. The live capture
 	 *  is version 'original'; every re-transcription is its job id. */
 	getVersionLogs: (id: string, version: string) =>
 		request<VersionLogs>(`/api/session/${id}/logs?version=${encodeURIComponent(version)}`),
 	setSpeakerNames: (id: string, names: Record<string, string>) =>
-		request<{ ok: boolean }>(`/api/session/${id}/speakers`, {
+		request<OkResponse>(`/api/session/${id}/speakers`, {
 			method: 'PUT',
 			body: JSON.stringify({ names }),
 		}),
@@ -206,7 +205,7 @@ export const api = {
 	exportUrl: (id: string, fmt: ExportFormat) => `/api/session/${id}/export?fmt=${fmt}`,
 	audioUrl: (id: string) => `/api/session/${id}/audio`,
 	deleteSessions: (ids: string[]) =>
-		request<{ ok: boolean }>('/api/session/delete', {
+		request<OkResponse>('/api/session/delete', {
 			method: 'POST',
 			body: JSON.stringify({ ids }),
 		}),
@@ -224,7 +223,7 @@ export const api = {
 	listVideoJobs: (sessionId: string) =>
 		request<VideoJob[]>(`/api/video?session_id=${encodeURIComponent(sessionId)}`),
 	deleteVideoJob: (jobId: string) =>
-		request<{ ok: boolean }>(`/api/video/${jobId}`, { method: 'DELETE' }),
+		request<OkResponse>(`/api/video/${jobId}`, { method: 'DELETE' }),
 	/** Playback/download URL for a finished job (served from local storage). */
 	videoContentUrl: (jobId: string) => `/api/video/${jobId}/content`,
 

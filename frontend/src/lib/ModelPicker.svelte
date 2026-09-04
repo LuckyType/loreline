@@ -3,7 +3,7 @@ import { deprecationNote, withoutHidden } from '$lib/capabilities.svelte'
 import Dropdown from '$lib/Dropdown.svelte'
 import { modelCatalog, type RefreshToken } from '$lib/modelCatalog.svelte'
 import { optionFor } from '$lib/modelInfo'
-import type { Interaction, ProviderConfig } from '$lib/types'
+import type { Interaction, ProviderConfig } from '$lib/wire'
 
 let {
 	provider,

@@ -17,7 +17,7 @@ import {
 	TableRow,
 } from '$lib/components/ui/table'
 import { providerName } from '$lib/stores'
-import type { Session } from '$lib/types'
+import type { Session } from '$lib/wire'
 
 let sessions = $state<Session[]>([])
 let selected = $state<Record<string, boolean>>({})
