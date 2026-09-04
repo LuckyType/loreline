@@ -6,8 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from loreline.capabilities import default_model
-from loreline.models import Interaction, Protocol, ProviderConfig, ProviderKind
+from loreline.models import Protocol, ProviderConfig, ProviderKind
 from loreline.secrets import SecretStore
 from loreline.stt import create_backend, registry
 from loreline.stt.backends.assemblyai import AssemblyAIBackend
@@ -41,7 +40,7 @@ def test_openai_compat_kind_registered() -> None:
 
 def test_create_backend_returns_connector(tmp_path: Path) -> None:
     secrets = SecretStore(tmp_path / "secrets.json")
-    backend = create_backend(_config(ProviderKind.OPENAI_COMPAT), secrets)
+    backend = create_backend(_config(ProviderKind.OPENAI_COMPAT), secrets, "whisper-1")
     assert backend.config.id == "p1"
 
 
@@ -60,7 +59,7 @@ def test_create_backend_unknown_kind_raises(
     monkeypatch.setattr(registry, "_REGISTRY", {})
     monkeypatch.setattr(registry, "_load_backends", lambda: None)
     with pytest.raises(ValueError, match="no STT backend registered"):
-        create_backend(_config(ProviderKind.OPENAI_COMPAT), secrets)
+        create_backend(_config(ProviderKind.OPENAI_COMPAT), secrets, "whisper-1")
 
 
 class TestModelResolution:
@@ -87,18 +86,6 @@ class TestModelResolution:
     def test_openai_batch_model_gets_the_batch_connector(self, tmp_path: Path) -> None:
         backend = create_backend(
             _config(ProviderKind.OPENAI, base_url=None), self._secrets(tmp_path), "gpt-transcribe"
-        )
-        assert isinstance(backend, OpenAICompatBackend)
-
-    def test_openai_without_a_model_falls_back_to_the_declared_default(
-        self, tmp_path: Path
-    ) -> None:
-        """Only the health probe gets here without a model, and it resolves to
-        capabilities.yaml's OpenAI transcription default (gpt-transcribe),
-        which is a batch model - so the probe exercises the key against
-        /models instead of opening a Realtime session."""
-        backend = create_backend(
-            _config(ProviderKind.OPENAI, base_url=None), self._secrets(tmp_path)
         )
         assert isinstance(backend, OpenAICompatBackend)
 
@@ -139,54 +126,14 @@ class TestModelResolution:
         )
         assert isinstance(backend, GeminiLiveBackend)
 
-    def test_gemini_without_a_model_keeps_the_batch_connector(self, tmp_path: Path) -> None:
-        """Gemini's declared default is the batch model, and resolving it is
-        what holds a config nobody chose a model for on the batch connector.
-        This matters more now that the Live variant is offered: it serves no
-        diarization and no word timestamps, so a silent reroute would drop
-        both without erroring."""
-        backend = create_backend(
-            _config(ProviderKind.GEMINI, base_url=None), self._secrets(tmp_path)
-        )
-        assert isinstance(backend, GeminiSTTBackend)
-
-    def test_the_resolved_default_reaches_the_connector(self, tmp_path: Path) -> None:
-        """Not just the transport: the model the registry resolved is the one
-        the connector sends, so the probe and the routing cannot disagree about
-        which model is running."""
-        backend = create_backend(
-            _config(ProviderKind.GEMINI, base_url=None), self._secrets(tmp_path)
-        )
-        assert isinstance(backend, GeminiSTTBackend)
-        body = backend._request_body(b"", [])  # pyright: ignore[reportPrivateUsage]
-        assert body["model"] == default_model(ProviderKind.GEMINI, Interaction.TRANSCRIBE)
-
-    def test_an_empty_catalogue_for_a_curated_kind_is_a_clear_error(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A curated kind that resolves nothing means the file is out of models.
-
-        Plausible for OpenAI, whose whole gpt-4o-transcribe family shares one
-        removal date: once the last entry is deleted there is nothing to fall
-        back to. Left alone it would post a modelless request and surface as
-        the vendor complaining about a missing field, which sends whoever reads
-        it to the wrong file. Distinct from the self-hosted kind below, which
-        curates nothing on purpose and works fine with no model named.
-        """
-
-        def no_default(_kind: ProviderKind, _interaction: Interaction) -> str | None:
-            return None
-
-        monkeypatch.setattr(registry, "default_model", no_default)
-        with pytest.raises(ValueError, match="offers no transcription model"):
-            create_backend(_config(ProviderKind.OPENAI, base_url=None), self._secrets(tmp_path))
-
-    def test_a_kind_with_no_curated_catalogue_resolves_no_model(self, tmp_path: Path) -> None:
-        """The self-hosted kind lists nothing this repo can vouch for, so the
-        connector names no model and the server uses its own. Guessing one
-        (this connector used to pin whisper-1) fails a request against a server
-        that simply has a different model loaded."""
-        backend = create_backend(_config(ProviderKind.OPENAI_COMPAT), self._secrets(tmp_path))
+    def test_a_kind_with_no_curated_catalogue_runs_with_no_model(self, tmp_path: Path) -> None:
+        """The self-hosted kind lists nothing this repo can vouch for, so None
+        is a legitimate model there: the connector names none and the server
+        uses its own. Guessing one (this connector used to pin whisper-1)
+        fails a request against a server that simply has a different model
+        loaded. Nothing is resolved on the way: the registry takes what the
+        caller chose, and every caller chooses."""
+        backend = create_backend(_config(ProviderKind.OPENAI_COMPAT), self._secrets(tmp_path), None)
         assert isinstance(backend, OpenAICompatBackend)
         assert backend._model is None  # pyright: ignore[reportPrivateUsage]
 

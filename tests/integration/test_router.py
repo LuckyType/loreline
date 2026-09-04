@@ -10,7 +10,6 @@ import pytest
 
 from loreline.audio.chunker import Utterance
 from loreline.bus import EventBus
-from loreline.health import HealthReport, HealthStatus
 from loreline.models import (
     DiarizationConfig,
     DiarizationMode,
@@ -59,9 +58,6 @@ class FakeBackend:
                 end_ts=utt.end,
                 is_final=True,
             )
-
-    async def health(self) -> HealthReport:
-        return HealthReport(HealthStatus.HEALTHY)
 
     async def aclose(self) -> None:
         return None

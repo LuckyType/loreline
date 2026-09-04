@@ -8,11 +8,9 @@ import re
 import httpx
 import pytest
 
-from loreline.health import HealthStatus
 from loreline.llm import (
     DEFAULT_SYSTEM_PROMPT,
     LLMError,
-    chat_health,
     routing_payload,
     summarize_transcript,
 )
@@ -208,113 +206,6 @@ async def test_summarize_transcript_raises_llm_error_on_connect_failure() -> Non
             transcript="x",
             client_factory=lambda: _client(transport),
         )
-
-
-async def test_chat_health_ok_and_failure() -> None:
-    ok_transport = httpx.MockTransport(lambda _r: httpx.Response(200, json={"data": []}))
-    report = await chat_health(
-        config=_config(),
-        api_key="k",
-        client_factory=lambda: _client(ok_transport),
-    )
-    assert report.status is HealthStatus.HEALTHY
-
-    def boom(_r: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectError("refused")
-
-    report = await chat_health(
-        config=_config(),
-        api_key=None,
-        client_factory=lambda: _client(httpx.MockTransport(boom)),
-    )
-    assert report.status is HealthStatus.UNREACHABLE
-
-
-async def test_chat_health_rejects_a_bad_key_instead_of_passing_it() -> None:
-    """The regression this whole grading exists for.
-
-    ``GET /models`` used to be graded ``status_code < 500``, so both live
-    answers below - Google's 400 on its OpenAI-compatible surface and OpenAI's
-    own 401 - reported a completely invalid key as healthy. Both bodies are
-    pinned from real calls, including Google's one-element-array envelope,
-    which the bare ``/models`` route does *not* use but the sibling chat route
-    does.
-    """
-    google = httpx.Response(
-        400,
-        json={"error": {"code": 400, "message": "Invalid Auth key.", "status": "INVALID_ARGUMENT"}},
-    )
-    openai = httpx.Response(
-        401,
-        json={
-            "error": {
-                "message": (
-                    "Incorrect API key provided: sk-proj-****s000. You can find your API "
-                    "key at https://platform.openai.com/account/api-keys."
-                ),
-                "type": "invalid_request_error",
-                "param": None,
-                "code": "invalid_api_key",
-            }
-        },
-    )
-    for response, expected in ((google, "Invalid Auth key."), (openai, "Incorrect API key")):
-        report = await chat_health(
-            config=_config(),
-            api_key="bad",
-            client_factory=lambda: _client(httpx.MockTransport(lambda _r: response)),  # noqa: B023
-        )
-        assert report.status is HealthStatus.UNAUTHORIZED
-        assert report.detail is not None
-        assert expected in report.detail
-
-
-async def test_chat_health_treats_a_rate_limit_as_a_working_credential() -> None:
-    """429 is the case a bare ``== 200`` would get wrong in the other direction.
-
-    Being throttled means the key was recognised, so calling it broken would
-    send a GM to replace a key that is fine. It is not healthy either: the
-    provider cannot serve a session right now.
-    """
-    throttled = httpx.Response(429, json={"error": {"message": "Rate limit exceeded"}})
-    report = await chat_health(
-        config=_config(),
-        api_key="k",
-        client_factory=lambda: _client(httpx.MockTransport(lambda _r: throttled)),
-    )
-    assert report.status is HealthStatus.DEGRADED
-    assert report.detail == "Rate limit exceeded"
-
-
-async def test_chat_health_asks_openrouter_about_the_key_not_the_catalogue() -> None:
-    """OpenRouter serves /models to anonymous callers, so it proves nothing.
-
-    Verified live: 425 models come back with no Authorization header at all.
-    /key is the route that actually answers "is this credential any good".
-    """
-    seen: list[str] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        seen.append(request.url.path)
-        return httpx.Response(200, json={"data": {"label": "test", "usage": 0}})
-
-    config = _config().model_copy(update={"kind": ProviderKind.OPENROUTER})
-    report = await chat_health(
-        config=config,
-        api_key="sk-or-v1-x",
-        client_factory=lambda: _client(httpx.MockTransport(handler)),
-    )
-    assert seen == [f"{_PATH_PREFIX}/key"]
-    assert report.status is HealthStatus.HEALTHY
-
-    # And every other kind still asks the model list, which does check the key.
-    seen.clear()
-    report = await chat_health(
-        config=_config(),
-        api_key="k",
-        client_factory=lambda: _client(httpx.MockTransport(handler)),
-    )
-    assert seen == [f"{_PATH_PREFIX}/models"]
 
 
 async def test_openrouter_endpoint_attribution_headers_and_model_id(

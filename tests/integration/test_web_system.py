@@ -16,6 +16,7 @@ from asgi_lifespan import LifespanManager
 from httpx import ASGITransport, AsyncClient
 
 import loreline.web.routes.system as system_route
+from loreline.health import HealthReport, HealthStatus
 from loreline.llm import DEFAULT_SYSTEM_PROMPT
 from loreline.settings import Settings
 from loreline.updater.process import CommandResult
@@ -83,17 +84,20 @@ async def test_healthz_extended(client: AsyncClient) -> None:
     assert body["diarizer_reachable"] is None
 
 
-async def test_healthz_reports_diarizer_reachability(
+async def test_healthz_reports_the_diarizers_graded_verdict(
     client: AsyncClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Once an endpoint is configured, health says whether it actually answers."""
+    """Once an endpoint is configured, health says whether it actually answers,
+    graded like a provider row rather than as a bool: a service answering 503
+    while its model loads is reachable and degraded, not absent."""
     probed: list[str] = []
+    verdict = HealthReport(HealthStatus.HEALTHY)
 
-    async def fake_probe(endpoint: str, **_kwargs: object) -> bool:
+    async def fake_probe(endpoint: str, **_kwargs: object) -> HealthReport:
         probed.append(endpoint)
-        return True
+        return verdict
 
-    monkeypatch.setattr(system_route, "probe_health", fake_probe)
+    monkeypatch.setattr(system_route, "probe_diarizer", fake_probe)
     monkeypatch.setattr(system_route, "_diarizer_probe", None)  # drop any cached verdict
 
     await client.put(
@@ -109,12 +113,29 @@ async def test_healthz_reports_diarizer_reachability(
     body = (await client.get("/api/system/healthz")).json()
     assert body["diarizer_endpoint"] == "http://diarization:8001"
     assert body["diarizer_reachable"] is True
+    assert body["diarizer_status"] == "healthy"
+    assert body["diarizer_detail"] is None
     assert probed == ["http://diarization:8001"]
 
     # Polled again straight away: served from cache, not re-probed - /healthz is
     # hit every few seconds by the UI.
     await client.get("/api/system/healthz")
     assert probed == ["http://diarization:8001"]
+
+    # A service that answered badly is still one that answered; only a host
+    # that gave nothing (or a URL no diarizer lives at) is unreachable.
+    monkeypatch.setattr(system_route, "_diarizer_probe", None)
+    verdict = HealthReport(HealthStatus.DEGRADED, "model loading")
+    body = (await client.get("/api/system/healthz")).json()
+    assert body["diarizer_reachable"] is True
+    assert body["diarizer_status"] == "degraded"
+    assert body["diarizer_detail"] == "model loading"
+
+    monkeypatch.setattr(system_route, "_diarizer_probe", None)
+    verdict = HealthReport(HealthStatus.UNREACHABLE, "could not connect: refused")
+    body = (await client.get("/api/system/healthz")).json()
+    assert body["diarizer_reachable"] is False
+    assert body["diarizer_status"] == "unreachable"
 
 
 async def test_revision(client: AsyncClient) -> None:

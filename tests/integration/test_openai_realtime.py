@@ -10,7 +10,6 @@ from websockets.asyncio.server import ServerConnection, serve
 
 from loreline.audio.chunker import Utterance
 from loreline.audio.resample import resample_pcm16
-from loreline.health import HealthStatus
 from loreline.models import Glossary, Protocol, ProviderConfig, ProviderKind, TranscriptEvent
 from loreline.stt.backends.openai_realtime import OpenAIRealtimeBackend
 from mocks.openai_realtime_ws import openai_realtime_handler
@@ -210,34 +209,6 @@ async def test_realtime_prompt_rejection_downgrades_to_promptless() -> None:
     assert '"prompt"' in updates[0]
     assert '"prompt"' not in updates[1]
     assert '"language"' in updates[1]  # rest of the session config kept
-
-
-async def test_realtime_health_ok() -> None:
-    async with serve(openai_realtime_handler, "127.0.0.1", 0) as server:
-        port = server.sockets[0].getsockname()[1]
-        config = ProviderConfig(
-            id="oai",
-            name="OpenAI",
-            kind=ProviderKind.OPENAI,
-            base_url=f"ws://127.0.0.1:{port}",
-            protocol=Protocol.WS,
-            sample_rate=24000,
-        )
-        report = await OpenAIRealtimeBackend(config, api_key="secret").health()
-        assert report.status is HealthStatus.HEALTHY
-
-
-async def test_realtime_health_false_when_unreachable() -> None:
-    config = ProviderConfig(
-        id="oai",
-        name="OpenAI",
-        kind=ProviderKind.OPENAI,
-        base_url="ws://127.0.0.1:1",
-        protocol=Protocol.WS,
-        sample_rate=24000,
-    )
-    report = await OpenAIRealtimeBackend(config, api_key="x").health()
-    assert report.status is HealthStatus.UNREACHABLE
 
 
 def test_resample_pcm16_upsamples_16k_to_24k() -> None:

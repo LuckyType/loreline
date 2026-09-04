@@ -31,7 +31,6 @@ all, and answers without touching the network when it already knows
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
 
 import httpx
 
@@ -46,8 +45,6 @@ from loreline.health import (
 )
 from loreline.models import Interaction, ProviderConfig, ProviderKind
 from loreline.stt.backends._ws import probe_socket
-
-ClientFactory = Callable[[], httpx.AsyncClient]
 
 # What an HTTP surface is asked when it declares no health path: free,
 # exercises the key, and implemented by every OpenAI-compatible server and by
@@ -98,7 +95,7 @@ async def probe_provider(
     config: ProviderConfig,
     api_key: str | None,
     *,
-    client_factory: ClientFactory | None = None,
+    http_transport: httpx.AsyncBaseTransport | None = None,
 ) -> HealthReport:
     """Whether this provider row works: its key at its declared surface.
 
@@ -106,9 +103,10 @@ async def probe_provider(
     outcome, a rejected key, a dead host, a row this app cannot locate a
     surface for, is a graded report, because the button's job is to render a
     state and an exception would render "down" with no explanation attached.
-    ``client_factory`` lets a test hand in an ``httpx.MockTransport`` client
-    for an HTTP surface; socket surfaces are reached through the row's own
-    ``base_url``, which is how the mock servers are pointed at.
+    ``http_transport`` lets a test put an ``httpx.MockTransport`` under an HTTP
+    surface and still see the URL and headers the probe builds; socket
+    surfaces are reached through the row's own ``base_url``, which is how the
+    mock servers are pointed at.
     """
     # Answered without a network call, and not merely as an optimisation: see
     # missing_credential on the keyless 404 that would otherwise read as a bad
@@ -125,7 +123,7 @@ async def probe_provider(
         )
     interaction, transport = target
     return await probe_surface(
-        config, api_key, interaction, transport, client_factory=client_factory
+        config, api_key, interaction, transport, http_transport=http_transport
     )
 
 
@@ -135,7 +133,7 @@ async def probe_surface(
     interaction: Interaction,
     transport: Transport | None = None,
     *,
-    client_factory: ClientFactory | None = None,
+    http_transport: httpx.AsyncBaseTransport | None = None,
 ) -> HealthReport:
     """Ask one declared surface of this row its health question. Never raises.
 
@@ -155,14 +153,12 @@ async def probe_surface(
         return await probe_socket(
             endpoint.url_with_key(api_key), endpoint.request_headers(api_key), frame
         )
-    if client_factory is not None:
-        client = client_factory()
-    else:
-        client = httpx.AsyncClient(
-            base_url=endpoint.url,
-            headers=endpoint.request_headers(api_key),
-            timeout=PROBE_TIMEOUT_S,
-        )
+    client = httpx.AsyncClient(
+        base_url=endpoint.url,
+        headers=endpoint.request_headers(api_key),
+        timeout=PROBE_TIMEOUT_S,
+        transport=http_transport,
+    )
     path = probe.path if probe is not None and probe.path else DEFAULT_HEALTH_PATH
     params: dict[str, str | int] | None = dict(probe.params) if probe and probe.params else None
     try:

@@ -3,17 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Callable
-from pathlib import Path
 
 import httpx
 import pytest
 
 from loreline.audio.chunker import Utterance
-from loreline.health import HealthStatus
 from loreline.models import Glossary, Protocol, ProviderConfig, ProviderKind, TranscriptEvent
-from loreline.secrets import SecretStore
 from loreline.stt.backends.openai_compat import OpenAICompatBackend
-from loreline.stt.registry import create_backend
 from mocks.openai_compat import create_app
 
 
@@ -67,49 +63,6 @@ async def test_transcribe_passes_glossary_prompt() -> None:
         ]
 
     assert "prompt: Drakonia, Thalric" in events[0].text
-
-
-async def test_health_ok() -> None:
-    transport = httpx.ASGITransport(app=create_app())
-    async with httpx.AsyncClient(transport=transport, base_url="http://mock/v1") as client:
-        backend = _backend(client)
-        report = await backend.health()
-        assert report.status is HealthStatus.HEALTHY
-
-
-async def test_health_path_is_per_kind_not_hardcoded(tmp_path: Path) -> None:
-    """OpenRouter reuses this connector but must not be probed with /models.
-
-    Verified live: OpenRouter answers /models with its whole catalogue to an
-    anonymous caller, so grading it would report every key as healthy - the
-    same defect this change exists to remove. Its batch surface in
-    capabilities.yaml declares ``health: /key``, and the connector reads it.
-    """
-    seen: list[str] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        seen.append(request.url.path)
-        return httpx.Response(200, json={"data": {"label": "test"}})
-
-    config = ProviderConfig(
-        id="or-1",
-        name="OpenRouter",
-        kind=ProviderKind.OPENROUTER,
-        protocol=Protocol.HTTP_BATCH,
-    )
-    client = httpx.AsyncClient(
-        transport=httpx.MockTransport(handler), base_url="https://openrouter.ai/api/v1"
-    )
-    async with client:
-        # Through the registry, so this covers the factory's wiring rather than
-        # a hand-built backend that could be given the right path by accident.
-        backend = create_backend(config, SecretStore(tmp_path / "secrets.json"), "openai/whisper-1")
-        assert isinstance(backend, OpenAICompatBackend)
-        backend._client = client  # pyright: ignore[reportPrivateUsage]
-        report = await backend.health()
-
-    assert seen == ["/api/v1/key"]
-    assert report.status is HealthStatus.HEALTHY
 
 
 # --- verbose_json: word timings and speaker labels -----------------------
