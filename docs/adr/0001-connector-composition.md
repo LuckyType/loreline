@@ -1,5 +1,5 @@
 ---
-status: accepted
+status: accepted, one bullet superseded by 0005
 date: 2026-09-03
 ---
 
