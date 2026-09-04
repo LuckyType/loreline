@@ -163,8 +163,9 @@ async function submit() {
 		{:else}
 			<div class="flex flex-col gap-4">
 				<div class="flex flex-col gap-2">
-					<Label>Provider</Label>
+					<Label for="video-provider">Provider</Label>
 					<Dropdown
+						id="video-provider"
 						bind:value={providerId}
 						options={providers.map((p) => ({ value: p.id, label: p.name }))}
 						placeholder="Provider"
@@ -172,8 +173,9 @@ async function submit() {
 				</div>
 
 				<div class="flex flex-col gap-2">
-					<Label>Model</Label>
+					<Label for="video-model">Model</Label>
 					<Dropdown
+						id="video-model"
 						bind:value={modelId}
 						loading={loadingModels}
 						filterable
@@ -202,8 +204,9 @@ async function submit() {
 					<div class="grid grid-cols-2 gap-3">
 						{#if durations.length}
 							<div class="flex flex-col gap-2">
-								<Label>Length</Label>
+								<Label for="video-duration">Length</Label>
 								<Dropdown
+									id="video-duration"
 									value={duration === null ? '' : String(duration)}
 									onpick={(v) => (duration = v ? Number(v) : null)}
 									options={durations.map((d) => ({ value: String(d), label: `${d}s` }))}
@@ -212,8 +215,9 @@ async function submit() {
 						{/if}
 						{#if resolutions.length}
 							<div class="flex flex-col gap-2">
-								<Label>Resolution</Label>
+								<Label for="video-resolution">Resolution</Label>
 								<Dropdown
+									id="video-resolution"
 									bind:value={resolution}
 									options={resolutions.map((r) => ({ value: r, label: r }))}
 								/>
@@ -221,8 +225,9 @@ async function submit() {
 						{/if}
 						{#if aspectRatios.length}
 							<div class="flex flex-col gap-2">
-								<Label>Aspect ratio</Label>
+								<Label for="video-aspect-ratio">Aspect ratio</Label>
 								<Dropdown
+									id="video-aspect-ratio"
 									bind:value={aspectRatio}
 									options={aspectRatios.map((r) => ({ value: r, label: r }))}
 								/>
