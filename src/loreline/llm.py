@@ -17,7 +17,7 @@ import httpx
 from openrouter.components.chatrequest import ChatRequestReasoning
 from openrouter.components.providerpreferences import ProviderPreferences
 
-from loreline.capabilities import Endpoint, kinds_for, surface_for
+from loreline.capabilities import Endpoint, surface_for
 from loreline.health import error_body, error_detail
 from loreline.logging import get_logger
 from loreline.models import Interaction, OpenRouterRouting, ProviderConfig, ProviderKind
@@ -25,10 +25,6 @@ from loreline.models import Interaction, OpenRouterRouting, ProviderConfig, Prov
 log = get_logger(__name__)
 
 _TIMEOUT_S = 120.0
-# Provider kinds that summarize, i.e. speak chat-completions rather than STT.
-# Derived from the one capability table rather than re-listed here - see
-# loreline.capabilities.kinds_for.
-LLM_KINDS = kinds_for(Interaction.SUMMARIZE)
 
 # Built-in summary instructions. The settings UI exposes an editable copy of
 # this (kv `action_defaults.summarize_prompt`); a blank stored value falls back
