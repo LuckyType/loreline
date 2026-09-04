@@ -22,6 +22,17 @@ repos:
         language: system
         types: [python]
         pass_filenames: false
+      # The frontend's wire types are generated from the API's own OpenAPI
+      # document, so a schema change that never reached the browser is a
+      # commit that typechecks on both sides and breaks at runtime. This is
+      # what makes it a compile error instead. See scripts/check-openapi.sh.
+      - id: openapi-current
+        name: openapi document and wire types are current
+        entry: scripts/check-openapi.sh
+        language: system
+        pass_filenames: false
+        files: ^(src/loreline/.*\.py|frontend/openapi\.json|frontend/src/lib/api\.generated\.d\.ts)$
+
       - id: uv-lock-check
         name: uv lock check
         entry: uv lock --check

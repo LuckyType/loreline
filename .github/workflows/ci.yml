@@ -38,6 +38,17 @@ jobs:
       - name: Pytest
         run: uv run pytest
 
+      # The frontend's wire types are generated from this document, so a
+      # schema change that was not regenerated would reach the browser as an
+      # undefined field rather than a type error. The other half of the chain,
+      # openapi.json -> api.generated.d.ts, is checked by `npm run check` in
+      # the frontend job, which is where the generator lives.
+      - name: OpenAPI document is current
+        run: |
+          uv run loreline openapi | diff -u frontend/openapi.json - \
+            --label 'frontend/openapi.json (committed)' --label 'the API as it is now' \
+            || { echo '::error::frontend/openapi.json is stale - run `npm run gen:api` in frontend/'; exit 1; }
+
       # Sunset dates recorded in capabilities.yaml, checked against the
       # calendar and nothing else: no network, no secrets, same answer for
       # everyone on a given day. It fails once a curated model is inside a week

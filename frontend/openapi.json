@@ -1,0 +1,5280 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Loreline",
+    "summary": "Tabletop session transcriber - capture + STT orchestration.",
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/api/system/healthz": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Healthz",
+        "description": "Return service health. Used by UI badge, push alerts, and external polling.",
+        "operationId": "healthz_api_system_healthz_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/system/revision": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Revision",
+        "description": "Return the currently deployed git commit.",
+        "operationId": "revision_api_system_revision_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RevisionResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
+      }
+    },
+    "/api/system/update": {
+      "post": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Trigger Update",
+        "description": "Run the self-update (git pull + uv sync + restart).",
+        "operationId": "trigger_update_api_system_update_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpdateResult"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
+      }
+    },
+    "/api/system/rollback": {
+      "post": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Rollback",
+        "description": "Roll the deployment back to a prior commit.",
+        "operationId": "rollback_api_system_rollback_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RollbackRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpdateResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
+      }
+    },
+    "/api/system/autostart": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Get Autostart",
+        "description": "Report whether the systemd unit is enabled at boot.",
+        "operationId": "get_autostart_api_system_autostart_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AutostartState"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Set Autostart",
+        "description": "Enable or disable systemd autostart.",
+        "operationId": "set_autostart_api_system_autostart_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AutostartUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AutostartState"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
+      }
+    },
+    "/api/system/defaults": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Get Defaults",
+        "description": "Return the per-action default models/mode used to pre-select the pickers.\n\nA blank stored summary prompt is served as the built-in default text, so\nthe settings UI always shows the concrete, editable instructions -\nclearing the field and saving is the reset-to-default gesture.",
+        "operationId": "get_defaults_api_system_defaults_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActionDefaults"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Set Defaults",
+        "description": "Persist the per-action defaults.\n\nA summary prompt equal to the built-in default (or blank) is stored blank,\nso an untouched field keeps tracking future improvements to the built-in\ntext instead of pinning today's copy. The response mirrors GET: served\nfilled in.",
+        "operationId": "set_defaults_api_system_defaults_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ActionDefaults"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActionDefaults"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
+      }
+    },
+    "/api/system/alerts/channels": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "List Alert Channels",
+        "description": "List configured alert channels (tokens masked as set/unset).",
+        "operationId": "list_alert_channels_api_system_alerts_channels_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/AlertChannelView"
+                  },
+                  "type": "array",
+                  "title": "Response List Alert Channels Api System Alerts Channels Get"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Create Alert Channel",
+        "description": "Add an alert channel; store its token write-only when supplied.",
+        "operationId": "create_alert_channel_api_system_alerts_channels_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AlertChannelWrite"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AlertChannelView"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
+      }
+    },
+    "/api/system/alerts/channels/{channel_id}": {
+      "put": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Update Alert Channel",
+        "description": "Replace an alert channel; set its token too when one is supplied.",
+        "operationId": "update_alert_channel_api_system_alerts_channels__channel_id__put",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "channel_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Channel Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AlertChannelWrite"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AlertChannelView"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Delete Alert Channel",
+        "description": "Delete an alert channel and its stored token.",
+        "operationId": "delete_alert_channel_api_system_alerts_channels__channel_id__delete",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "channel_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Channel Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/system/alerts/channels/{channel_id}/test": {
+      "post": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Test Alert Channel",
+        "description": "Send a test notification to one channel.",
+        "operationId": "test_alert_channel_api_system_alerts_channels__channel_id__test_post",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "channel_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Channel Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AlertTestResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/system/services": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "List Services",
+        "description": "The containers in this compose project, with their current state.",
+        "operationId": "list_services_api_system_services_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ServiceState"
+                  },
+                  "type": "array",
+                  "title": "Response List Services Api System Services Get"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
+      }
+    },
+    "/api/system/services/{name}": {
+      "post": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Set Service Running",
+        "description": "Start or stop one of the optional services.",
+        "operationId": "set_service_running_api_system_services__name__post",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ServiceAction"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceState"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/system/services/{name}/logs": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Service Logs",
+        "description": "Recent stdout/stderr for one service's container.",
+        "operationId": "service_logs_api_system_services__name__logs_get",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          },
+          {
+            "name": "tail",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 200,
+              "title": "Tail"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceLogs"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/capabilities": {
+      "get": {
+        "tags": [
+          "capabilities"
+        ],
+        "summary": "Get Capabilities",
+        "description": "Everything the UI needs to decide what to show, hide and badge.",
+        "operationId": "get_capabilities_api_capabilities_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CapabilityConfig"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/login": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Login",
+        "description": "Validate the shared password and set an auth cookie.\n\nRate-limited per client IP (see ``LoginRateLimiter``): a shared password\nwith no backoff is a free brute-force target on a device that's LAN- (or\nworse, internet-) reachable.",
+        "operationId": "login_api_auth_login_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/logout": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Logout",
+        "description": "Clear the auth cookie.",
+        "operationId": "logout_api_auth_logout_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/audio/devices": {
+      "get": {
+        "tags": [
+          "audio"
+        ],
+        "summary": "Audio Devices",
+        "description": "List available audio input devices (empty without the ``audio`` extra).",
+        "operationId": "audio_devices_api_audio_devices_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/InputDevice"
+                  },
+                  "type": "array",
+                  "title": "Response Audio Devices Api Audio Devices Get"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
+      }
+    },
+    "/api/audio/device": {
+      "get": {
+        "tags": [
+          "audio"
+        ],
+        "summary": "Get Input Device",
+        "description": "Return the persisted default input device (null = system default).",
+        "operationId": "get_input_device_api_audio_device_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeviceSetting"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "audio"
+        ],
+        "summary": "Set Input Device",
+        "description": "Persist the default input device used when starting a session.",
+        "operationId": "set_input_device_api_audio_device_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeviceSetting"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
+      }
+    },
+    "/api/providers": {
+      "get": {
+        "tags": [
+          "providers"
+        ],
+        "summary": "List Providers",
+        "description": "Return all configured providers with masked key hints.",
+        "operationId": "list_providers_api_providers_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ProviderView"
+                  },
+                  "type": "array",
+                  "title": "Response List Providers Api Providers Get"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "providers"
+        ],
+        "summary": "Create Provider",
+        "description": "Create a provider; optionally store its API key in the same request.",
+        "operationId": "create_provider_api_providers_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProviderCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderView"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
+      }
+    },
+    "/api/providers/{provider_id}": {
+      "put": {
+        "tags": [
+          "providers"
+        ],
+        "summary": "Update Provider",
+        "description": "Replace a provider's config; set the API key too when one is supplied.",
+        "operationId": "update_provider_api_providers__provider_id__put",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "provider_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Provider Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProviderCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderView"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "providers"
+        ],
+        "summary": "Delete Provider",
+        "description": "Delete a provider and its stored secret (if any).",
+        "operationId": "delete_provider_api_providers__provider_id__delete",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "provider_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Provider Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/providers/{provider_id}/secret": {
+      "post": {
+        "tags": [
+          "providers"
+        ],
+        "summary": "Set Secret",
+        "description": "Store an API key for a provider in the secret store (write-only).",
+        "operationId": "set_secret_api_providers__provider_id__secret_post",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "provider_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Provider Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SecretWrite"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/providers/{provider_id}/test": {
+      "post": {
+        "tags": [
+          "providers"
+        ],
+        "summary": "Test Provider",
+        "description": "Probe the provider's endpoint and credential, and grade the answer.\n\nOnly a missing *provider* is an HTTP error here. Everything the probe can\nrun into - a rejected key, a dead host, a row this app cannot locate a\nsurface for - comes back as a graded :class:`TestResult`, because the\nbutton's job is to report a state, and an error status just makes the page\nrender \"down\" with no explanation attached. Which surface is asked, and\nhow, is :mod:`loreline.health_probe`'s decision, not this route's.",
+        "operationId": "test_provider_api_providers__provider_id__test_post",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "provider_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Provider Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TestResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/providers/models": {
+      "post": {
+        "tags": [
+          "providers"
+        ],
+        "summary": "Provider Models",
+        "description": "List a provider's available models (live /v1/models, else a curated set).\n\nEntries carry price/context length only where the provider publishes them\n(OpenRouter); everywhere else it's the bare id, exactly as before.",
+        "operationId": "provider_models_api_providers_models_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProviderModelsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ModelInfo"
+                  },
+                  "type": "array",
+                  "title": "Response Provider Models Api Providers Models Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
+      }
+    },
+    "/api/glossary": {
+      "get": {
+        "tags": [
+          "glossary"
+        ],
+        "summary": "Get Default Glossary",
+        "description": "Return the default word list applied to every session.",
+        "operationId": "get_default_glossary_api_glossary_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Glossary"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "glossary"
+        ],
+        "summary": "Put Default Glossary",
+        "description": "Replace the default word list (applied to every session).",
+        "operationId": "put_default_glossary_api_glossary_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GlossaryWrite"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Glossary"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
+      }
+    },
+    "/api/glossary/{campaign_id}": {
+      "get": {
+        "tags": [
+          "glossary"
+        ],
+        "summary": "Get Glossary",
+        "description": "Return the glossary for a campaign (empty if none).",
+        "operationId": "get_glossary_api_glossary__campaign_id__get",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "campaign_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Campaign Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Glossary"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "glossary"
+        ],
+        "summary": "Put Glossary",
+        "description": "Replace a campaign's glossary terms.",
+        "operationId": "put_glossary_api_glossary__campaign_id__put",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "campaign_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Campaign Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GlossaryWrite"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Glossary"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/session/start": {
+      "post": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "Start Session",
+        "description": "Start a capture session (using the saved default mic when none is supplied).",
+        "operationId": "start_session_api_session_start_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StartSessionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Session"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
+      }
+    },
+    "/api/session/stop": {
+      "post": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "Stop Session",
+        "description": "Stop the active capture session.",
+        "operationId": "stop_session_api_session_stop_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Session"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
+      }
+    },
+    "/api/session": {
+      "get": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "List Sessions",
+        "description": "Return all sessions, newest first.",
+        "operationId": "list_sessions_api_session_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/Session"
+                  },
+                  "type": "array",
+                  "title": "Response List Sessions Api Session Get"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
+      }
+    },
+    "/api/session/{session_id}": {
+      "get": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "Get Session",
+        "description": "Return a session and its transcript.",
+        "operationId": "get_session_api_session__session_id__get",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/session/{session_id}/transcript": {
+      "get": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "Get Transcript Version",
+        "description": "One transcript version's segments (\"original\" or a transcribe job id).\n\nReturns the version's diarized relabeling when one exists, its raw rows\notherwise - same rule the canonical view applies to the original.",
+        "operationId": "get_transcript_version_api_session__session_id__transcript_get",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          },
+          {
+            "name": "version",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "original",
+              "title": "Version"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/TranscriptEvent"
+                  },
+                  "title": "Response Get Transcript Version Api Session  Session Id  Transcript Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "Delete Transcript Version",
+        "description": "Delete one re-transcription version: its segments and its job rows.\n\n\"original\" is refused here, not merely hidden in the UI: it is the live\ncapture and nothing can produce it again. See\n``ReprocessManager.delete_version`` for what a version drags with it.",
+        "operationId": "delete_transcript_version_api_session__session_id__transcript_delete",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          },
+          {
+            "name": "version",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Version"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/session/{session_id}/logs": {
+      "get": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "Get Version Logs",
+        "description": "One transcript version's stored log (\"original\" or a transcribe job id).\n\nThese are the lines that produced that version, kept per version because\nthe dashboard's ring buffer forgets them within minutes - and the run that\nmatters most, the live capture, is the one that can never be repeated.",
+        "operationId": "get_version_logs_api_session__session_id__logs_get",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          },
+          {
+            "name": "version",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "original",
+              "title": "Version"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VersionLogs"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/session/{session_id}/speakers": {
+      "put": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "Set Speaker Names",
+        "description": "Set the per-session speaker rename map (applied in the transcript view + exports).",
+        "operationId": "set_speaker_names_api_session__session_id__speakers_put",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SpeakerNamesUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/session/{session_id}/summarize": {
+      "post": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "Summarize Session",
+        "description": "Summarize a session's transcript with the chosen LLM provider + model.",
+        "operationId": "summarize_session_api_session__session_id__summarize_post",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SummarizeRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SummarizeResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/session/{session_id}/export": {
+      "get": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "Export Session",
+        "description": "Export a session's transcript as txt/md/srt/vtt/json.",
+        "operationId": "export_session_api_session__session_id__export_get",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          },
+          {
+            "name": "fmt",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "txt",
+              "title": "Fmt"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/session/{session_id}/audio": {
+      "get": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "Download Session Audio",
+        "description": "Download the stored session audio (WAV).",
+        "operationId": "download_session_audio_api_session__session_id__audio_get",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/session/delete": {
+      "post": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "Delete Sessions",
+        "description": "Delete the given sessions, including their transcript and stored audio.",
+        "operationId": "delete_sessions_api_session_delete_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionIds"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
+      }
+    },
+    "/api/session/merge": {
+      "post": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "Merge Sessions",
+        "description": "Merge the selected sessions' transcripts - and audio - into a new session.\n\nParts are concatenated oldest-first, each part's timestamps offset so they run\nback-to-back; speaker rename maps are unioned; originals are left intact. When\nevery source has stored audio (at one shared sample rate), the WAVs and\nutterance indexes are concatenated too, so the merged session can be\nre-processed, re-diarized, and downloaded like any other.",
+        "operationId": "merge_sessions_api_session_merge_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionIds"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Session"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
+      }
+    },
+    "/api/reprocess": {
+      "post": {
+        "tags": [
+          "reprocess"
+        ],
+        "summary": "Enqueue Reprocess",
+        "description": "Enqueue a post-session re-processing job.",
+        "operationId": "enqueue_reprocess_api_reprocess_post",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReprocessRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReprocessJob"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "reprocess"
+        ],
+        "summary": "List Reprocess Jobs",
+        "description": "List re-processing jobs for a session, newest first.",
+        "operationId": "list_reprocess_jobs_api_reprocess_get",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ReprocessJob"
+                  },
+                  "title": "Response List Reprocess Jobs Api Reprocess Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/reprocess/{job_id}": {
+      "get": {
+        "tags": [
+          "reprocess"
+        ],
+        "summary": "Get Reprocess Job",
+        "description": "Return a single re-processing job.",
+        "operationId": "get_reprocess_job_api_reprocess__job_id__get",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Job Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReprocessJob"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/video/models": {
+      "get": {
+        "tags": [
+          "video"
+        ],
+        "summary": "Video Models",
+        "description": "Video models a provider offers, with the parameters each one accepts.\n\nDrives the generate dialog's controls: durations, resolutions and aspect\nratios differ per model, so the form is built from this rather than from a\nfixed list. Best-effort - an unreachable provider yields an empty list, and\nthe dialog says so instead of failing the page.",
+        "operationId": "video_models_api_video_models_get",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "provider_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Provider Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/VideoModelInfo"
+                  },
+                  "title": "Response Video Models Api Video Models Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/video": {
+      "post": {
+        "tags": [
+          "video"
+        ],
+        "summary": "Enqueue Video",
+        "description": "Start a video generation; returns immediately with a queued job.",
+        "operationId": "enqueue_video_api_video_post",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/VideoGenerateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VideoJob"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "video"
+        ],
+        "summary": "List Video Jobs",
+        "description": "List a session's video jobs, newest first.",
+        "operationId": "list_video_jobs_api_video_get",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/VideoJob"
+                  },
+                  "title": "Response List Video Jobs Api Video Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/video/{job_id}": {
+      "get": {
+        "tags": [
+          "video"
+        ],
+        "summary": "Get Video Job",
+        "description": "Return a single video job (the client polls this while it runs).",
+        "operationId": "get_video_job_api_video__job_id__get",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Job Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VideoJob"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "video"
+        ],
+        "summary": "Delete Video Job",
+        "description": "Delete a video job and its stored file.",
+        "operationId": "delete_video_job_api_video__job_id__delete",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Job Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/video/{job_id}/content": {
+      "get": {
+        "tags": [
+          "video"
+        ],
+        "summary": "Get Video Content",
+        "description": "Serve a finished job's video file for playback/download.\n\nServed from local storage rather than redirecting upstream: OpenRouter's\nresult URLs expire, and the whole point of downloading the bytes at job\ncompletion was that the video keeps working afterwards.",
+        "operationId": "get_video_content_api_video__job_id__content_get",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Job Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ActionDefaults": {
+        "properties": {
+          "stt_provider": {
+            "type": "string",
+            "title": "Stt Provider",
+            "default": ""
+          },
+          "stt_model": {
+            "type": "string",
+            "title": "Stt Model",
+            "default": ""
+          },
+          "diar_mode": {
+            "type": "string",
+            "title": "Diar Mode",
+            "default": ""
+          },
+          "diar_endpoint": {
+            "type": "string",
+            "title": "Diar Endpoint",
+            "default": ""
+          },
+          "summarize_provider": {
+            "type": "string",
+            "title": "Summarize Provider",
+            "default": ""
+          },
+          "summarize_model": {
+            "type": "string",
+            "title": "Summarize Model",
+            "default": ""
+          },
+          "summarize_prompt": {
+            "type": "string",
+            "title": "Summarize Prompt",
+            "default": ""
+          },
+          "video_provider": {
+            "type": "string",
+            "title": "Video Provider",
+            "default": ""
+          },
+          "video_model": {
+            "type": "string",
+            "title": "Video Model",
+            "default": ""
+          },
+          "summarize_reasoning_effort": {
+            "type": "string",
+            "title": "Summarize Reasoning Effort",
+            "default": ""
+          },
+          "strict_model_filtering": {
+            "type": "boolean",
+            "title": "Strict Model Filtering",
+            "default": true
+          }
+        },
+        "type": "object",
+        "title": "ActionDefaults",
+        "description": "Per-action defaults surfaced first in the on-demand pickers (blank = none)."
+      },
+      "AlertChannelView": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "ntfy",
+              "telegram",
+              "webhook"
+            ],
+            "title": "Type"
+          },
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled"
+          },
+          "min_level": {
+            "$ref": "#/components/schemas/AlertLevel"
+          },
+          "server": {
+            "type": "string",
+            "title": "Server"
+          },
+          "topic": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Topic"
+          },
+          "chat_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Chat Id"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url"
+          },
+          "token_set": {
+            "type": "boolean",
+            "title": "Token Set"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "type",
+          "enabled",
+          "min_level",
+          "server",
+          "topic",
+          "chat_id",
+          "url",
+          "token_set"
+        ],
+        "title": "AlertChannelView",
+        "description": "One alert channel returned to the UI (token masked as a set/unset flag)."
+      },
+      "AlertChannelWrite": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "ntfy",
+              "telegram",
+              "webhook"
+            ],
+            "title": "Type"
+          },
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled",
+            "default": true
+          },
+          "min_level": {
+            "$ref": "#/components/schemas/AlertLevel",
+            "default": "warning"
+          },
+          "server": {
+            "type": "string",
+            "title": "Server",
+            "default": "https://ntfy.sh"
+          },
+          "topic": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Topic"
+          },
+          "chat_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Chat Id"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url"
+          },
+          "token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Token",
+            "description": "Write-only token (Telegram bot / ntfy auth)."
+          }
+        },
+        "type": "object",
+        "required": [
+          "type"
+        ],
+        "title": "AlertChannelWrite",
+        "description": "Create/update payload for one alert channel (token is write-only)."
+      },
+      "AlertLevel": {
+        "type": "string",
+        "enum": [
+          "info",
+          "warning",
+          "error"
+        ],
+        "title": "AlertLevel",
+        "description": "Severity of an alert; gated against each channel's ``min_level``."
+      },
+      "AlertTestResult": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          }
+        },
+        "type": "object",
+        "required": [
+          "ok"
+        ],
+        "title": "AlertTestResult",
+        "description": "Delivery outcome of a single channel test."
+      },
+      "AuthScheme": {
+        "type": "string",
+        "enum": [
+          "bearer",
+          "token_header",
+          "raw_header",
+          "goog_header",
+          "query_key",
+          "none"
+        ],
+        "title": "AuthScheme",
+        "description": "How a surface wants the credential spelled on the wire.\n\nA data value, so the yaml can say it and one place can render it. Every\nvendor here spells it differently: Deepgram wants ``Authorization: Token``,\nAssemblyAI the bare key with no scheme at all, Google its own header on the\nnative surface and a query parameter on the Live socket, and everything\nOpenAI-compatible a Bearer token. Sending the wrong spelling is a 401 that\nreads exactly like a bad key, which is why the spelling travels with the\nsurface rather than being remembered per connector."
+      },
+      "AutostartState": {
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled"
+          }
+        },
+        "type": "object",
+        "required": [
+          "enabled"
+        ],
+        "title": "AutostartState",
+        "description": "Whether the systemd unit is enabled to start at boot."
+      },
+      "AutostartUpdate": {
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled"
+          }
+        },
+        "type": "object",
+        "required": [
+          "enabled"
+        ],
+        "title": "AutostartUpdate",
+        "description": "Toggle systemd autostart."
+      },
+      "CapabilityConfig": {
+        "properties": {
+          "version": {
+            "type": "integer",
+            "title": "Version"
+          },
+          "providers": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/ProviderSpec"
+            },
+            "propertyNames": {
+              "$ref": "#/components/schemas/ProviderKind"
+            },
+            "type": "object",
+            "title": "Providers"
+          },
+          "transcribe_name_markers": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Transcribe Name Markers"
+          },
+          "realtime_name_markers": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Realtime Name Markers"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "version",
+          "providers"
+        ],
+        "title": "CapabilityConfig",
+        "description": "The whole file."
+      },
+      "DeviceSetting": {
+        "properties": {
+          "device": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Device"
+          }
+        },
+        "type": "object",
+        "title": "DeviceSetting",
+        "description": "The persisted default audio input device (device index as a string, or null)."
+      },
+      "DiarizationConfig": {
+        "properties": {
+          "mode": {
+            "$ref": "#/components/schemas/DiarizationMode",
+            "default": "none"
+          },
+          "endpoint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Endpoint"
+          },
+          "min_speakers": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Min Speakers"
+          },
+          "max_speakers": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Speakers"
+          }
+        },
+        "type": "object",
+        "title": "DiarizationConfig",
+        "description": "Diarization settings for a session."
+      },
+      "DiarizationMode": {
+        "type": "string",
+        "enum": [
+          "inline",
+          "remote",
+          "openai",
+          "none"
+        ],
+        "title": "DiarizationMode",
+        "description": "How speaker labels are produced."
+      },
+      "Glossary": {
+        "properties": {
+          "campaign_id": {
+            "type": "string",
+            "title": "Campaign Id"
+          },
+          "terms": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Terms"
+          }
+        },
+        "type": "object",
+        "required": [
+          "campaign_id"
+        ],
+        "title": "Glossary",
+        "description": "Per-campaign custom vocabulary (spell / character / place names)."
+      },
+      "GlossarySupport": {
+        "properties": {
+          "supported": {
+            "type": "boolean",
+            "title": "Supported",
+            "default": false
+          },
+          "field": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Field"
+          },
+          "max_terms": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Terms"
+          },
+          "max_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Tokens"
+          },
+          "max_term_chars": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Term Chars"
+          },
+          "max_terms_realtime": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Terms Realtime"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "GlossarySupport",
+        "description": "Whether keyword biasing exists, and what the request field is called.\n\nEvery vendor spells this differently (Deepgram ``keyterm``, AssemblyAI\n``keyterms_prompt``, OpenAI-compatible ``prompt``, Gemini a vocabulary\nlist), and at least one - OpenRouter's transcription API - has no such\nfield at all. Recording the field name here is what tells the connector how\nto send the glossary, and ``supported: false`` is what tells the UI to\ndisable the \"Use glossary\" checkbox rather than leave a control that does\nnothing."
+      },
+      "GlossaryWrite": {
+        "properties": {
+          "terms": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Terms"
+          }
+        },
+        "type": "object",
+        "title": "GlossaryWrite",
+        "description": "Replace a campaign glossary's terms."
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "HealthProbe": {
+        "properties": {
+          "path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Path"
+          },
+          "params": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Params"
+          },
+          "frame": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Frame"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "HealthProbe",
+        "description": "The cheap question a health probe asks of one surface, as data.\n\nFor an HTTP surface, ``path`` (and ``params``): a read that exercises the\ncredential and costs nothing. Declared only where the obvious ``/models``\nis the wrong question: it is public on OpenRouter and Deepgram, so grading\nit would call any key healthy, and AssemblyAI has no such route at all. A\nsurface that declares none is asked ``/models``.\n\nFor a socket surface, ``frame``: the first message to send once the\nsocket is open, for a vendor that waits for the client to speak\n(Deepgram, whose ``CloseStream`` makes it answer and hang up at once). A\nvendor that greets first (AssemblyAI) declares none, and the probe reads\nthe greeting. Static data only: a frame that needs a model or a session's\nsettings is a session question, not a health one, and the handshake has\nalready tested the credential by the time it would be sent."
+      },
+      "HealthResponse": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "version": {
+            "type": "string",
+            "title": "Version"
+          },
+          "uptime_seconds": {
+            "type": "number",
+            "title": "Uptime Seconds"
+          },
+          "capture_status": {
+            "$ref": "#/components/schemas/SessionStatus"
+          },
+          "active_session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active Session Id"
+          },
+          "disk_free_bytes": {
+            "type": "integer",
+            "title": "Disk Free Bytes",
+            "default": 0
+          },
+          "disk_total_bytes": {
+            "type": "integer",
+            "title": "Disk Total Bytes",
+            "default": 0
+          },
+          "alerts_enabled": {
+            "type": "boolean",
+            "title": "Alerts Enabled",
+            "default": false
+          },
+          "diarizer_endpoint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Diarizer Endpoint"
+          },
+          "diarizer_reachable": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Diarizer Reachable"
+          },
+          "diarizer_status": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HealthStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "diarizer_detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Diarizer Detail"
+          },
+          "stt_degraded_since": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stt Degraded Since"
+          },
+          "stt_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stt Error"
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "version",
+          "uptime_seconds",
+          "capture_status"
+        ],
+        "title": "HealthResponse",
+        "description": "Health/status payload for monitoring and the UI status badge."
+      },
+      "HealthStatus": {
+        "type": "string",
+        "enum": [
+          "healthy",
+          "degraded",
+          "unauthorized",
+          "unreachable",
+          "unknown"
+        ],
+        "title": "HealthStatus",
+        "description": "How far a provider got when we asked it a cheap question.\n\nOrdered from best to worst as the settings page renders them. The value\nstrings are the wire format of ``POST /providers/{id}/test`` and the\nfrontend switches on them directly, so they are API, not labels."
+      },
+      "InputDevice": {
+        "properties": {
+          "index": {
+            "type": "integer",
+            "title": "Index"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "channels": {
+            "type": "integer",
+            "title": "Channels"
+          },
+          "default_samplerate": {
+            "type": "number",
+            "title": "Default Samplerate"
+          }
+        },
+        "type": "object",
+        "required": [
+          "index",
+          "name",
+          "channels",
+          "default_samplerate"
+        ],
+        "title": "InputDevice"
+      },
+      "Interaction": {
+        "type": "string",
+        "enum": [
+          "transcribe",
+          "summarize",
+          "video"
+        ],
+        "title": "Interaction",
+        "description": "What a provider is being asked to do.\n\nProviders are not interchangeable across these: a chat model cannot accept\naudio, a transcription model cannot write a summary, and only a video model\ngenerates video. Every model picker is scoped by one of these so a\ncombination that cannot work is never offered - see\n:mod:`loreline.capabilities`."
+      },
+      "JobStatus": {
+        "type": "string",
+        "enum": [
+          "queued",
+          "running",
+          "done",
+          "error"
+        ],
+        "title": "JobStatus",
+        "description": "Lifecycle state of a re-processing job."
+      },
+      "LlmCapabilities": {
+        "properties": {
+          "reasoning": {
+            "$ref": "#/components/schemas/ReasoningSupport",
+            "default": {
+              "supported": false,
+              "mandatory": false,
+              "efforts": []
+            }
+          },
+          "context_length": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context Length"
+          },
+          "max_output_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Output Tokens"
+          },
+          "system_prompt": {
+            "type": "boolean",
+            "title": "System Prompt",
+            "default": true
+          },
+          "temperature": {
+            "type": "boolean",
+            "title": "Temperature",
+            "default": true
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "LlmCapabilities",
+        "description": "Per-model summarization surface.\n\n``temperature`` is here because it is not cosmetic: several reasoning\nmodels reject the parameter outright, and sending it fails the request. The\nsummarizer reads this instead of catching the error after the fact.\n``system_prompt`` likewise decides whether our instructions go in a system\nmessage or get folded into the user turn."
+      },
+      "LoginRequest": {
+        "properties": {
+          "password": {
+            "type": "string",
+            "title": "Password"
+          }
+        },
+        "type": "object",
+        "required": [
+          "password"
+        ],
+        "title": "LoginRequest",
+        "description": "Password login payload."
+      },
+      "ModelInfo": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "context_length": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context Length"
+          },
+          "realtime": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Realtime"
+          },
+          "inline_diarization": {
+            "type": "boolean",
+            "title": "Inline Diarization",
+            "default": false
+          },
+          "supports_reasoning": {
+            "type": "boolean",
+            "title": "Supports Reasoning",
+            "default": false
+          },
+          "pricing": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ModelPrice"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "price_tiers": {
+            "items": {
+              "$ref": "#/components/schemas/ModelPrice"
+            },
+            "type": "array",
+            "title": "Price Tiers"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id"
+        ],
+        "title": "ModelInfo",
+        "description": "One entry in a provider's model list.\n\nOnly ``id`` is ever guaranteed: a curated catalog entry (Deepgram, Google)\nand a plain OpenAI ``/models`` row carry nothing else, and the pickers must\nrender those exactly as before. Everything below is filled in when the\nprovider volunteers it - in practice OpenRouter, which is the only endpoint\nhere that publishes prices at all."
+      },
+      "ModelPattern": {
+        "properties": {
+          "match": {
+            "type": "string",
+            "title": "Match"
+          },
+          "interactions": {
+            "items": {
+              "$ref": "#/components/schemas/Interaction"
+            },
+            "type": "array",
+            "title": "Interactions"
+          },
+          "transcribe": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TranscribeCapabilities"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "llm": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LlmCapabilities"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "video": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/VideoCapabilities"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "match"
+        ],
+        "title": "ModelPattern",
+        "description": "Capability annotation for models matched by glob rather than exact id.\n\nExists for the self-hosted kind, whose catalogue is whatever the operator\ninstalled. We cannot enumerate ``Systran/faster-whisper-large-v3`` and every\nsibling, but ``*whisper*`` tells us it does word timestamps, takes a\n``prompt``, and cannot diarize - which is enough to render the right\ncontrols."
+      },
+      "ModelPrice": {
+        "properties": {
+          "prompt": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Prompt"
+          },
+          "completion": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completion"
+          },
+          "min_prompt_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Min Prompt Tokens"
+          }
+        },
+        "type": "object",
+        "title": "ModelPrice",
+        "description": "What a model costs, in **USD per million tokens**.\n\nThe source (OpenRouter's ``/models``) quotes USD per *single* token as a\ndecimal string - \"0.000003\". That is unreadable in a picker and lossy as a\nfloat, so :mod:`loreline.catalog` parses it as ``Decimal`` and scales\nit here to the per-million figure every price list actually uses.\n\n``min_prompt_tokens`` is None on the base price and set on a tier that only\napplies above a prompt-length threshold - see ModelInfo.price_tiers."
+      },
+      "ModelSpec": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Label"
+          },
+          "interactions": {
+            "items": {
+              "$ref": "#/components/schemas/Interaction"
+            },
+            "type": "array",
+            "title": "Interactions"
+          },
+          "hidden": {
+            "type": "boolean",
+            "title": "Hidden",
+            "default": false
+          },
+          "default": {
+            "type": "boolean",
+            "title": "Default",
+            "default": false
+          },
+          "deprecated": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deprecated"
+          },
+          "transcribe": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TranscribeCapabilities"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "llm": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LlmCapabilities"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "video": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/VideoCapabilities"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "id",
+          "interactions"
+        ],
+        "title": "ModelSpec",
+        "description": "One curated model, with a capability block per interaction it serves."
+      },
+      "OkResponse": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok",
+            "default": true
+          }
+        },
+        "type": "object",
+        "title": "OkResponse",
+        "description": "Generic success acknowledgement."
+      },
+      "OpenRouterRouting": {
+        "properties": {
+          "sort": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "price",
+                  "throughput",
+                  "latency"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sort"
+          },
+          "data_collection": {
+            "type": "string",
+            "enum": [
+              "allow",
+              "deny"
+            ],
+            "title": "Data Collection",
+            "default": "allow"
+          },
+          "zdr": {
+            "type": "boolean",
+            "title": "Zdr",
+            "default": false
+          }
+        },
+        "type": "object",
+        "title": "OpenRouterRouting",
+        "description": "OpenRouter provider-routing preferences. Ignored for every other kind.\n\nOpenRouter fans one model id out across several upstream providers that\ndiffer in price, speed and data policy, and picks between them itself.\nThese narrow or reorder that pool; they are sent verbatim as the\n``provider`` object of the chat-completions body - see\nhttps://openrouter.ai/docs/features/provider-routing.\n\nEvery field defaults to OpenRouter's own default, and\n:func:`loreline.llm.routing_payload` omits any field still sitting at it,\nso a provider nobody has configured routing for keeps behaving exactly as\nbefore - and a default OpenRouter later changes stays theirs to change.\n\nNote the two privacy switches are not the same thing: ``data_collection``\nexcludes providers that may *store or train on* the prompt, while ``zdr``\nadditionally requires an endpoint under a Zero Data Retention agreement.\nEither can leave a given model with no eligible provider at all, in which\ncase OpenRouter rejects the request rather than quietly falling back - the\nsettings UI says so next to the switches."
+      },
+      "ProviderCreate": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/ProviderKind"
+          },
+          "base_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Url"
+          },
+          "favorite_models": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Favorite Models"
+          },
+          "sample_rate": {
+            "type": "integer",
+            "title": "Sample Rate",
+            "default": 16000
+          },
+          "language": {
+            "type": "string",
+            "title": "Language",
+            "default": "de"
+          },
+          "routing": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OpenRouterRouting"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled",
+            "default": true
+          },
+          "api_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Api Key",
+            "description": "Optional API key set at create/update time; stored write-only."
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "kind"
+        ],
+        "title": "ProviderCreate",
+        "description": "Create/update payload for an STT provider."
+      },
+      "ProviderKind": {
+        "type": "string",
+        "enum": [
+          "deepgram",
+          "openai",
+          "openai_compat",
+          "assemblyai",
+          "gemini",
+          "openrouter"
+        ],
+        "title": "ProviderKind",
+        "description": "Supported provider kinds (STT + LLM)."
+      },
+      "ProviderModelsRequest": {
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/ProviderKind"
+          },
+          "base_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Url"
+          },
+          "api_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Api Key"
+          },
+          "provider_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Provider Id"
+          },
+          "interaction": {
+            "$ref": "#/components/schemas/Interaction",
+            "default": "transcribe"
+          }
+        },
+        "type": "object",
+        "required": [
+          "kind"
+        ],
+        "title": "ProviderModelsRequest",
+        "description": "Connection details for listing a provider's available models.\n\nWorks before the provider is saved (new add-provider flow): pass ``api_key``\ndirectly, or ``provider_id`` to reuse the stored secret when the key is blank."
+      },
+      "ProviderSpec": {
+        "properties": {
+          "label": {
+            "type": "string",
+            "title": "Label"
+          },
+          "hosting": {
+            "type": "string",
+            "enum": [
+              "cloud",
+              "selfhosted"
+            ],
+            "title": "Hosting",
+            "default": "cloud"
+          },
+          "auth": {
+            "type": "string",
+            "enum": [
+              "api_key",
+              "optional",
+              "none"
+            ],
+            "title": "Auth",
+            "default": "api_key"
+          },
+          "key_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Key Url"
+          },
+          "key_env": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Key Env"
+          },
+          "surfaces": {
+            "$ref": "#/components/schemas/Surfaces"
+          },
+          "live_capture": {
+            "type": "boolean",
+            "title": "Live Capture",
+            "default": true
+          },
+          "interactions": {
+            "items": {
+              "$ref": "#/components/schemas/Interaction"
+            },
+            "type": "array",
+            "title": "Interactions"
+          },
+          "models": {
+            "items": {
+              "$ref": "#/components/schemas/ModelSpec"
+            },
+            "type": "array",
+            "title": "Models"
+          },
+          "model_patterns": {
+            "items": {
+              "$ref": "#/components/schemas/ModelPattern"
+            },
+            "type": "array",
+            "title": "Model Patterns"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "label",
+          "surfaces",
+          "interactions"
+        ],
+        "title": "ProviderSpec",
+        "description": "One vendor. Exactly one entry per vendor, capabilities as flags."
+      },
+      "ProviderView": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/ProviderKind"
+          },
+          "base_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Url"
+          },
+          "auth_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Auth Ref",
+            "description": "Secret name in the secret store; never the raw key."
+          },
+          "favorite_models": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Favorite Models"
+          },
+          "sample_rate": {
+            "type": "integer",
+            "title": "Sample Rate",
+            "default": 16000
+          },
+          "language": {
+            "type": "string",
+            "title": "Language",
+            "default": "de"
+          },
+          "routing": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OpenRouterRouting"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled",
+            "default": true
+          },
+          "secret_set": {
+            "type": "boolean",
+            "title": "Secret Set",
+            "default": false
+          },
+          "secret_hint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Secret Hint"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "kind"
+        ],
+        "title": "ProviderView",
+        "description": "Provider config plus a masked hint of its stored API key (read-only)."
+      },
+      "ReasoningSupport": {
+        "properties": {
+          "supported": {
+            "type": "boolean",
+            "title": "Supported",
+            "default": false
+          },
+          "mandatory": {
+            "type": "boolean",
+            "title": "Mandatory",
+            "default": false
+          },
+          "efforts": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Efforts"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "ReasoningSupport",
+        "description": "Whether a reasoning effort selector may be offered, and with which values.\n\nThe accepted values differ per vendor and per model generation, so they are\nlisted rather than assumed. An empty list with ``supported: true`` is a\ncontradiction and rejected."
+      },
+      "ReprocessJob": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "session_id": {
+            "type": "string",
+            "title": "Session Id"
+          },
+          "provider_id": {
+            "type": "string",
+            "title": "Provider Id"
+          },
+          "operation": {
+            "type": "string",
+            "title": "Operation",
+            "default": "transcribe"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          },
+          "use_glossary": {
+            "type": "boolean",
+            "title": "Use Glossary",
+            "default": true
+          },
+          "target": {
+            "type": "string",
+            "title": "Target",
+            "default": "original"
+          },
+          "diarization": {
+            "$ref": "#/components/schemas/DiarizationConfig"
+          },
+          "status": {
+            "$ref": "#/components/schemas/JobStatus",
+            "default": "queued"
+          },
+          "created_at": {
+            "type": "number",
+            "title": "Created At"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "segments_added": {
+            "type": "integer",
+            "title": "Segments Added",
+            "default": 0
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "session_id",
+          "provider_id",
+          "created_at"
+        ],
+        "title": "ReprocessJob",
+        "description": "A post-session re-transcription/re-diarization job."
+      },
+      "ReprocessRequest": {
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "title": "Session Id"
+          },
+          "provider_id": {
+            "type": "string",
+            "title": "Provider Id",
+            "default": ""
+          },
+          "operation": {
+            "type": "string",
+            "enum": [
+              "transcribe",
+              "diarize"
+            ],
+            "title": "Operation",
+            "default": "transcribe"
+          },
+          "diarization": {
+            "$ref": "#/components/schemas/DiarizationConfig"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          },
+          "target": {
+            "type": "string",
+            "title": "Target",
+            "default": "original"
+          },
+          "use_glossary": {
+            "type": "boolean",
+            "title": "Use Glossary",
+            "default": true
+          }
+        },
+        "type": "object",
+        "required": [
+          "session_id"
+        ],
+        "title": "ReprocessRequest",
+        "description": "Enqueue a post-session re-processing job."
+      },
+      "RevisionResponse": {
+        "properties": {
+          "commit": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Commit"
+          }
+        },
+        "type": "object",
+        "title": "RevisionResponse",
+        "description": "Current deployed git revision."
+      },
+      "RollbackRequest": {
+        "properties": {
+          "commit": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{7,40}$",
+            "title": "Commit"
+          }
+        },
+        "type": "object",
+        "required": [
+          "commit"
+        ],
+        "title": "RollbackRequest",
+        "description": "Roll the deployment back to a prior commit."
+      },
+      "SecretWrite": {
+        "properties": {
+          "value": {
+            "type": "string",
+            "title": "Value"
+          }
+        },
+        "type": "object",
+        "required": [
+          "value"
+        ],
+        "title": "SecretWrite",
+        "description": "Write-only secret value for a provider's API key."
+      },
+      "ServiceAction": {
+        "properties": {
+          "running": {
+            "type": "boolean",
+            "title": "Running"
+          }
+        },
+        "type": "object",
+        "required": [
+          "running"
+        ],
+        "title": "ServiceAction",
+        "description": "Start or stop a service."
+      },
+      "ServiceLogs": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "logs": {
+            "type": "string",
+            "title": "Logs"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "logs"
+        ],
+        "title": "ServiceLogs",
+        "description": "Recent container output for one service."
+      },
+      "ServiceState": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "container_id": {
+            "type": "string",
+            "title": "Container Id"
+          },
+          "state": {
+            "type": "string",
+            "title": "State"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "image": {
+            "type": "string",
+            "title": "Image"
+          },
+          "controllable": {
+            "type": "boolean",
+            "title": "Controllable"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "container_id",
+          "state",
+          "status",
+          "image",
+          "controllable"
+        ],
+        "title": "ServiceState",
+        "description": "One container in this compose project."
+      },
+      "Session": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "status": {
+            "$ref": "#/components/schemas/SessionStatus",
+            "default": "idle"
+          },
+          "started_at": {
+            "type": "number",
+            "title": "Started At"
+          },
+          "started_mono": {
+            "type": "number",
+            "title": "Started Mono",
+            "default": 0.0
+          },
+          "ended_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ended At"
+          },
+          "campaign_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Campaign Id"
+          },
+          "primary_provider": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Primary Provider"
+          },
+          "fallback_provider": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fallback Provider"
+          },
+          "diarization": {
+            "$ref": "#/components/schemas/DiarizationConfig"
+          },
+          "audio_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Audio Path"
+          },
+          "speaker_names": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Speaker Names"
+          },
+          "summary": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Summary"
+          },
+          "summary_provider": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Summary Provider"
+          },
+          "summary_model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Summary Model"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "started_at"
+        ],
+        "title": "Session",
+        "description": "A capture session record."
+      },
+      "SessionDetail": {
+        "properties": {
+          "session": {
+            "$ref": "#/components/schemas/Session"
+          },
+          "transcript": {
+            "items": {
+              "$ref": "#/components/schemas/TranscriptEvent"
+            },
+            "type": "array",
+            "title": "Transcript"
+          }
+        },
+        "type": "object",
+        "required": [
+          "session",
+          "transcript"
+        ],
+        "title": "SessionDetail",
+        "description": "A session plus its persisted transcript."
+      },
+      "SessionIds": {
+        "properties": {
+          "ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Ids"
+          }
+        },
+        "type": "object",
+        "title": "SessionIds",
+        "description": "A set of session ids for bulk operations (delete / merge)."
+      },
+      "SessionStatus": {
+        "type": "string",
+        "enum": [
+          "idle",
+          "capturing",
+          "stopping",
+          "completed",
+          "error"
+        ],
+        "title": "SessionStatus",
+        "description": "Lifecycle state of a capture session."
+      },
+      "SpeakerNamesUpdate": {
+        "properties": {
+          "names": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Names"
+          }
+        },
+        "type": "object",
+        "title": "SpeakerNamesUpdate",
+        "description": "Per-session speaker rename map ({original diarization label: display name})."
+      },
+      "StartSessionRequest": {
+        "properties": {
+          "primary_provider": {
+            "type": "string",
+            "title": "Primary Provider"
+          },
+          "fallback_provider": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fallback Provider"
+          },
+          "campaign_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Campaign Id"
+          },
+          "device": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Device"
+          },
+          "model": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Model"
+          },
+          "fallback_model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fallback Model"
+          },
+          "diarization": {
+            "$ref": "#/components/schemas/DiarizationConfig"
+          },
+          "use_glossary": {
+            "type": "boolean",
+            "title": "Use Glossary",
+            "default": true
+          }
+        },
+        "type": "object",
+        "required": [
+          "primary_provider",
+          "model"
+        ],
+        "title": "StartSessionRequest",
+        "description": "Start a capture session."
+      },
+      "SummarizeRequest": {
+        "properties": {
+          "provider_id": {
+            "type": "string",
+            "title": "Provider Id"
+          },
+          "model": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Model"
+          },
+          "reasoning_effort": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reasoning Effort"
+          }
+        },
+        "type": "object",
+        "required": [
+          "provider_id",
+          "model"
+        ],
+        "title": "SummarizeRequest",
+        "description": "Summarize a session with the chosen LLM provider + model."
+      },
+      "SummarizeResult": {
+        "properties": {
+          "summary": {
+            "type": "string",
+            "title": "Summary"
+          }
+        },
+        "type": "object",
+        "required": [
+          "summary"
+        ],
+        "title": "SummarizeResult",
+        "description": "The generated session summary."
+      },
+      "Surface": {
+        "properties": {
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url"
+          },
+          "auth": {
+            "$ref": "#/components/schemas/AuthScheme",
+            "default": "bearer"
+          },
+          "overridable": {
+            "type": "boolean",
+            "title": "Overridable",
+            "default": false
+          },
+          "headers": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Headers"
+          },
+          "health": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HealthProbe"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "public": {
+            "type": "boolean",
+            "title": "Public",
+            "default": false
+          },
+          "picker": {
+            "type": "boolean",
+            "title": "Picker",
+            "default": true
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "Surface",
+        "description": "How to reach one vendor for one interaction over one transport.\n\n``url`` is the address a connector builds on: a base for an HTTP surface\n(the connector appends its paths), the socket URL for a streaming one, or\nthe whole address for a catalogue. It is absolute, except on a surface an\noperator has to point somewhere themselves: then it is null, or a template\naround ``{base_url}``, and ``overridable`` must say so.\n\n``overridable`` is whether a provider row's stored ``base_url`` may replace\nthis address. The replacement honours the transport: a WebSocket URL is\napplied to a socket surface and dropped by an HTTP one (a row whose\nstreaming connector shipped first has always carried the socket address,\nand handing that to an HTTP client fails every request), and the reverse."
+      },
+      "Surfaces": {
+        "properties": {
+          "transcribe": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TranscribeSurfaces"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "summarize": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Surface"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "video": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Surface"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "catalog": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Surface"
+              },
+              {
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/Surface"
+                },
+                "propertyNames": {
+                  "$ref": "#/components/schemas/Interaction"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Catalog"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "Surfaces",
+        "description": "Every address a vendor is reached at, keyed the way requests are routed.\n\nTranscription is keyed by transport because the two differ in host,\nscheme and sometimes auth for one vendor; the other interactions have one\nsurface each. ``catalog`` is where the runtime picker and the staleness\ncheck read the vendor's own model list: one surface when it serves every\ninteraction, a mapping when the vendor splits it (OpenRouter's three\ndisjoint lists), absent when this file is the catalogue."
+      },
+      "TestResult": {
+        "properties": {
+          "status": {
+            "$ref": "#/components/schemas/HealthStatus"
+          },
+          "detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "required": [
+          "status"
+        ],
+        "title": "TestResult",
+        "description": "Connection-test outcome for a provider.\n\nDeliberately not a bool. \"Healthy\" is at least three separate facts - the\nendpoint answers, the credential is accepted, the vendor is not currently\nrefusing - and collapsing them meant a provider with a completely invalid\nkey rendered exactly like one whose base URL was a typo. The settings page\nswitches on ``status`` and shows ``detail`` as the badge's tooltip, so the\nvendor's own \"API key not valid\" reaches the GM instead of the word \"down\".\nSee :mod:`loreline.health`."
+      },
+      "TranscribeCapabilities": {
+        "properties": {
+          "realtime": {
+            "type": "boolean",
+            "title": "Realtime",
+            "default": false
+          },
+          "batch": {
+            "type": "boolean",
+            "title": "Batch",
+            "default": true
+          },
+          "prefer": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "realtime",
+                  "batch"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Prefer"
+          },
+          "inline_diarization": {
+            "type": "boolean",
+            "title": "Inline Diarization",
+            "default": false
+          },
+          "glossary": {
+            "$ref": "#/components/schemas/GlossarySupport",
+            "default": {
+              "supported": false
+            }
+          },
+          "word_timestamps": {
+            "type": "boolean",
+            "title": "Word Timestamps",
+            "default": false
+          },
+          "languages": {
+            "type": "string",
+            "enum": [
+              "single",
+              "multi",
+              "codeswitch"
+            ],
+            "title": "Languages",
+            "default": "multi"
+          },
+          "language_codes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Language Codes"
+          },
+          "conflicts": {
+            "items": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "type": "array",
+            "title": "Conflicts"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "TranscribeCapabilities",
+        "description": "Per-model transcription surface.\n\n``realtime`` and ``batch`` are transports, not a single either/or: OpenAI\nserves both and ``prefer`` then says which connector runs. ``realtime`` is\nalso what the Realtime badge reports and what gates a model for live\ncapture."
+      },
+      "TranscribeSurfaces": {
+        "properties": {
+          "realtime": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Surface"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "batch": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Surface"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "TranscribeSurfaces",
+        "description": "A vendor's transcription surfaces, one per transport it serves."
+      },
+      "TranscriptEvent": {
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "title": "Session Id"
+          },
+          "source": {
+            "type": "string",
+            "title": "Source"
+          },
+          "text": {
+            "type": "string",
+            "title": "Text"
+          },
+          "words": {
+            "items": {
+              "$ref": "#/components/schemas/Word"
+            },
+            "type": "array",
+            "title": "Words"
+          },
+          "speaker": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Speaker"
+          },
+          "start_ts": {
+            "type": "number",
+            "title": "Start Ts"
+          },
+          "end_ts": {
+            "type": "number",
+            "title": "End Ts"
+          },
+          "is_final": {
+            "type": "boolean",
+            "title": "Is Final",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "session_id",
+          "source",
+          "text",
+          "start_ts",
+          "end_ts"
+        ],
+        "title": "TranscriptEvent",
+        "description": "A transcript segment emitted by a backend.\n\nInterim events may be upgraded to ``is_final`` and gain speaker labels once\ndiarization completes."
+      },
+      "UpdateResult": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "previous_commit": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Previous Commit"
+          },
+          "new_commit": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "New Commit"
+          },
+          "returncode": {
+            "type": "integer",
+            "title": "Returncode",
+            "default": 0
+          },
+          "output": {
+            "type": "string",
+            "title": "Output",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "ok"
+        ],
+        "title": "UpdateResult",
+        "description": "Result of an update or rollback attempt (safe to return via API)."
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      },
+      "VersionLogs": {
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "title": "Session Id"
+          },
+          "version": {
+            "type": "string",
+            "title": "Version"
+          },
+          "logs": {
+            "type": "string",
+            "title": "Logs"
+          }
+        },
+        "type": "object",
+        "required": [
+          "session_id",
+          "version",
+          "logs"
+        ],
+        "title": "VersionLogs",
+        "description": "One transcript version's stored log file."
+      },
+      "VideoCapabilities": {
+        "properties": {
+          "durations": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array",
+            "title": "Durations"
+          },
+          "resolutions": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Resolutions"
+          },
+          "aspect_ratios": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Aspect Ratios"
+          },
+          "audio": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Audio"
+          },
+          "image_input": {
+            "type": "boolean",
+            "title": "Image Input",
+            "default": false
+          },
+          "prompt_max_chars": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Prompt Max Chars"
+          },
+          "prompt_max_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Prompt Max Tokens"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "VideoCapabilities",
+        "description": "Per-model video generation surface.\n\nThese lists populate the generate-video modal directly. Offering a duration\nthe model rejects wastes a paid job and a minute of waiting, so the modal\nonly ever shows what is listed here."
+      },
+      "VideoGenerateRequest": {
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "title": "Session Id"
+          },
+          "provider_id": {
+            "type": "string",
+            "title": "Provider Id"
+          },
+          "model": {
+            "type": "string",
+            "title": "Model"
+          },
+          "prompt": {
+            "type": "string",
+            "title": "Prompt"
+          },
+          "duration": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Duration"
+          },
+          "resolution": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resolution"
+          },
+          "aspect_ratio": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Aspect Ratio"
+          },
+          "generate_audio": {
+            "type": "boolean",
+            "title": "Generate Audio",
+            "default": false
+          },
+          "seed": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seed"
+          }
+        },
+        "type": "object",
+        "required": [
+          "session_id",
+          "provider_id",
+          "model",
+          "prompt"
+        ],
+        "title": "VideoGenerateRequest",
+        "description": "Start a video generation for a session.\n\n``prompt`` arrives already edited by the GM - the dialog seeds it from the\nstored summary, but what is sent is whatever they left in the box, so the\nserver never re-reads the summary behind their back.\n\nThe optional parameters are exactly those OpenRouter's video API accepts,\nand which of them a given model actually supports comes from\n``GET /api/video/models`` (see VideoModelInfo). Anything left None is\nomitted from the upstream request rather than guessed at."
+      },
+      "VideoJob": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "session_id": {
+            "type": "string",
+            "title": "Session Id"
+          },
+          "provider_id": {
+            "type": "string",
+            "title": "Provider Id"
+          },
+          "model": {
+            "type": "string",
+            "title": "Model"
+          },
+          "prompt": {
+            "type": "string",
+            "title": "Prompt"
+          },
+          "duration": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Duration"
+          },
+          "resolution": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resolution"
+          },
+          "aspect_ratio": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Aspect Ratio"
+          },
+          "generate_audio": {
+            "type": "boolean",
+            "title": "Generate Audio",
+            "default": false
+          },
+          "seed": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seed"
+          },
+          "status": {
+            "$ref": "#/components/schemas/JobStatus",
+            "default": "queued"
+          },
+          "remote_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Remote Id"
+          },
+          "video_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Video Path"
+          },
+          "created_at": {
+            "type": "number",
+            "title": "Created At"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "session_id",
+          "provider_id",
+          "model",
+          "prompt",
+          "created_at"
+        ],
+        "title": "VideoJob",
+        "description": "One video generation, from enqueue to a playable file on disk.\n\nVideo generation is slow (minutes) and asynchronous at the source:\nOpenRouter returns a job id immediately and the result is polled. This row\nis the local mirror of that remote job, so a GM can close the tab, and so a\nfinished video survives the signed URL OpenRouter hands back - which\nexpires (there is a literal ``expired`` state upstream). ``remote_id`` is\nthe upstream handle; ``video_path`` is set once the bytes are downloaded\ninto the local store."
+      },
+      "VideoModelInfo": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "supported_durations": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supported Durations"
+          },
+          "supported_resolutions": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supported Resolutions"
+          },
+          "supported_aspect_ratios": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supported Aspect Ratios"
+          },
+          "supported_sizes": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supported Sizes"
+          },
+          "generate_audio": {
+            "type": "boolean",
+            "title": "Generate Audio",
+            "default": false
+          },
+          "seed": {
+            "type": "boolean",
+            "title": "Seed",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name"
+        ],
+        "title": "VideoModelInfo",
+        "description": "A video-generation model and the parameters it actually accepts.\n\nStraight off OpenRouter's ``GET /videos/models``. The lists are the point:\nevery video model takes a *different* subset of durations, resolutions and\naspect ratios, so the request form has to be built from the chosen model\nrather than offering one fixed set of controls and hoping. A None list\nmeans \"this model does not take that parameter at all\" - which is not the\nsame as an empty list, and is why these are nullable rather than\ndefaulting to []."
+      },
+      "Word": {
+        "properties": {
+          "text": {
+            "type": "string",
+            "title": "Text"
+          },
+          "start": {
+            "type": "number",
+            "title": "Start"
+          },
+          "end": {
+            "type": "number",
+            "title": "End"
+          },
+          "confidence": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Confidence"
+          },
+          "speaker": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Speaker"
+          }
+        },
+        "type": "object",
+        "required": [
+          "text",
+          "start",
+          "end"
+        ],
+        "title": "Word",
+        "description": "A single recognized word with timing."
+      }
+    },
+    "securitySchemes": {
+      "sessionCookie": {
+        "type": "apiKey",
+        "description": "Session JWT set by `POST /api/auth/login`. The cookie is HttpOnly, so pasting a value into this dialog does nothing: browsers drop the `Cookie` header Swagger UI would set from it. To use `Try it out`, run `POST /api/auth/login` from this page first (or log into the app in the same browser); the cookie is then sent automatically. Outside a browser, send the cookie yourself, e.g. `curl -c jar -X POST .../api/auth/login -d '{\"password\":\"...\"}' -H 'content-type: application/json'` then `curl -b jar .../api/session`. When no password is configured auth is off entirely and the cookie is not required.",
+        "in": "cookie",
+        "name": "loreline_token"
+      }
+    }
+  }
+}

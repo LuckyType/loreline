@@ -6,7 +6,15 @@
 		"useIgnoreFile": true
 	},
 	"files": {
-		"includes": ["**", "!build/**", "!.svelte-kit/**", "!**/*.min.js", "!package-lock.json"]
+		"includes": [
+			"**",
+			"!build/**",
+			"!.svelte-kit/**",
+			"!**/*.min.js",
+			"!package-lock.json",
+			"!openapi.json",
+			"!src/lib/api.generated.d.ts"
+		]
 	},
 	"formatter": {
 		"enabled": true,
