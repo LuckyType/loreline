@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING
 from loreline.bus import EventBus
 from loreline.diarization.merge import assign_speakers
 from loreline.export import variant_rows
+from loreline.health import HealthStatus, classify_request_error
 from loreline.logging import bind_log_context, get_logger
 from loreline.models import (
     DIARIZE_SOURCE_PREFIX,
@@ -289,7 +290,7 @@ class ReprocessManager:
             job.status = JobStatus.DONE
         except Exception as exc:  # any failure marks the job errored
             job.status = JobStatus.ERROR
-            job.error = str(exc)
+            job.error = _job_error_message(exc)
             log.exception("reprocess.failed", job_id=job.id, operation=job.operation)
         finally:
             job.finished_at = time.time()
@@ -426,3 +427,32 @@ async def _aclose(obj: object) -> None:
             await closer()
         except Exception:  # cleanup must never mask the job result
             log.warning("reprocess.aclose.failed")
+
+
+def _job_error_message(exc: Exception) -> str:
+    """The message stored on a failed job's row, in words a GM can act on.
+
+    Most exceptions here already read fine as raised: a missing session or
+    provider is a ``ValueError`` with its own sentence, and an STT router that
+    ran out of providers already carries every retired one's own words (see
+    ``SttRouter.terminal_error``). The one case that does not is a diarizer
+    that answered with an HTTP error status - both diarizers raise that as an
+    ``httpx.HTTPStatusError`` - which is still a technical string built for a
+    console, not a sentence written for a GM.
+
+    ``classify_request_error`` is the same grading ``loreline.stt.router``
+    already applies to a failed STT request: an ``UNREACHABLE`` verdict means
+    nothing answered at all (refused, timed out, no such host), which already
+    reads fine and is passed through unchanged; anything else means something
+    did answer, just badly, and gets the plain-language translation instead.
+    The vendor's own words are not lost - they are still in the traceback
+    ``log.exception`` writes right after this is called, which lands in the
+    version's own log file, exactly what "Show logs" reads.
+    """
+    failure = classify_request_error(exc)
+    if failure.status is HealthStatus.UNREACHABLE:
+        return str(exc)
+    return (
+        "The diarization service answered but could not process the audio "
+        "(is it configured correctly?)"
+    )

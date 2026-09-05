@@ -6,7 +6,7 @@ from typing import cast
 
 import httpx
 
-from loreline.health import HealthReport, probe_endpoint
+from loreline.health import HealthReport, probe_endpoint, raise_for_vendor_status
 from loreline.httpclient import ClientHandle
 from loreline.logging import get_logger
 from loreline.models import SpeakerSegment
@@ -47,7 +47,7 @@ class RemoteDiarizer:
             data["max_speakers"] = str(max_speakers)
         files = {"file": ("audio.wav", wav, "audio/wav")}
         response = await self._client.post("/diarize", data=data, files=files)
-        response.raise_for_status()
+        raise_for_vendor_status(response)
         return _parse_segments(response.json())
 
     async def aclose(self) -> None:

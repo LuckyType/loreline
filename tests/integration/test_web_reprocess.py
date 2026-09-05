@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import AsyncIterator
 from pathlib import Path
 
+import httpx
 import pytest_asyncio
 from asgi_lifespan import LifespanManager
 from httpx import ASGITransport, AsyncClient
@@ -20,6 +21,7 @@ from test_web_session import (  # type: ignore[import-not-found]
 
 from loreline.audio.chunker import SpeechDetector, Utterance
 from loreline.diarization.base import DiarizationProvider
+from loreline.health import raise_for_vendor_status
 from loreline.models import DiarizationConfig, ProviderConfig, SpeakerSegment, TranscriptEvent
 from loreline.secrets import SecretStore
 from loreline.settings import Settings
@@ -412,6 +414,114 @@ async def _wait_done(client: AsyncClient, job_id: str) -> dict[str, object]:
             return job
         await asyncio.sleep(0.02)
     return job
+
+
+class _FailingDiarizer:
+    """Diarizer standing in for a service that is reachable but misbehaves."""
+
+    def __init__(self, exc: Exception) -> None:
+        self._exc = exc
+
+    async def diarize(
+        self,
+        wav: bytes,
+        *,
+        sample_rate: int = 16000,
+        min_speakers: int | None = None,
+        max_speakers: int | None = None,
+    ) -> list[SpeakerSegment]:
+        _ = (wav, sample_rate, min_speakers, max_speakers)
+        raise self._exc
+
+    async def aclose(self) -> None:
+        return None
+
+
+def _diarizer_503() -> httpx.HTTPStatusError:
+    """Shaped exactly as ``RemoteDiarizer.diarize()`` raises it: the service
+    is up but cannot serve, e.g. a 503 while its models load."""
+    request = httpx.Request("POST", "http://diar/diarize")
+    response = httpx.Response(503, text="models not loaded", request=request)
+    try:
+        raise_for_vendor_status(response)
+    except httpx.HTTPStatusError as exc:
+        return exc
+    raise AssertionError("expected raise_for_vendor_status to raise")  # pragma: no cover
+
+
+async def _diarize_job(client: AsyncClient, sid: str) -> dict[str, object]:
+    enqueue = await client.post(
+        "/api/reprocess",
+        json={
+            "session_id": sid,
+            "operation": "diarize",
+            "diarization": {"mode": "remote", "endpoint": "http://diar"},
+        },
+    )
+    assert enqueue.status_code == 202
+    return await _wait_done(client, enqueue.json()["id"])
+
+
+async def test_diarize_job_translates_a_diarizer_error_status_for_the_gm(tmp_path: Path) -> None:
+    """A diarizer that is running but cannot serve (e.g. a 503 while its
+    models load) used to leave the job's error as the raw exception, including
+    an httpx-generated link to Mozilla's HTTP status docs - developer-facing
+    text on a GM-facing page. It now reads as a plain sentence; the vendor's
+    detail is not lost, it lands in the job's traceback log instead of the row.
+    """
+    error = _diarizer_503()
+
+    async def failing_diarizers(_config: DiarizationConfig) -> DiarizationProvider:
+        return _FailingDiarizer(error)
+
+    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t")
+    app = create_app(
+        settings,
+        capture_factory=capture_factory,  # type: ignore[arg-type]
+        backend_factory=FakeBackend,  # type: ignore[arg-type]
+        diarizer_factory=failing_diarizers,
+    )
+    async with LifespanManager(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            pid = await _provider(client)
+            sid = await _run_session(client, pid)
+            job = await _diarize_job(client, sid)
+
+    assert job["status"] == "error"
+    assert job["error"] == (
+        "The diarization service answered but could not process the audio "
+        "(is it configured correctly?)"
+    )
+    assert "developer.mozilla.org" not in str(job["error"])
+    assert "models not loaded" not in str(job["error"])  # kept in the log, not the job row
+
+
+async def test_diarize_job_leaves_an_unreachable_diarizer_error_as_is(tmp_path: Path) -> None:
+    """A diarizer nothing is listening at is a different failure from one that
+    answered badly: the raw message already reads fine ("connection refused"),
+    so it is left alone rather than replaced with a sentence that would claim
+    the service answered when nothing did."""
+
+    async def unreachable_diarizers(_config: DiarizationConfig) -> DiarizationProvider:
+        return _FailingDiarizer(httpx.ConnectError("Connection refused"))
+
+    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t")
+    app = create_app(
+        settings,
+        capture_factory=capture_factory,  # type: ignore[arg-type]
+        backend_factory=FakeBackend,  # type: ignore[arg-type]
+        diarizer_factory=unreachable_diarizers,
+    )
+    async with LifespanManager(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            pid = await _provider(client)
+            sid = await _run_session(client, pid)
+            job = await _diarize_job(client, sid)
+
+    assert job["status"] == "error"
+    assert "Connection refused" in str(job["error"])
 
 
 async def test_delete_transcript_version(tmp_path: Path) -> None:

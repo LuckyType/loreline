@@ -155,6 +155,50 @@ def _rounded(value: float | None) -> float | None:
     return None if value is None else round(value, 3)
 
 
+class DiarizerProbeResponse(BaseModel):
+    """The graded probe of one diarization endpoint, checked on demand.
+
+    The same verdict shape ``HealthResponse`` already carries for the stored
+    default, but for whatever endpoint the caller names. The capture panel
+    uses this to check the value currently typed into its endpoint field,
+    which ``/healthz`` cannot: that call only ever probes
+    ``defaults.diar_endpoint``, the last *saved* value, never a value someone
+    is only trying out.
+    """
+
+    reachable: bool
+    """Whether something answered, graded the same way as ``diarizer_reachable``
+    above: everything but ``unreachable`` counts, including a service that
+    answered badly."""
+    status: HealthStatus
+    detail: str | None = None
+
+
+@router.get("/diarizer/probe", dependencies=_auth)
+async def probe_diarizer_endpoint(endpoint: str) -> DiarizerProbeResponse:
+    """Probe an arbitrary diarization endpoint, uncached and on demand.
+
+    Deliberately not routed through ``_diarizer_status`` above: that cache
+    exists because ``/healthz`` is polled every few seconds for one settings
+    value, while this answers a one-off question about whatever a GM is
+    currently typing into the capture panel's endpoint field - a different
+    string on every keystroke, which a cache keyed for a single settings value
+    would not help and could even answer wrong (a stale verdict for a value
+    that has since changed back).
+
+    Requires auth like every other route here: naming an endpoint makes the
+    server issue an arbitrary outbound HTTP request, which is already true of
+    the stored default's probe behind ``/healthz`` above - this is the same
+    exposure on a second, caller-supplied value, not a new one.
+    """
+    report = await probe_diarizer(endpoint)
+    return DiarizerProbeResponse(
+        reachable=report.status is not HealthStatus.UNREACHABLE,
+        status=report.status,
+        detail=report.detail,
+    )
+
+
 @router.get("/revision", dependencies=_auth)
 async def revision(request: Request) -> RevisionResponse:
     """Return the currently deployed git commit."""

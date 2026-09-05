@@ -152,6 +152,7 @@ export type VideoGenerateRequest = Schemas['VideoGenerateRequest']
 // --- system and monitoring --------------------------------------------------
 
 export type Health = Complete<Schemas['HealthResponse']>
+export type DiarizerProbe = Complete<Schemas['DiarizerProbeResponse']>
 export type ActionDefaults = Complete<Schemas['ActionDefaults']>
 export type InputDevice = Complete<Schemas['InputDevice']>
 export type DeviceSetting = Complete<Schemas['DeviceSetting']>

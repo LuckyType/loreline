@@ -138,6 +138,54 @@ async def test_healthz_reports_the_diarizers_graded_verdict(
     assert body["diarizer_status"] == "unreachable"
 
 
+async def test_diarizer_probe_checks_the_given_endpoint_not_the_stored_default(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The capture panel probes whatever is currently typed in, which may
+    differ from (or not yet be) the saved default - /healthz only ever grades
+    ``defaults.diar_endpoint`` and would miss this value entirely."""
+    probed: list[str] = []
+
+    async def fake_probe(endpoint: str, **_kwargs: object) -> HealthReport:
+        probed.append(endpoint)
+        return HealthReport(HealthStatus.DEGRADED, "model loading")
+
+    monkeypatch.setattr(system_route, "probe_diarizer", fake_probe)
+
+    # No stored default configured at all, unlike the healthz test above.
+    resp = await client.get(
+        "/api/system/diarizer/probe", params={"endpoint": "http://typed-in:9000"}
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    # Degraded still answered: reachable is everything but unreachable.
+    assert body["reachable"] is True
+    assert body["status"] == "degraded"
+    assert body["detail"] == "model loading"
+    assert probed == ["http://typed-in:9000"]
+
+
+async def test_diarizer_probe_is_uncached_unlike_the_stored_defaults_probe(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``_diarizer_status`` caches the stored default for the /healthz poll;
+    this route answers a one-off question about a value that can change on
+    every keystroke, so probing the same endpoint twice must not be served
+    from that (or any) cache."""
+    probed: list[str] = []
+
+    async def fake_probe(endpoint: str, **_kwargs: object) -> HealthReport:
+        probed.append(endpoint)
+        return HealthReport(HealthStatus.HEALTHY)
+
+    monkeypatch.setattr(system_route, "probe_diarizer", fake_probe)
+
+    endpoint = "http://same:8001"
+    await client.get("/api/system/diarizer/probe", params={"endpoint": endpoint})
+    await client.get("/api/system/diarizer/probe", params={"endpoint": endpoint})
+    assert probed == [endpoint, endpoint]
+
+
 async def test_revision(client: AsyncClient) -> None:
     body = (await client.get("/api/system/revision")).json()
     assert body["commit"] == "commit-sha"
@@ -308,5 +356,11 @@ async def test_ops_endpoints_require_auth(tmp_path: Path) -> None:
     ):
         assert (await ac.post("/api/system/update")).status_code == 401
         assert (await ac.get("/api/system/autostart")).status_code == 401
+        # naming an endpoint makes the server issue an outbound request, same
+        # as the stored-default probe behind healthz - authed like every other
+        # mutating-adjacent route here, not left open like healthz itself.
+        assert (
+            await ac.get("/api/system/diarizer/probe", params={"endpoint": "http://x"})
+        ).status_code == 401
         # health stays open for external pollers
         assert (await ac.get("/api/system/healthz")).status_code == 200

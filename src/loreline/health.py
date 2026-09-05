@@ -351,6 +351,25 @@ def error_detail(response: httpx.Response) -> str:
     return error_message(response.text) or response.reason_phrase
 
 
+def raise_for_vendor_status(response: httpx.Response) -> None:
+    """Raise on a 4xx/5xx with the vendor's own words, not httpx's boilerplate.
+
+    ``response.raise_for_status()`` alone reports "500 Server Error for url
+    ..." followed by a link to Mozilla's HTTP status docs - written for a
+    developer's console, not for whoever ends up reading it off a job row.
+    ``loreline.stt.base.HttpConnector._raise_for_status`` already avoids this
+    for the batch STT connectors; the diarizers post the same shape of request
+    without going through that class, so they call this shared copy instead.
+    """
+    if response.status_code < HTTPStatus.BAD_REQUEST:
+        return
+    raise httpx.HTTPStatusError(
+        f"{response.status_code} from {response.request.url}: {error_detail(response)}",
+        request=response.request,
+        response=response,
+    )
+
+
 def error_message(raw: str) -> str:
     """The human-readable part of an error body, JSON or not.
 
