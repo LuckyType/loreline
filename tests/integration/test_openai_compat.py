@@ -6,8 +6,10 @@ from collections.abc import Callable
 
 import httpx
 import pytest
+from fastapi import FastAPI
 
 from loreline.audio.chunker import Utterance
+from loreline.catalog import ClientFactory
 from loreline.models import Glossary, ProviderConfig, ProviderKind, TranscriptEvent
 from loreline.stt.backends.openai_compat import OpenAICompatBackend
 from mocks.openai_compat import create_app
@@ -79,7 +81,7 @@ def _mock_backend(
 ) -> OpenAICompatBackend:
     transport = httpx.MockTransport(handler)
     client = httpx.AsyncClient(transport=transport, base_url="http://stt:8000/v1")
-    return OpenAICompatBackend(_verbose_config(), client=client)
+    return OpenAICompatBackend(_verbose_config(), model="whisper-1", client=client)
 
 
 def _single_utterance(pcm: bytes = b"\x00\x00" * 800, start: float = 10.0) -> Utterance:
@@ -195,3 +197,98 @@ async def test_a_real_error_still_raises() -> None:
 
     with pytest.raises(httpx.HTTPStatusError, match="invalid api key"):
         await _transcribed(_mock_backend(handle))
+
+
+# --- a provider row that names no model ----------------------------------
+#
+# Leaving the field out was the old answer, on the theory that a server with
+# one model loaded transcribes with it regardless. Speaches, the self-hosted
+# server this repo ships a compose service for, answers such a request
+# `422 {"type": "missing", "loc": ["body", "model"], "msg": "Field required"}`
+# with exactly one model loaded, so the server is asked what it has instead.
+
+
+def _selfhosted_config() -> ProviderConfig:
+    return ProviderConfig(
+        id="speaches-1",
+        name="Speaches LAN",
+        kind=ProviderKind.OPENAI_COMPAT,
+        base_url="http://mock/v1",
+    )
+
+
+def _catalog_factory(app: FastAPI, opened: list[str] | None = None) -> ClientFactory:
+    """A fresh client per catalogue read: the reader closes what it opens, and
+    closing the connector's own client would end the run."""
+
+    def factory() -> httpx.AsyncClient:
+        if opened is not None:
+            opened.append("read")
+        return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://mock/v1")
+
+    return factory
+
+
+async def _transcribe_against(
+    app: FastAPI, *, opened: list[str] | None = None, times: int = 1
+) -> TranscriptEvent | None:
+    """One connector with no configured model, against this server."""
+    transport = httpx.ASGITransport(app=app)
+    event: TranscriptEvent | None = None
+    async with httpx.AsyncClient(transport=transport, base_url="http://mock/v1") as client:
+        backend = OpenAICompatBackend(
+            _selfhosted_config(),
+            client=client,
+            language="de",
+            catalog_client_factory=_catalog_factory(app, opened),
+        )
+        for _ in range(times):
+            event = await backend.transcribe(_single_utterance(start=0.0), session_id="s1")
+    return event
+
+
+async def test_an_unset_model_is_resolved_from_the_server() -> None:
+    """The model the server reports is the model the request carries. The mock
+    echoes what it was sent, and requires the field exactly as Speaches does,
+    so omitting it fails here now too."""
+    event = await _transcribe_against(create_app(models=["Systran/faster-whisper-small"]))
+    assert event is not None
+    assert "Systran/faster-whisper-small" in event.text
+
+
+async def test_the_server_is_asked_once_not_per_utterance() -> None:
+    """A run is hours of utterances; the answer is a fact about the run, kept
+    the way FeatureConflictGuard keeps its conflict groups."""
+    opened: list[str] = []
+    await _transcribe_against(create_app(), opened=opened, times=3)
+    assert len(opened) == 1
+
+
+async def test_several_loaded_models_take_the_first_transcription_one() -> None:
+    """A self-hosted server lists everything it has loaded, and Speaches serves
+    its TTS voices from the same endpoint, so the narrowing the picker applies
+    to that list applies here too: the connector must not run a model the GM
+    would never have been offered. The voice sorts ahead of both transcription
+    models here, so taking the first of the raw list would pick it. Which of
+    the two remaining is genuinely ambiguous, so the first is taken and the
+    whole list is logged."""
+    event = await _transcribe_against(
+        create_app(
+            models=[
+                "hexgrad/Kokoro-82M",
+                "openai/whisper-large-v3",
+                "mobiuslabsgmbh/faster-whisper-large-v3-turbo",
+            ]
+        )
+    )
+    assert event is not None
+    assert "mobiuslabsgmbh/faster-whisper-large-v3-turbo" in event.text
+    assert "Kokoro" not in event.text
+
+
+async def test_a_server_that_lists_no_model_fails_with_a_clear_message() -> None:
+    """The failure this replaces was a 422 about a missing body field, raised
+    from inside a transcription request, which says nothing about the provider
+    row that is actually missing a model."""
+    with pytest.raises(ValueError, match="no model configured"):
+        await _transcribe_against(create_app(models=[]))

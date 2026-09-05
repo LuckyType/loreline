@@ -79,7 +79,13 @@ def register(
     return decorator
 
 
-def create_backend(config: ProviderConfig, secrets: SecretStore, model: str | None) -> STTBackend:
+def create_backend(
+    config: ProviderConfig,
+    secrets: SecretStore,
+    model: str | None,
+    *,
+    prefer_batch: bool = False,
+) -> STTBackend:
     """Instantiate a backend for ``config``, resolved by kind *and* model.
 
     ``model`` is what the session, the re-processing job or the picker chose,
@@ -88,9 +94,18 @@ def create_backend(config: ProviderConfig, secrets: SecretStore, model: str | No
     running, which passing it through the config was how they could disagree.
 
     None is allowed for one reason only, a kind whose models are whatever the
-    operator installed (the self-hosted one): its connector then names no
-    model and lets the server apply its own default. Every other kind's
-    callers name one, because their request schemas require it.
+    operator installed (the self-hosted one): the connector then asks that
+    server which models it has. Every other kind's callers name one, because
+    their request schemas require it.
+
+    ``prefer_batch`` is how a caller says the audio is not arriving live, which
+    is true of exactly one caller, a re-processing job replaying a stored file.
+    A model's ``prefer`` in the yaml is written for a live capture and several
+    favourites say realtime there, so without this a re-processed session goes
+    out through a socket as fast as the file can be read. See
+    :func:`loreline.capabilities.is_realtime_model` for what it does and does
+    not override; the session manager leaves it alone, and a live capture is
+    routed exactly as it was.
 
     The pair's capabilities are resolved here, once, and handed to the
     connector. An unknown model - one the yaml does not annotate, and the unset
@@ -100,7 +115,7 @@ def create_backend(config: ProviderConfig, secrets: SecretStore, model: str | No
     looked up.
     """
     _load_backends()
-    realtime = is_realtime_model(config.kind, model)
+    realtime = is_realtime_model(config.kind, model, prefer_batch=prefer_batch)
     caps = transcribe_capabilities(config.kind, model)
     factory = _REGISTRY.get((config.kind, realtime))
     if factory is not None:

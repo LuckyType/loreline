@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from loreline.models import ProviderConfig, ProviderKind
+from loreline.reprocess.jobs import stored_audio_backend
 from loreline.secrets import SecretStore
 from loreline.stt import create_backend, registry
 from loreline.stt.backends.assemblyai import AssemblyAIBackend
@@ -128,11 +129,12 @@ class TestModelResolution:
 
     def test_a_kind_with_no_curated_catalogue_runs_with_no_model(self, tmp_path: Path) -> None:
         """The self-hosted kind lists nothing this repo can vouch for, so None
-        is a legitimate model there: the connector names none and the server
-        uses its own. Guessing one (this connector used to pin whisper-1)
-        fails a request against a server that simply has a different model
-        loaded. Nothing is resolved on the way: the registry takes what the
-        caller chose, and every caller chooses."""
+        is a legitimate model there: the connector asks that server which
+        models it has when the first utterance needs one. Guessing one here
+        (this connector used to pin whisper-1) fails a request against a
+        server that simply has a different model loaded. Nothing is resolved
+        on the way: the registry takes what the caller chose, and every caller
+        chooses."""
         backend = create_backend(_config(ProviderKind.OPENAI_COMPAT), self._secrets(tmp_path), None)
         assert isinstance(backend, OpenAICompatBackend)
         assert backend._model is None  # pyright: ignore[reportPrivateUsage]
@@ -179,6 +181,80 @@ class TestModelResolution:
             "universal-3-5-pro",
         )
         assert isinstance(backend, AssemblyAIBackend)
+
+
+class TestStoredAudioPrefersBatch:
+    """The same model, two callers, two connectors - and that is the point.
+
+    A dual-transport model's `prefer` in capabilities.yaml answers "which
+    transport while a table is talking", and for the two most commonly
+    favourited ones (nova-3, universal-3-5-pro) the answer is realtime, which
+    is right for a live capture. A re-processing job replays a file: it read
+    the same preference and pushed a whole stored session into the streaming
+    socket as fast as the disk handed it over, which is the delivery realtime
+    endpoints handle worst - a QA report on this app flagged it as a risk for
+    exactly that reason, against an endpoint nobody had traced reprocessing to.
+
+    Both call sites are exercised here side by side because the bug was never
+    in either connector: it was that the two callers asked the same question.
+    """
+
+    def _secrets(self, tmp_path: Path) -> SecretStore:
+        return SecretStore(tmp_path / "secrets.json")
+
+    def test_a_realtime_favourite_reprocesses_over_batch(self, tmp_path: Path) -> None:
+        backend = stored_audio_backend(
+            _config(ProviderKind.DEEPGRAM, base_url=None), self._secrets(tmp_path), "nova-3"
+        )
+        assert isinstance(backend, DeepgramBatchBackend)
+
+    def test_the_same_favourite_still_streams_a_live_capture(self, tmp_path: Path) -> None:
+        """The session manager's default is untouched: nova-3 has streamed
+        since it was added and a stored recording is the only thing that
+        changes."""
+        backend = create_backend(
+            _config(ProviderKind.DEEPGRAM, base_url=None), self._secrets(tmp_path), "nova-3"
+        )
+        assert isinstance(backend, DeepgramBackend)
+
+    def test_assemblyais_realtime_favourite_reprocesses_over_batch(self, tmp_path: Path) -> None:
+        secrets = self._secrets(tmp_path)
+        config = _config(ProviderKind.ASSEMBLYAI, base_url=None)
+        stored = stored_audio_backend(config, secrets, "universal-3-5-pro")
+        assert isinstance(stored, AssemblyAIBatchBackend)
+        assert isinstance(create_backend(config, secrets, "universal-3-5-pro"), AssemblyAIBackend)
+
+    def test_a_model_with_no_batch_transport_keeps_its_socket(self, tmp_path: Path) -> None:
+        """`batch: false` names a transport the vendor does not serve, so there
+        is nothing to prefer. Those connectors are written to survive being fed
+        one whole utterance at a time precisely so that re-processing can use
+        them, which the yaml says beside gemini-3.5-transcribe-live."""
+        secrets = self._secrets(tmp_path)
+        live = stored_audio_backend(
+            _config(ProviderKind.GEMINI, base_url=None), secrets, "gemini-3.5-transcribe-live"
+        )
+        assert isinstance(live, GeminiLiveBackend)
+        realtime = stored_audio_backend(
+            _config(ProviderKind.OPENAI, base_url=None), secrets, "gpt-realtime-whisper"
+        )
+        assert isinstance(realtime, OpenAIRealtimeBackend)
+
+    def test_a_batch_only_model_is_unaffected(self, tmp_path: Path) -> None:
+        backend = stored_audio_backend(
+            _config(ProviderKind.ASSEMBLYAI, base_url=None), self._secrets(tmp_path), "universal-2"
+        )
+        assert isinstance(backend, AssemblyAIBatchBackend)
+
+    def test_an_uncurated_model_is_routed_the_way_it_always_was(self, tmp_path: Path) -> None:
+        """Nothing annotates this id, so no batch transport is declared for it
+        and there is nothing to prefer - only the kind's own guess, which is
+        the same guess a live capture makes."""
+        backend = stored_audio_backend(
+            _config(ProviderKind.DEEPGRAM, base_url=None),
+            self._secrets(tmp_path),
+            "some-unreleased-model",
+        )
+        assert isinstance(backend, DeepgramBackend)
 
 
 class TestResolvedCapabilities:
