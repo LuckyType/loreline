@@ -23,7 +23,30 @@ echo "previous_commit=${PREV_COMMIT}"
 git fetch --quiet origin
 git pull --ff-only origin main
 
-sudo docker compose pull
+# Pull the images this repo does not build (Caddy, the docker proxy, the STT
+# server) and skip the one it does, which is exactly what this line did before
+# the app service grew an `image:` reference.
+#
+# It matters because a pull that fails on a *buildable* service still exits
+# non-zero: without this, `set -e` would abort the update right here, before
+# the rebuild below, on every box where ghcr.io/luckytype/loreline does not
+# exist yet or is still a private package. It is not free when it succeeds
+# either - a couple of GB fetched and then set aside by the `--build` on the
+# next line, on a device that may be a Raspberry Pi. Updating from the registry
+# instead of from source is the other update path, not this one; see the
+# README's "Updating" section.
+#
+# --ignore-buildable only landed in Compose v2.15.0 (January 2023), and
+# install.sh takes Compose from the distro (docker-compose-v2), which on a Pi
+# can sit well behind that. So ask this box's Compose what it supports rather
+# than assume, the same way install.sh picks between the two Compose package
+# names. The fallback has shipped in every Compose v2 there has ever been: it
+# pulls more than it needs to, but it cannot fail the update.
+if sudo docker compose pull --help 2>/dev/null | grep -q -- '--ignore-buildable'; then
+  sudo docker compose pull --ignore-buildable
+else
+  sudo docker compose pull --ignore-pull-failures
+fi
 sudo docker compose up -d --build --remove-orphans
 
 NEW_COMMIT="$(git rev-parse HEAD)"
