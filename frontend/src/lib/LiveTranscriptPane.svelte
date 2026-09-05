@@ -46,7 +46,7 @@ async function clear() {
 }
 </script>
 
-<Card class="flex min-h-0 flex-col py-4">
+<Card class="flex min-h-0 flex-1 flex-col py-4">
 	<div class="flex items-center justify-between gap-2 px-4 pb-2">
 		<h3 class="m-0">Transcript</h3>
 		<div class="flex gap-1">
