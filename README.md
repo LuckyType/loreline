@@ -132,6 +132,8 @@ The app, its dependencies and the built UI all live inside the image.
   download or manual ONNX files: `docker compose --profile local-stt up -d` and
   `--profile diarization`.
 
+#### Updating
+
 The web UI's update button is not available in a Docker deployment. Handing the
 container the Docker socket access it would need to restart itself is
 effectively root on the host, and that is not a trade this project makes for you
@@ -141,6 +143,81 @@ silently. Update from the host instead:
 deploy/update.sh                                   # git pull + compose pull + up -d
 sudo systemctl enable --now loreline-update.timer  # or: daily, automatic
 ```
+
+This is the default and it stays the default. It rebuilds the image from your
+own checkout, and the only thing holding any privilege is a systemd unit on the
+host, where you can read it. What it costs you is that the box does the build,
+which on a Raspberry Pi is slow, and that it needs a git checkout and a shell.
+
+[`docker-publish.yml`](.github/workflows/docker-publish.yml) publishes
+`ghcr.io/luckytype/loreline` for amd64 and arm64 on every push to `main`, so
+there is now a second option that skips the build:
+
+```bash
+sudo docker compose pull && sudo docker compose up -d
+```
+
+Same result, no compiler on the device, and still nothing automatic and no
+container holding the socket. Note what it does not do: it updates the image and
+only the image. Changes to `docker-compose.yml`, the Caddyfile or anything under
+`deploy/` still arrive by `git pull`, which is why `deploy/update.sh` does both.
+
+**Watchtower, if you want that pull to happen without you.** Watchtower is a
+small container that polls the registry and recreates a container when the image
+behind its tag has changed. It is off by default; opt in by name:
+
+```bash
+sudo docker compose --profile watchtower up -d
+```
+
+It is scoped by label. The `app` service carries
+`com.centurylinklabs.watchtower.enable=true` and nothing else in
+`docker-compose.yml` does, so Caddy, the docker proxy, the self-hosted STT
+server and the diarizer are never candidates. It checks at 04:00 in the
+container's timezone, UTC unless you set `TZ`, which is roughly the cadence of
+the systemd timer above.
+
+The trade, plainly: Watchtower needs the Docker socket, and the Docker socket is
+root on the host. It is the same access the app container is refused at the top
+of this section. The blast radius is smaller than granting it to the app -
+Watchtower is one small binary doing one thing, it is not reachable from your
+LAN, and it never handles anything a user typed - and it is a common and
+reasonable pattern on self-hosted boxes. It is still root on the host, held by a
+container, and the `:ro` on the socket mount does not soften that: a read-only
+bind mount of a unix socket does not make the socket read-only, so Watchtower
+stops, removes and creates containers through it exactly as it needs to. Against
+the systemd timer, which gives no container any Docker access at all, this is
+more privilege inside the stack in exchange for never needing a shell on the
+box. Both are supported; pick on your own risk tolerance.
+
+Three things worth knowing before you enable it:
+
+- **Do not run it alongside `loreline-update.timer`.** The timer rebuilds the
+  image from source, Watchtower replaces it with the registry one, and each
+  undoes the other on its own schedule. Pick one.
+- **An update recreates the container**, which ends a recording that is running
+  at the time. 04:00 is picked for that reason. The systemd timer has the same
+  property.
+- **Upstream is archived.** containrrr/watchtower was archived in December 2025,
+  and the version pinned here, 1.7.1, is from November 2023. Frozen rather than
+  broken, but nothing is coming to fix it either. The active fork
+  `nickfedor/watchtower` reads the same environment variables and the same
+  label, so it is a one line change in `docker-compose.yml` if you would rather
+  run that. This repo does not point at it by default because nobody here has
+  audited it.
+
+Watchtower's notifications are its own, not Loreline's: it does not appear under
+Settings, Alerts and this repo does not wire it in there. It speaks
+[shoutrrr](https://containrrr.dev/shoutrrr/) URLs, so set
+`WATCHTOWER_NOTIFICATION_URL` in `.env` if you want to hear when it updated
+something. See [`.env.example`](./.env.example). It will also appear under
+Settings, Services as a container the UI cannot start or stop, since only the
+STT and diarization services are controllable from there.
+
+None of the registry paths work until that workflow has actually run on GitHub
+and the package it publishes has been switched to public. A GHCR package is
+private on first publish, and a private one needs `docker login ghcr.io` before
+any of these pulls succeed.
 
 ### Source and systemd
 

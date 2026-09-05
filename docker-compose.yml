@@ -14,10 +14,38 @@
 #   docker compose --profile diarization up -d
 # (`COMPOSE_PROFILES=local-stt,diarization` in .env works too, for a
 # permanent default without typing the flag every time.)
+#
+# There is a third profile, `watchtower`, and it is opt-in for a different
+# reason than those two: not a download, but host access. It hands a container
+# the Docker socket so it can replace this stack's `app` container with a newer
+# published image on its own. Read the README section "Updating" before
+# enabling it - it is an alternative to deploy/update.sh, not an upgrade over
+# it, and it is off unless you ask for it by name.
 
 services:
   app:
     build: .
+    # Published by .github/workflows/docker-publish.yml on every push to main,
+    # for linux/amd64 and linux/arm64. Both `build:` and `image:` on one
+    # service on purpose, and the order of precedence is unchanged: `up -d
+    # --build` (what deploy/install.sh and deploy/update.sh run) still builds
+    # from this checkout and simply tags the result with this name. What the
+    # `image:` line adds is that `docker compose pull` now has something to
+    # fetch instead of printing "Skipped - No image to be pulled", which is
+    # what the optional watchtower service below needs to exist at all.
+    #
+    # The image does not exist until that workflow has actually run on GitHub,
+    # and a GHCR package is private on first publish - so until it is switched
+    # to public, pulling it needs `docker login ghcr.io` first.
+    image: ghcr.io/luckytype/loreline:latest
+    labels:
+      # Read by the optional watchtower service below (it runs with
+      # --label-enable, so an unlabelled container is ignored entirely). This
+      # is the only container in this file that carries it, deliberately:
+      # Caddy, the docker proxy, the STT server and the diarizer are other
+      # people's images, and auto-replacing those on a box that holds session
+      # audio is a different risk that nobody here reviewed.
+      com.centurylinklabs.watchtower.enable: "true"
     ports:
       - "${LORELINE_PORT:-8000}:8000"
     # deploy/install.sh writes .env (login password, port). Optional so a bare
@@ -124,6 +152,83 @@ services:
       - DIAR_EMBEDDING_MODEL=/models/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx
     volumes:
       - ./models:/models:ro
+    restart: unless-stopped
+
+  # Opt-in automatic updates from the registry, for people who want the box to
+  # update itself without a shell on it and without a git checkout:
+  #
+  #   docker compose --profile watchtower up -d
+  #
+  # It polls GHCR for a newer `app` image and, when it finds one, stops the
+  # container, pulls, and recreates it with the same config. That is a
+  # different mechanism from deploy/update.sh (git pull + rebuild on a systemd
+  # timer), not a better one - see the README section "Updating" for the choice
+  # between them. Running both is the one combination to avoid: update.sh
+  # rebuilds the image locally and watchtower replaces it with the registry
+  # one, so each undoes the other on its own schedule and the container is
+  # recreated more often than either alone.
+  #
+  # What you are agreeing to by starting it: this container gets the raw Docker
+  # socket, which is root-equivalent on the host. It cannot go behind
+  # deploy/docker-proxy.Caddyfile the way the app does, because that proxy
+  # exists specifically to refuse POST /containers/create, and creating
+  # containers is the entire job here. The `:ro` below is honest about intent
+  # and nothing more: a read-only bind mount of a *unix socket* does not make
+  # the socket read-only (the kernel's read-only check covers regular files,
+  # directories and symlinks, not socket I/O), so watchtower still stops,
+  # removes and creates containers through it. What actually limits the blast
+  # radius is the label filter, not the mount flag.
+  #
+  # Upstream containrrr/watchtower was archived in December 2025 and its last
+  # release, pinned below, is from November 2023. It works, and it is small and
+  # frozen, but nothing is coming to fix it either. `nickfedor/watchtower` is an
+  # active fork using the same env vars and the same label, and swapping the
+  # image line is all it takes - this file does not point at it because nobody
+  # here has audited it, and the containrrr maintainers declined to vouch for
+  # any fork.
+  watchtower:
+    image: containrrr/watchtower:1.7.1
+    profiles: ["watchtower"]
+    environment:
+      # Only containers carrying com.centurylinklabs.watchtower.enable=true are
+      # even looked at, which in this file is `app` and nothing else. Note the
+      # scope is the whole Docker host rather than this compose project: any
+      # other container on the box carrying that same label is fair game too.
+      # (Upstream's --scope flag exists if that ever becomes a problem.)
+      WATCHTOWER_LABEL_ENABLE: "true"
+      # 04:00 daily, in this container's timezone, which is UTC unless TZ is
+      # set below. A 6 field cron expression, seconds first - that is
+      # watchtower's format, not a typo. Deliberately a fixed quiet hour rather
+      # than the default 24 hour interval: the interval counts from whenever
+      # the container last started, so it drifts onto whatever time of day that
+      # was, and an update means the app container is recreated, which ends a
+      # recording that happens to be running. Roughly the same cadence as
+      # deploy/loreline-update.timer when that is enabled (OnCalendar=daily).
+      WATCHTOWER_SCHEDULE: "0 0 4 * * *"
+      # Delete the image that was replaced. This one is not optional in
+      # practice: the image is a couple of GB, and without it every update
+      # leaves the old copy behind until the Pi's card is full.
+      WATCHTOWER_CLEANUP: "true"
+      # Watchtower's own notifications, which have nothing to do with Settings,
+      # Alerts in the web UI - that page does not know this container exists and
+      # this file does not connect the two. Set it in .env to switch them on;
+      # .env.example lists the shoutrrr URL forms.
+      #
+      # Leaving it unset is safe rather than merely tidy: this resolves to an
+      # empty string, and watchtower reads its config through viper, which
+      # treats an empty environment variable as unset, so it starts with no
+      # notifier configured. (That is checked against the 1.7.1 source pinned
+      # above. Note it is only true for the environment variable: passing
+      # --notification-url "" on the command line really would abort at
+      # startup.)
+      WATCHTOWER_NOTIFICATION_URL: ${WATCHTOWER_NOTIFICATION_URL:-}
+      # Only relevant once the above is set: report mode notifies about
+      # containers that were actually updated or actually failed, instead of
+      # forwarding log lines on every poll.
+      WATCHTOWER_NOTIFICATION_REPORT: "true"
+      TZ: ${TZ:-UTC}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
     restart: unless-stopped
 
 volumes:
