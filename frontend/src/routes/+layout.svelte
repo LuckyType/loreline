@@ -12,6 +12,7 @@ import { Badge } from '$lib/components/ui/badge'
 import { Button } from '$lib/components/ui/button'
 import { initMagicBento } from '$lib/magicBento'
 import { authed, health, logsWs, transcriptWs } from '$lib/stores'
+import type { ConnectionStatus } from '$lib/ws'
 
 let { children }: { children: Snippet } = $props()
 
@@ -99,6 +100,20 @@ function hms(seconds: number | undefined): string {
 	const s = t % 60
 	return `${h}h ${m}m ${s}s`
 }
+
+/** A dropped socket that is backing off before its next try is not the same
+ *  as a hard offline: amber says "still trying", not "give up". */
+function wsDotClass(status: ConnectionStatus): string {
+	if (status === 'connected') return 'bg-emerald-500'
+	if (status === 'reconnecting') return 'bg-amber-500'
+	return 'bg-red-500'
+}
+
+function wsLabel(status: ConnectionStatus, liveWord: string): string {
+	if (status === 'connected') return liveWord
+	if (status === 'reconnecting') return 'reconnecting…'
+	return 'offline'
+}
 </script>
 
 {#if page.url.pathname === '/login'}
@@ -172,9 +187,8 @@ function hms(seconds: number | undefined): string {
 					<div class="flex items-center justify-between gap-6">
 						<span class="text-muted-foreground">Transcript stream</span>
 						<span class="flex items-center gap-1.5">
-							<span
-								class="size-2 rounded-full {$transcriptWs ? 'bg-emerald-500' : 'bg-red-500'}"
-							></span>{$transcriptWs ? 'connected' : 'offline'}
+							<span class="size-2 rounded-full {wsDotClass($transcriptWs)}"
+							></span>{wsLabel($transcriptWs, 'connected')}
 						</span>
 					</div>
 
@@ -186,8 +200,8 @@ function hms(seconds: number | undefined): string {
 					<div class="flex items-center justify-between gap-6">
 						<span class="text-muted-foreground">Log stream</span>
 						<span class="flex items-center gap-1.5">
-							<span class="size-2 rounded-full {$logsWs ? 'bg-emerald-500' : 'bg-red-500'}"></span>
-							{$logsWs ? 'live' : 'offline'}
+							<span class="size-2 rounded-full {wsDotClass($logsWs)}"></span>
+							{wsLabel($logsWs, 'live')}
 						</span>
 					</div>
 				</div>
