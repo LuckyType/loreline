@@ -9,6 +9,12 @@
 # --- Stage 1: build the SvelteKit static frontend -----------------------
 FROM node:22-slim AS frontend-builder
 
+# node:22-slim currently bundles npm 10.9.x. frontend/.npmrc's min-release-age
+# needs npm >= 11.10.0 or it is silently ignored (older npm just warns and
+# installs anyway), so pin an explicit upgrade rather than trust the base
+# image's bundled version.
+RUN npm install -g npm@11.10.0
+
 WORKDIR /app/frontend
 
 COPY frontend/package.json frontend/package-lock.json ./
