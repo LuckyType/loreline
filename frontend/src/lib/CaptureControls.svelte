@@ -640,8 +640,7 @@ onMount(() => {
 								</span>
 							{:else if diarProbeCurrent && diarProbe?.status === 'degraded'}
 								<span class="text-xs text-amber-500">
-									The diarization service at {diarEndpoint} answered but cannot serve
-									right now.
+									The diarization service at {diarEndpoint} answered but cannot serve right now.
 									{#if diarProbe.detail}
 										({diarProbe.detail})
 									{/if}
