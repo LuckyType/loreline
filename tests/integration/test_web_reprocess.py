@@ -23,8 +23,10 @@ from loreline.audio.chunker import SpeechDetector, Utterance
 from loreline.diarization.base import DiarizationProvider
 from loreline.health import raise_for_vendor_status
 from loreline.models import DiarizationConfig, ProviderConfig, SpeakerSegment, TranscriptEvent
+from loreline.reprocess.jobs import stored_audio_backend
 from loreline.secrets import SecretStore
 from loreline.settings import Settings
+from loreline.stt import create_backend
 from loreline.web.app import create_app
 
 # Any model id: the fake backend never looks at it, but the API requires one -
@@ -130,6 +132,28 @@ async def test_reprocess_transcribe_names_the_model_it_runs(tmp_path: Path) -> N
             assert captured["model"] == "nova-9000"
             # And the job row records the model that actually ran.
             assert job["model"] == "nova-9000"
+
+
+async def test_a_reprocess_job_builds_its_connector_for_stored_audio(tmp_path: Path) -> None:
+    """The app wires both managers from one argument, so the default each falls
+    back to is the whole difference between them.
+
+    A re-processing job replays a recording and prefers a model's batch
+    transport (see loreline.reprocess.jobs.stored_audio_backend); a live
+    session takes the model's own preference, which for nova-3 and
+    universal-3-5-pro is the streaming socket. Every other test in this file
+    injects a fake factory and would never notice the two swapping over.
+    """
+    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t")
+    app = create_app(
+        settings,
+        capture_factory=capture_factory,  # type: ignore[arg-type]
+        diarizer_factory=fake_diarizers,
+    )
+    async with LifespanManager(app):
+        ctx = app.state.ctx  # pyright: ignore[reportAny]
+        assert ctx.reprocess._backend_factory is stored_audio_backend
+        assert ctx.manager._backend_factory is create_backend
 
 
 async def test_reprocess_applies_the_glossary_unless_switched_off(tmp_path: Path) -> None:

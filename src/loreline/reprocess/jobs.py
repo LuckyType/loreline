@@ -8,6 +8,11 @@ any number of re-transcriptions stay comparable side by side (see
 (``job.target``) into a ``DIARIZE_SOURCE_PREFIX + version`` copy, replacing
 that version's previous diarization. Jobs run as in-process ``asyncio``
 tasks; state is tracked in the ``reprocess_jobs`` table.
+
+A re-transcribing job builds its connector through
+:func:`stored_audio_backend`, not through the registry's default: the audio it
+replays was recorded hours ago, and a model that serves both transports has a
+preference written for the live capture it does not have.
 """
 
 from __future__ import annotations
@@ -49,6 +54,7 @@ if TYPE_CHECKING:
         TranscriptRepository,
     )
     from loreline.secrets import SecretStore
+    from loreline.stt.base import STTBackend
     from loreline.web.schemas import ReprocessRequest
 
 log = get_logger(__name__)
@@ -80,6 +86,34 @@ class VersionNotFoundError(ValueError):
 
 class VersionBusyError(ValueError):
     """Raised when deleting a transcript version a job is still writing."""
+
+
+def stored_audio_backend(
+    config: ProviderConfig, secrets: SecretStore, model: str | None
+) -> STTBackend:
+    """Build a connector for audio that has already been recorded.
+
+    A ``BackendFactory`` like any other, so an injected test double still has
+    the same three arguments; what it adds is the one fact a re-processing job
+    knows and a live session does not, that nothing is waiting on this audio.
+
+    It matters because a model that serves both transports says in
+    capabilities.yaml which one it prefers, and that preference is written for
+    a live capture: Deepgram's nova-3 and AssemblyAI's universal-3-5-pro, two
+    models a GM is likely to have favourited, both say realtime, correctly, for
+    a table that is talking now. A stored session driven the same way opens the
+    streaming socket and pushes a whole recording into it as fast as the file
+    reads, where a realtime endpoint expects audio at the speed it was spoken.
+    A QA pass on this app flagged that delivery as a risk and found at least
+    one endpoint, Gemini's, handling it badly.
+
+    Only the preference is overridden. A model whose only transport is the
+    streaming one still gets it here (see
+    :func:`loreline.capabilities.is_realtime_model`), which is deliberate:
+    those connectors are written to take one whole utterance at a time, and
+    there is no batch endpoint to send a stored file to instead.
+    """
+    return create_backend(config, secrets, model, prefer_batch=True)
 
 
 # How often a running job's segment count is written back to its row. The
@@ -145,7 +179,7 @@ class ReprocessManager:
         # run writes into an existing session's history, so its events have to
         # reach whoever is watching that session (see _drive).
         self._bus = transcript_bus
-        self._backend_factory = backend_factory or create_backend
+        self._backend_factory = backend_factory or stored_audio_backend
         self._diarizer_factory = diarizer_factory
         self._tasks: dict[str, asyncio.Task[None]] = {}
 

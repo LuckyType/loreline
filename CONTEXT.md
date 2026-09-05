@@ -14,7 +14,9 @@ generate video. Models are never interchangeable across these.
 
 **Transport**: How audio reaches a model. Realtime is a socket that answers while audio
 is still going out, batch is one request per utterance. A model may serve one or both.
-It follows the chosen model, never the provider row.
+It follows the chosen model, never the provider row. A model serving both names its
+preference, and that preference is written for a live capture, so re-processing a stored
+recording takes the batch transport instead wherever the model has one.
 _Avoid_: protocol (was a stored enum on a ProviderConfig that nothing read)
 
 **ProviderConfig**: One stored provider row a GM configured: a kind, a credential

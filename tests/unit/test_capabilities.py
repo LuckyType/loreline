@@ -211,6 +211,41 @@ class TestRealtimeModelResolution:
         assert is_realtime_model(ProviderKind.ASSEMBLYAI, "universal-3-5-pro")
         assert not is_realtime_model(ProviderKind.OPENAI, "gpt-transcribe")
 
+    def test_prefer_batch_overrides_a_preference_written_for_live_capture(self) -> None:
+        """`prefer` answers "which transport for a table that is talking now",
+        and a caller replaying a stored recording is the one caller that knows
+        the question does not apply. Both realtime-preferring favourites move
+        to their batch transport for it; one that already prefers batch does
+        not move."""
+        assert not is_realtime_model(ProviderKind.DEEPGRAM, "nova-3", prefer_batch=True)
+        assert not is_realtime_model(ProviderKind.DEEPGRAM, "nova-2", prefer_batch=True)
+        assert not is_realtime_model(
+            ProviderKind.ASSEMBLYAI, "universal-3-5-pro", prefer_batch=True
+        )
+        assert not is_realtime_model(ProviderKind.OPENAI, "gpt-transcribe", prefer_batch=True)
+
+    def test_prefer_batch_leaves_a_model_with_no_batch_transport_alone(self) -> None:
+        """There is no batch endpoint to prefer for these, and the yaml says so
+        beside gemini-3.5-transcribe-live: `batch: false` names a transport the
+        vendor does not serve, not a use the model is barred from, and
+        re-processing stored audio through the socket is exactly why those
+        connectors take one whole utterance at a time."""
+        assert is_realtime_model(
+            ProviderKind.GEMINI, "gemini-3.5-transcribe-live", prefer_batch=True
+        )
+        assert is_realtime_model(ProviderKind.OPENAI, "gpt-realtime-whisper", prefer_batch=True)
+        assert is_realtime_model(
+            ProviderKind.ASSEMBLYAI, "universal-streaming-english", prefer_batch=True
+        )
+
+    def test_prefer_batch_does_not_reroute_a_model_nobody_annotated(self) -> None:
+        """An uncurated id declares no transports at all, so there is no batch
+        one to prefer, only the same guess a live capture makes. Sending a
+        stored file to an endpoint nobody has vouched for would trade a
+        delivery risk for a failed job."""
+        assert is_realtime_model(ProviderKind.DEEPGRAM, "some-future-model", prefer_batch=True)
+        assert is_realtime_model(ProviderKind.OPENAI, "gpt-live-transcribe-2", prefer_batch=True)
+
     def test_an_uncurated_model_follows_the_kinds_default(self) -> None:
         """No annotation and no transport marker in the name leaves the model
         this kind would have picked for itself: an unrecognised Deepgram id

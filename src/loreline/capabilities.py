@@ -302,7 +302,7 @@ def supports_inline_diarization(kind: ProviderKind, model: str | None) -> bool:
     return bool(entry and entry.transcribe and entry.transcribe.inline_diarization)
 
 
-def is_realtime_model(kind: ProviderKind, model: str | None) -> bool:
+def is_realtime_model(kind: ProviderKind, model: str | None, *, prefer_batch: bool = False) -> bool:
     """Whether this provider+model pair transcribes over a streaming transport.
 
     This picks the connector for kinds that offer both transports, so it must
@@ -313,6 +313,21 @@ def is_realtime_model(kind: ProviderKind, model: str | None) -> bool:
     serves both, the ``prefer`` written beside them. Nothing consults the
     sibling list, so hiding or unhiding one model never reroutes another - the
     guard test in tests/unit/test_capabilities.py pins that.
+
+    ``prefer_batch`` is the one thing a caller may say that the model does not:
+    this audio is not arriving live. Only re-processing can say it, and it
+    matters because ``prefer`` is written for a live capture, where the socket
+    is the right answer and several favourites say so (nova-3,
+    universal-3-5-pro). A stored recording driven through the same socket goes
+    out as fast as the job can read the file rather than as fast as a table
+    talks, which is the delivery some realtime endpoints handle worst.
+
+    It overrides the preference and nothing else. A model that serves only the
+    streaming transport keeps it: there is no batch endpoint to post a stored
+    file to, and those connectors are written to survive a whole utterance at
+    a time for exactly this reason (see gemini-3.5-transcribe-live in the
+    yaml). Nor does it touch a model nobody annotated, where there is no
+    declared batch transport to prefer.
     """
     spec = _provider(kind)
     if spec is None:
@@ -322,12 +337,16 @@ def is_realtime_model(kind: ProviderKind, model: str | None) -> bool:
         # with none, and the health probe asks which transport a kind's own
         # default runs on. Answer with that default's transport rather than
         # "can this kind stream at all", so an unset model and the model that
-        # would actually run cannot disagree.
+        # would actually run cannot disagree. ``prefer_batch`` has nothing to
+        # say here: the one kind that arrives without a model is the
+        # self-hosted one, whose only declared transport is batch.
         return _default_transport(kind)
     entry = spec.find(model)
     caps = entry.transcribe if entry else None
     if caps is None:
         return _guess_transport(kind, model)
+    if prefer_batch and caps.batch:
+        return False
     # Curated: the model's own transport, or, when it serves both, the
     # preference written beside them. Nothing here consults the sibling list,
     # so hiding or unhiding another model cannot reroute this one.
