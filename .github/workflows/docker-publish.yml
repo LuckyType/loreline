@@ -1,0 +1,121 @@
+# Publishes the production image to GHCR for the two platforms this project
+# actually runs on: linux/amd64 (a normal box) and linux/arm64 (the Raspberry
+# Pi). Nothing in the repo depends on the result. `docker compose up -d --build`
+# and deploy/update.sh keep building locally exactly as they did before this
+# workflow existed; a published image is what makes `docker compose pull` and
+# the optional watchtower profile mean anything at all (see docker-compose.yml).
+#
+# Two things worth knowing before this is turned loose:
+#
+# 1. It is slow. The arm64 half runs under QEMU emulation on an x86_64 runner,
+#    and this image installs torch, torchaudio and onnxruntime and byte-compiles
+#    all of it (UV_COMPILE_BYTECODE=1 in the Dockerfile). Emulated, that is tens
+#    of minutes on a cache miss, and the first run is a cache miss by
+#    definition. Free on a public repo, but not fast. If it ever becomes
+#    intolerable the fix is native arm64 runners (`runs-on: ubuntu-24.04-arm`)
+#    building per-platform digests that a second job merges, not more caching.
+#
+# 2. A GHCR package is private the first time it is pushed, even from a public
+#    repo. Until someone flips it to public in the package settings, a plain
+#    `docker compose pull` on a deployment cannot fetch it without a login.
+#
+# Deliberately not part of ci.yml: that pipeline gates merges and finishes in a
+# few minutes, this one produces an artifact and does not. Also deliberately not
+# run on pull requests, for the same reason - the Dockerfile was not built on
+# PRs before either, so nothing regressed, but a broken Dockerfile is still only
+# discovered here, after the merge.
+name: Docker image
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # The only extra grant needed. GHCR accepts the built-in GITHUB_TOKEN, so
+      # there is no secret to create, store or rotate for any of this.
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # binfmt handlers, so the runner can execute arm64 binaries at all.
+      # (ci.yml's arm64-smoke job still pins this action at v3. Bumping it is
+      # unrelated to publishing images, so it is left alone here.)
+      - uses: docker/setup-qemu-action@v4
+        with:
+          platforms: arm64
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Spelled in lowercase rather than ${{ github.repository }}: GHCR refuses
+      # an uppercase path and this repo's owner is spelled LuckyType.
+      #
+      # `latest` and a short-sha tag (sha-1234567, seven characters) on every
+      # push to main. The three semver rules only fire on a pushed `v*` git tag:
+      # this repo has never cut one, so today they are inert, and they are here
+      # so that a first `git tag v0.2.0` yields 0.2.0, 0.2 and 0 without anyone
+      # having to remember to come back and edit this file.
+      #
+      # One consequence to know about if tagging ever does start: metadata-action
+      # also moves `latest` onto a matched semver tag by default, so `latest`
+      # would then follow whichever happened most recently, a release or a push
+      # to main. That is worth revisiting at the point it stops being
+      # hypothetical.
+      - id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/luckytype/loreline
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Layer cache, so a push that only changed application code does not
+          # reinstall and byte-compile torch under emulation all over again.
+          # Caveat worth knowing rather than discovering: the Actions cache is
+          # capped at 10 GB per repository, and two platforms of full
+          # intermediate layers for an image this size can reach that. Past the
+          # cap GitHub evicts the oldest entries, so some builds go cold again
+          # for no visible reason. If that turns out to be the normal case,
+          # `type=registry,ref=ghcr.io/luckytype/loreline:buildcache` has no
+          # such cap, at the price of another package in GHCR.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: What was published
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          {
+            echo '## Published to GHCR'
+            echo '```'
+            echo "${TAGS}"
+            echo '```'
+            echo 'A GHCR package is **private** on first publish, even from a public repo.'
+            echo 'Until it is switched to public under Packages, package settings, a'
+            echo 'deployment running `docker compose pull` needs `docker login ghcr.io` first.'
+          } >> "$GITHUB_STEP_SUMMARY"
