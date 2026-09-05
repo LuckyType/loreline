@@ -13,7 +13,10 @@ dependencies = [
     "uvicorn[standard]>=0.34",
     # Ceiling imposed by the openrouter SDK, which pins pydantic<2.13.
     "pydantic>=2.9,<2.13",
-    "openrouter>=1.1.105",
+    # Floor kept 14+ days behind head on purpose - see [tool.uv] exclude-newer
+    # below. This SDK ships multiple releases a day, so a tight floor here
+    # would fight the cooldown on every lock.
+    "openrouter>=1.1.74",
     "pydantic-settings>=2.5",
     "structlog>=24.4",
     "httpx>=0.27",
@@ -64,6 +67,17 @@ loreline = "loreline.cli:app"
 # targets: macOS, Linux x86_64 (dev/CI), and Linux aarch64 (the Pi device).
 # `explicit = true` keeps this index from being used for any other package.
 # ----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
+# Supply-chain defense: refuse to resolve any package version published less
+# than this long ago. Most malicious or compromised uploads are caught and
+# yanked within days; a rolling 14-day cooldown means a fresh attack can never
+# land in a fresh lock. Any dependency whose own floor fights this (it ships
+# too fast for a 14+ day-old version to satisfy the floor) needs its floor
+# lowered instead of an exemption here - see the openrouter comment above.
+# ----------------------------------------------------------------------------
+[tool.uv]
+exclude-newer = "14 days"
+
 [tool.uv.sources]
 torch = [{ index = "pytorch-cpu" }]
 torchaudio = [{ index = "pytorch-cpu" }]
@@ -80,7 +94,8 @@ dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
     "pytest-cov>=5.0",
-    "prek>=0.5",
+    # Floor kept 14+ days behind head on purpose - see [tool.uv] exclude-newer.
+    "prek>=0.4.14",
     "asgi-lifespan>=2.1",
 ]
 
