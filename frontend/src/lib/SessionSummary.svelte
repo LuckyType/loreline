@@ -5,6 +5,10 @@
  * A summary is a recap, and a video is generated from that recap, so both
  * triggers live here and both are disabled with the reason when the thing they
  * need is missing: an LLM provider, or a summary to work from.
+ *
+ * Open, the section takes an equal share of the card's leftover height and
+ * scrolls inside it, so a long recap and a stack of generated videos push
+ * neither the transcript nor the player off the screen.
  */
 
 import { onMount } from 'svelte'
@@ -17,6 +21,7 @@ import Foldable from '$lib/Foldable.svelte'
 import GenerateVideoDialog from '$lib/GenerateVideoDialog.svelte'
 import { providerName } from '$lib/stores'
 import SummarizeDialog from '$lib/SummarizeDialog.svelte'
+import { cn } from '$lib/utils'
 import type { Session, VideoJob } from '$lib/wire'
 
 let {
@@ -93,13 +98,14 @@ onMount(async () => {
 })
 </script>
 
-<CardContent class="flex flex-col gap-2">
+<CardContent class={cn('flex flex-col gap-2', open ? 'min-h-0 flex-1' : 'shrink-0')}>
 	<Foldable
 		title="Summary"
 		meta={session.summary && session.summary_model
 			? `${providerName(session.summary_provider, actionSetup.providers)} · ${session.summary_model}`
 			: ''}
 		bind:open
+		bodyClass="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto"
 	>
 		{#if session.summary}
 			<p class="m-0 leading-relaxed whitespace-pre-wrap">{session.summary}</p>

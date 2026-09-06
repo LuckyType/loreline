@@ -1,13 +1,19 @@
 <script lang="ts">
 /**
- * One session: its transcript versions, the transcript itself, its summary.
+ * One session: its transcript versions, the transcript itself, its summary,
+ * and the recording they all describe, playing at the foot of the card.
  *
  * The page owns only what more than one card reads - the session, its job
- * rows, which version is selected, and the audio player one card renders and
- * another seeks - plus the two things that follow the whole page rather than
- * any one card: the poll that runs while a job is in flight, and the socket a
- * running job publishes to. Each card below owns its own controls, its own
- * dialog and its own teardown.
+ * rows, which version is selected, and where the playhead is - plus the two
+ * things that follow the whole page rather than any one card: the poll that
+ * runs while a job is in flight, and the socket a running job publishes to.
+ * Each card below owns its own controls, its own dialog and its own teardown.
+ *
+ * The card is sized to the window rather than to its contents, so the player
+ * stays reachable without scrolling: header and player are fixed bands, and
+ * the sections between them share what is left, each scrolling its own body.
+ * Which segment is being spoken is worked out here, once, because both the
+ * timeline's dots and the transcript's highlight are answers to it.
  */
 
 import { onMount } from 'svelte'
@@ -17,6 +23,7 @@ import { ApiError, api } from '$lib/api'
 import { Card } from '$lib/components/ui/card'
 import { jsonFrame, LiveFeed } from '$lib/liveFeed.svelte'
 import SessionHeader from '$lib/SessionHeader.svelte'
+import SessionPlayer from '$lib/SessionPlayer.svelte'
 import SessionSummary from '$lib/SessionSummary.svelte'
 import { inFlight } from '$lib/stores'
 import TranscriptPanel from '$lib/TranscriptPanel.svelte'
@@ -29,18 +36,25 @@ let error = $state('')
 
 const id = $derived(page.params.id ?? '')
 
-// The header's player, borrowed so a transcript timestamp can drive it. It
-// stays null when the header decided there was nothing worth playing (no
+// The player's element, borrowed so a transcript timestamp can drive it. It
+// stays null when the player decided there was nothing worth playing (no
 // recording, or an empty one), and that is what keeps the transcript from
 // offering to seek a player that is not there: one emptiness check, made
 // once, in the card that owns the element.
 let audioEl = $state<HTMLAudioElement | null>(null)
+
+// Where the playhead is, and how many times the user has put it somewhere by
+// hand. The second is what tells the transcript that a seek landing inside the
+// segment it is already showing is still a request to look at that segment.
+let currentTime = $state(0)
+let seekNonce = $state(0)
 
 /** Play from a segment's start. `start_ts` is already on the session clock,
  *  which is the WAV's own timeline, so it needs no conversion. */
 function seekAudio(seconds: number) {
 	if (!audioEl) return
 	audioEl.currentTime = seconds
+	seekNonce++
 	// Started by a click, so autoplay policy allows it; a browser that still
 	// declines leaves the player parked at the new position, which is fine.
 	audioEl.play().catch(() => {})
@@ -54,8 +68,13 @@ function setError(message: string) {
 // Fold state of the page's sections, kept across visits (best effort).
 const SECTIONS_KEY = 'loreline.session-sections'
 
+// Only the version list is worth opening unasked: it is short, and it is what
+// says which transcript everything else would be about. The transcript and the
+// summary are both long enough to be a wall of text on arrival, so a first
+// visit gets them folded and every visit after that gets them however they
+// were left.
 function loadSections(): { table: boolean; transcript: boolean; summary: boolean } {
-	const fallback = { table: true, transcript: true, summary: true }
+	const fallback = { table: true, transcript: false, summary: false }
 	try {
 		const raw = localStorage.getItem(SECTIONS_KEY)
 		return raw ? { ...fallback, ...JSON.parse(raw) } : fallback
@@ -105,6 +124,22 @@ const shownEvents = $derived(
 const speakers = $derived([
 	...new Set(shownEvents.map((e) => e.speaker).filter((s): s is string => !!s)),
 ])
+
+/** The segment being spoken, named by its `start_ts` - which the transcript
+ *  and the timeline both already have, so neither needs a position or an id
+ *  the other could disagree about.
+ *
+ * It is the last segment to have started rather than the one strictly
+ * containing the playhead, so the silences between segments keep showing the
+ * line last spoken instead of blanking out. Inside a segment the two rules
+ * give the same answer. */
+const activeStart = $derived.by(() => {
+	let found: number | null = null
+	for (const ev of shownEvents) {
+		if (ev.start_ts <= currentTime && (found === null || ev.start_ts > found)) found = ev.start_ts
+	}
+	return found
+})
 
 // Bumped on every call, so a fetch that is still in flight when the user
 // switches versions again - even back to the version it started from - can
@@ -202,60 +237,78 @@ onMount(async () => {
 })
 </script>
 
-{#if error || actionSetup.error}
-	<p class="mb-2 text-sm text-destructive">{error || actionSetup.error}</p>
-{/if}
+<!-- The window, less the header above and this page's own padding, exactly as
+     the Dashboard sizes its dock. Everything below fits inside it or scrolls. -->
+<div class="flex h-[calc(100vh-104px)] flex-col gap-2">
+	{#if error || actionSetup.error}
+		<p class="m-0 shrink-0 text-sm text-destructive">{error || actionSetup.error}</p>
+	{/if}
 
-{#if !detail}
-	<p class="text-muted-foreground">Loading…</p>
-{:else}
-	<Card>
-		<SessionHeader
-			sessionId={id}
-			session={detail.session}
-			audioDurationS={detail.audio_duration_s}
-			bind:audioEl
-		/>
+	{#if !detail}
+		<p class="text-muted-foreground">Loading…</p>
+	{:else}
+		<Card class="min-h-0 flex-1">
+			<SessionHeader
+				sessionId={id}
+				session={detail.session}
+				audioDurationS={detail.audio_duration_s}
+			/>
 
-		<div class="border-t"></div>
+			<div class="shrink-0 border-t"></div>
 
-		<TranscriptVersions
-			sessionId={id}
-			{detail}
-			{jobs}
-			selected={selectedVersion}
-			bind:open={sections.table}
-			onselect={selectVersion}
-			onchanged={refreshJobs}
-			onerror={setError}
-		/>
+			<TranscriptVersions
+				sessionId={id}
+				{detail}
+				{jobs}
+				selected={selectedVersion}
+				bind:open={sections.table}
+				onselect={selectVersion}
+				onchanged={refreshJobs}
+				onerror={setError}
+			/>
 
-		<div class="border-t"></div>
+			<div class="shrink-0 border-t"></div>
 
-		<TranscriptPanel
-			sessionId={id}
-			{detail}
-			{jobs}
-			version={selectedVersion}
-			events={shownEvents}
-			loading={versionLoading}
-			{speakers}
-			bind:open={sections.transcript}
-			onqueued={refreshJobs}
-			onrenamed={reloadDetail}
-			onerror={setError}
-			onseek={audioEl ? seekAudio : undefined}
-		/>
+			<TranscriptPanel
+				sessionId={id}
+				{detail}
+				{jobs}
+				version={selectedVersion}
+				events={shownEvents}
+				loading={versionLoading}
+				{speakers}
+				bind:open={sections.transcript}
+				{activeStart}
+				revealNonce={seekNonce}
+				onqueued={refreshJobs}
+				onrenamed={reloadDetail}
+				onerror={setError}
+				onseek={audioEl ? seekAudio : undefined}
+			/>
 
-		<div class="border-t"></div>
+			<div class="shrink-0 border-t"></div>
 
-		<SessionSummary
-			sessionId={id}
-			session={detail.session}
-			{speakers}
-			bind:open={sections.summary}
-			onsummarized={reloadDetail}
-			onerror={setError}
-		/>
-	</Card>
-{/if}
+			<SessionSummary
+				sessionId={id}
+				session={detail.session}
+				{speakers}
+				bind:open={sections.summary}
+				onsummarized={reloadDetail}
+				onerror={setError}
+			/>
+
+			<!-- Last, and docked: it brings its own separator, since a session with
+			     no recording renders no player and must not leave a rule behind. -->
+			<SessionPlayer
+				sessionId={id}
+				audioPath={detail.session.audio_path}
+				audioDurationS={detail.audio_duration_s}
+				segments={shownEvents}
+				{activeStart}
+				bind:audioEl
+				bind:currentTime
+				onseek={() => seekNonce++}
+			/>
+		</Card>
+	{/if}
+</div>

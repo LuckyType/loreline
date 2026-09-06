@@ -45,6 +45,21 @@ export function formatTime(seconds: number): string {
 	return `${m}:${sec}`
 }
 
+// A stored WAV this short has captured nothing: an errored session's bare
+// ~44-byte header decodes to exactly 0 s. The small margin above zero is only
+// for rounding - any real utterance clears it easily.
+const EMPTY_AUDIO_MAX_S = 0.05
+
+/** What an empty recording is called, wherever one is mentioned. */
+export const EMPTY_AUDIO_NOTE = 'This session has no captured audio - the recording is empty.'
+
+/** Whether a session's stored recording is a header with no audio behind it.
+ *  One check, shared: the export menu labels its entry from it, and the player
+ *  says so instead of offering controls that would play nothing. */
+export function audioIsEmpty(durationS: number | null | undefined): boolean {
+	return durationS != null && durationS <= EMPTY_AUDIO_MAX_S
+}
+
 // Transcript segments and reprocess jobs store a provider *id*, which is a
 // 32-char hex string - unreadable in a table or next to a transcript line.
 // These resolve it to the provider's name, keeping the id only as a fallback
