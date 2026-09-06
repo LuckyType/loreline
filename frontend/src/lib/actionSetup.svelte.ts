@@ -85,6 +85,15 @@ class ActionSetupStore {
 	/** Non-empty when the provider list could not be fetched. The defaults
 	 *  failing is not an error: a fresh install has none. */
 	error = $state('')
+	/** True once the first fetch has settled, success or failure. `providers`
+	 *  and `error` are both blank before anything has loaded, exactly as they
+	 *  would be for a real install with none configured - this is the only
+	 *  field that tells "still loading" from "loaded and genuinely empty"
+	 *  apart. A picker seeded from this store reads false as the former, never
+	 *  as "nothing to offer" - see CaptureControls' primary picker. Sticks
+	 *  true forever after: `reload()` refreshes the data in place and must not
+	 *  send an already-populated picker back to a loading placeholder. */
+	ready = $state(false)
 	#loaded = false
 	#inflight: Promise<void> | null = null
 
@@ -135,6 +144,7 @@ class ActionSetupStore {
 		if (providers) this.providers = providers
 		this.defaults = completeDefaults(defaults)
 		this.#loaded = !!providers
+		this.ready = true
 	}
 
 	provider(id: string | null | undefined): ProviderConfig | undefined {
