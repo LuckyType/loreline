@@ -249,7 +249,11 @@ class SttRouter:
                 sample_rate=self._primary.config.sample_rate,
                 min_speakers=self._config.diarization.min_speakers,
                 max_speakers=self._config.diarization.max_speakers,
+                session_id=self._config.session_id,
             )
+            # Passed the session id because the labels otherwise mean nothing
+            # across utterances (see ``DiarizationProvider.diarize``).
+            #
             # The diarizer only sees this utterance's isolated audio, so its
             # segments are utterance-relative (0-based); shift them to match the
             # word timings, which already carry the utterance's session offset.
