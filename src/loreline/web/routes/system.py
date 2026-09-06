@@ -119,7 +119,7 @@ async def healthz(request: Request) -> HealthResponse:
     state = get_state(request)
     capture_status = state.manager.status()
     free, total = disk_usage(state.settings.data_dir)
-    threshold = state.settings.disk_alert_threshold_mb * 1024 * 1024
+    threshold = state.settings.disk_alert_threshold_bytes
     alert_config = await state.alerts.get_config()
 
     defaults = await load_action_defaults(state)
