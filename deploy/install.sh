@@ -5,8 +5,12 @@
 # inside the image, not on the host.
 #
 # Usage:
-#   bash deploy/install.sh              # interactive
+#   curl -fsSL https://raw.githubusercontent.com/LuckyType/loreline/main/deploy/install.sh | bash
+#   bash deploy/install.sh              # interactive, from a checkout
 #   bash deploy/install.sh --defaults   # no prompts, use defaults (CI/scripted)
+#
+# Piped, it clones the repo to /opt/loreline (APP_DIR overrides that) and
+# re-runs itself from there, so there is no checkout to make by hand first.
 #
 # For a source+systemd deployment instead (no Docker at all - e.g. a device
 # where you'd rather not run a container runtime), see install-source.sh.
@@ -118,7 +122,96 @@ else
   as_root() { sudo "$@"; }
 fi
 
-APP_DIR="${APP_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+# --- find the checkout, or fetch one ----------------------------------------
+# Two supported ways in, and they need different things done first:
+#
+#   git clone ... && bash deploy/install.sh   the checkout is already here
+#   curl -fsSL .../install.sh | bash          there is no checkout yet
+#
+# Piped, bash reads this script from stdin, so BASH_SOURCE is not set at all
+# (under `set -u` the old dirname of it aborted the run) and there is no path
+# to take a dirname of anyway. So the test is not "what does BASH_SOURCE look
+# like" - that differs between `bash x.sh`, `./x.sh`, `cd deploy && bash
+# install.sh` and a pipe - but "is the file I am running the install.sh of a
+# checkout that holds the rest of what I need". `-ef` compares device and
+# inode, so a relative path that merely happens to exist can't pass by chance.
+REPO_URL="${LORELINE_REPO_URL:-https://github.com/LuckyType/loreline.git}"
+SELF="${BASH_SOURCE[0]:-}"
+CHECKOUT=""
+if [[ -n $SELF && -f $SELF ]]; then
+  CANDIDATE="$(cd "$(dirname "$SELF")/.." && pwd)"
+  if [[ $SELF -ef ${CANDIDATE}/deploy/install.sh && -f ${CANDIDATE}/docker-compose.yml ]]; then
+    CHECKOUT="$CANDIDATE"
+  fi
+fi
+
+# APP_DIR is the same knob install-source.sh takes, with the same default, and
+# it wins over whatever was detected above.
+APP_DIR="${APP_DIR:-${CHECKOUT:-/opt/loreline}}"
+[[ $APP_DIR == /* ]] || APP_DIR="${PWD}/${APP_DIR}"
+[[ -d $APP_DIR ]] && APP_DIR="$(cd "$APP_DIR" && pwd)"
+
+if [[ $APP_DIR != "$CHECKOUT" ]]; then
+  # Re-exec'd once already and still not inside a checkout: stop rather than
+  # spawn ourselves forever.
+  [[ -z ${LORELINE_BOOTSTRAPPED:-} ]] ||
+    die "Bootstrapped into ${APP_DIR} but still can't find a checkout there. Not looping."
+
+  if [[ -f ${APP_DIR}/docker-compose.yml && -f ${APP_DIR}/deploy/install.sh ]]; then
+    # Already installed here. Nothing to clone, and nothing to clean up: the
+    # steps below are written to be re-run (they ask before replacing .env,
+    # and `compose up -d` is idempotent), so this just routes into them.
+    ORIGIN="$(git -C "$APP_DIR" remote get-url origin 2>/dev/null || true)"
+    if [[ ${ORIGIN,,} == *luckytype/loreline* || -z $ORIGIN ]]; then
+      msg_ok "Using the existing checkout in ${APP_DIR}"
+    else
+      msg_warn "Using the existing checkout in ${APP_DIR} (origin: ${ORIGIN})"
+    fi
+  elif [[ -e $APP_DIR ]] && [[ -n "$(ls -A "$APP_DIR" 2>/dev/null)" ]]; then
+    # Whatever this is, it is somebody else's. An installer that clones over
+    # the top of it would be a bug that costs someone their data.
+    die "${APP_DIR} already exists and is not a Loreline checkout. Refusing to write into it - move it aside, or re-run with APP_DIR=/some/other/path."
+  else
+    # git is not a given on a fresh box, and the one-liner is aimed squarely
+    # at fresh boxes. ca-certificates for the same reason: cloning over HTTPS
+    # from a minimal image otherwise fails on certificate verification.
+    if ! command -v git &>/dev/null; then
+      msg_info "Installing git"
+      as_root apt-get update -qq
+      as_root apt-get install -y --no-install-recommends git ca-certificates
+    fi
+    # Not a shallow clone, deliberately: the history is ~20MB, and deploy/
+    # update.sh pulls in this checkout while an admin reasonably expects to be
+    # able to `git log` it before letting it update. A --depth 1 box would
+    # differ from a hand-cloned one for no saving worth having.
+    msg_info "Cloning ${REPO_URL} into ${APP_DIR}"
+    as_root mkdir -p "$APP_DIR"
+    as_root git clone "$REPO_URL" "$APP_DIR" ||
+      die "Clone failed. Check network access to ${REPO_URL}, or clone it yourself and run bash ${APP_DIR}/deploy/install.sh"
+    # Same reasoning as `own` below: a checkout owned by root is one the
+    # invoking user can't `git pull` in, and pulling is how they update.
+    [[ $EUID -eq 0 ]] || as_root chown -R "$(id -u):$(id -g)" "$APP_DIR"
+    msg_ok "Cloned into ${APP_DIR}"
+  fi
+
+  # Hand over to the copy in the checkout, with the same arguments. Everything
+  # past this point then runs exactly as it does for `bash deploy/install.sh`
+  # in a clone - one code path, not two.
+  #
+  # stdin is reattached to the terminal on the way, and that is the difference
+  # between a one-liner that asks and one that only pretends to: piped, stdin
+  # *is* this script, so `read` would eat what's left of it and the `[[ -t 0 ]]`
+  # test above has already concluded there is nobody to ask. /dev/tty is the
+  # controlling terminal whatever stdin was redirected to. Where there is none
+  # (CI, a systemd unit), /dev/null keeps the run non-interactive and stops any
+  # unread tail of the piped script being read as answers.
+  export LORELINE_BOOTSTRAPPED=1
+  if (exec </dev/tty) 2>/dev/null; then
+    exec bash "${APP_DIR}/deploy/install.sh" "$@" </dev/tty
+  fi
+  exec bash "${APP_DIR}/deploy/install.sh" "$@" </dev/null
+fi
+
 cd "$APP_DIR"
 [[ -f docker-compose.yml ]] || die "docker-compose.yml not found in ${APP_DIR} - run this from a checkout of the repo."
 OWNER="$(stat -c '%u:%g' "$APP_DIR")"

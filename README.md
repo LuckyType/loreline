@@ -97,17 +97,46 @@ supported, for boxes where that is a hard requirement. See
 ### Docker Compose
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/LuckyType/loreline/main/deploy/install.sh | bash
+```
+
+That is the whole install. The script clones the repo to `/opt/loreline` and
+re-runs itself from there, so there is nothing to check out first. Set `APP_DIR`
+to install somewhere else. If that directory is already a Loreline checkout it
+uses that one and clones nothing, which makes re-running the same line on a box
+that is already set up safe: it keeps your existing `.env` unless you tell it
+otherwise. If the directory exists and holds something else, it stops rather
+than writing into it.
+
+Piping a script straight into a shell is worth being able to opt out of, so the
+long way is equally supported and behaves identically. Read it first, then run
+the copy you read:
+
+```bash
 git clone https://github.com/LuckyType/loreline.git /opt/loreline
 cd /opt/loreline
 bash deploy/install.sh
 ```
 
-The installer is interactive. Confirm once and it installs Docker Engine and the
+The installer is interactive either way, the one-liner included: it reattaches
+its prompts to your terminal, because piping means stdin is the script itself
+and an installer that quietly took every default instead of asking would be a
+poor trade for one line. Confirm once and it installs Docker Engine and the
 Compose plugin from apt if needed, generates a login password, detects whether
 the host has a microphone, brings the stack up, and prints where to reach it.
 Answer "no" at the first prompt to choose the port, password, mic passthrough,
 self-hosted STT and diarization, and auto-updates one at a time.
-`bash deploy/install.sh --defaults` skips every prompt, for scripted installs.
+
+To skip every prompt, for scripted installs:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/LuckyType/loreline/main/deploy/install.sh | bash -s -- --defaults
+bash deploy/install.sh --defaults   # or, from a checkout
+```
+
+Note the `-s --` in the piped form: `--defaults` has to reach the script rather
+than bash. With no terminal to prompt on at all (CI, a systemd unit), the
+installer takes the defaults whether or not you pass the flag.
 
 The app, its dependencies and the built UI all live inside the image.
 
