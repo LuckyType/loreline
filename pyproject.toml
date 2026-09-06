@@ -42,6 +42,8 @@ audio = [
     "silero-vad>=5.1",
     # Direct (not just transitive via silero-vad): `[tool.uv.sources]` below
     # only redirects a package's index for direct project dependencies.
+    # Both are load-bearing even though the VAD runs on ONNX Runtime - see the
+    # "why torch stays" block below before trying to delete them again.
     "torch>=2.0",
     "torchaudio>=2.0",
 ]
@@ -59,13 +61,35 @@ persistence = [
 loreline = "loreline.cli:app"
 
 # ----------------------------------------------------------------------------
-# torch (pulled in transitively by the `audio` extra's silero-vad) defaults to
-# a CUDA-linked build even on aarch64 Linux - several GB of NVIDIA runtime
-# libraries that can never be used (no GPU on a Raspberry Pi, nor in a plain
-# dev container). Pin it and torchaudio to PyTorch's dedicated CPU-only index
-# instead, which publishes wheels for all three platforms this project
-# targets: macOS, Linux x86_64 (dev/CI), and Linux aarch64 (the Pi device).
-# `explicit = true` keeps this index from being used for any other package.
+# Why torch stays. It is the single biggest thing in the image, and
+# `loreline.audio.vad` asks silero for ONNX inference
+# (`load_silero_vad(onnx=True)`), so it reads like dead weight. It is not.
+# Checked against the installed silero-vad 6.2.1, not its docs:
+#   * its wheel metadata requires both unconditionally, outside any extra
+#     (`Requires-Dist: torch>=1.12.0`, `Requires-Dist: torchaudio>=0.12.0`),
+#     so a resolver puts them back however this list is written;
+#   * `silero_vad/utils_vad.py` opens with `import torch` then
+#     `import torchaudio` at module level, and `__init__.py` imports from it,
+#     so installing with `--no-deps` only moves the failure to import time.
+#     Verified both ways in a throwaway venv: dropping either one turns
+#     `from silero_vad import load_silero_vad` into a ModuleNotFoundError;
+#   * ONNX Runtime does the arithmetic, but torch is still the array library
+#     around it. `OnnxWrapper.__call__` keeps the recurrent state and the
+#     64-sample context as tensors, validates its input with `x.dim()`, and
+#     returns `torch.from_numpy(out)`. Passing a numpy array instead raises
+#     AttributeError, so even the ONNX path cannot be fed torch-free.
+# Going torch-free therefore means not importing silero_vad at all: load the
+# bundled silero_vad.onnx through onnxruntime directly and keep that state in
+# numpy. That is a code change in the VAD, not an edit to this file.
+# ----------------------------------------------------------------------------
+# torch defaults to a CUDA-linked build even on aarch64 Linux: measured at
+# 3.5 GB installed, 2.7 GB of it nvidia-* and triton wheels that can never be
+# used (no GPU on a Raspberry Pi, nor in a plain dev container). The same
+# resolve against PyTorch's dedicated CPU-only index is 327 MB with no nvidia
+# packages at all, and that index publishes wheels for all three platforms
+# this project targets: macOS, Linux x86_64 (dev/CI), and Linux aarch64 (the
+# Pi device). `explicit = true` keeps it from being used for any other
+# package.
 # ----------------------------------------------------------------------------
 # ----------------------------------------------------------------------------
 # Supply-chain defense: refuse to resolve any package version published less
