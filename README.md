@@ -164,6 +164,40 @@ container holding the socket. Note what it does not do: it updates the image and
 only the image. Changes to `docker-compose.yml`, the Caddyfile or anything under
 `deploy/` still arrive by `git pull`, which is why `deploy/update.sh` does both.
 
+**`deploy/update-fast.sh`, if you want that as one command.** The two-liner
+above leaves the `git pull` to you, and forgetting it is how a box ends up
+running a new image against last month's `docker-compose.yml`. This script does
+both halves, in that order, and nothing else:
+
+```bash
+deploy/update-fast.sh
+```
+
+That is `git pull --ff-only`, then `docker compose pull app`, then
+`docker compose up -d --no-build app`. It never builds anything, and
+`--no-build` is load-bearing rather than decorative: the `app` service defines
+both `build:` and `image:`, so an image Compose cannot pull would otherwise fall
+back to the from-source build this whole path exists to skip. With the flag it
+fails and says why instead. Only the `app` service is touched, so Caddy, the
+docker proxy and any enabled profile services keep running, and the script tells
+you afterwards if the pull brought compose-file changes that need a wider
+`up -d`.
+
+Its prerequisite is real and not optional: **the GHCR package has to be
+pullable from this box.** A GHCR package is private the first time it is
+published, even from a public repository, so until someone switches
+`ghcr.io/luckytype/loreline` to public in its package settings, or you run
+`sudo docker login ghcr.io` here with a `read:packages` token, this path pulls
+nothing at all. It says exactly that, and what to do about it, rather than
+leaving you with a bare 401 to interpret.
+
+What it costs against `deploy/update.sh` is freshness and self-containment. It
+deploys whatever `docker-publish.yml` last published from `main`, so a commit
+that landed ten minutes ago is not here yet, and one that broke the image build
+is not here at all, whereas `update.sh` builds whatever you have checked out. On
+a Raspberry Pi, where that build is the slow part by a wide margin, the trade is
+usually worth making. On a box that builds in two minutes it buys much less.
+
 **WUD, if you want the update button to work.** [WUD](https://github.com/getwud/wud)
 ("What's Up Docker") is a small container that watches a registry for a newer
 image and can stop, pull and recreate a container onto it. It is off by default;
