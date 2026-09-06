@@ -27,6 +27,7 @@ let {
 	jobs,
 	version,
 	events,
+	loading = false,
 	speakers,
 	open = $bindable(true),
 	onqueued,
@@ -39,6 +40,10 @@ let {
 	/** The version being shown: 'original', or a re-transcription's job id. */
 	version: string
 	events: TranscriptEvent[]
+	/** True while `version`'s own transcript fetch is still in flight, so
+	 *  `events` may still hold the previous version's segments. The list is
+	 *  hidden behind a loading message instead of showing them. */
+	loading?: boolean
 	/** The distinct speaker labels in `events`. */
 	speakers: string[]
 	/** Fold state, kept by the page across visits. */
@@ -112,7 +117,7 @@ async function diarizeSession() {
 		title="Transcript"
 		meta="{version === 'original'
 			? 'original'
-			: version.slice(0, 8)} · {events.length} segments"
+			: version.slice(0, 8)} · {loading ? 'loading…' : `${events.length} segments`}"
 		bind:open
 	>
 		<div
@@ -133,7 +138,9 @@ async function diarizeSession() {
 				{:else}
 					<span class="text-muted-foreground">Not diarized</span>
 				{/if}
-				<span><span class="text-muted-foreground">Segments</span> {events.length}</span>
+				<span
+					><span class="text-muted-foreground">Segments</span> {loading ? '…' : events.length}</span
+				>
 			</div>
 			<div class="flex flex-wrap items-center gap-2">
 				{#if hasAudio}
@@ -171,12 +178,16 @@ async function diarizeSession() {
 				</Button>
 			</div>
 		</div>
-		<TranscriptList
-			{events}
-			names={detail.session.speaker_names}
-			providers={actionSetup.providers}
-			showSource={version === 'original'}
-		/>
+		{#if loading}
+			<p class="text-muted-foreground">Loading transcript…</p>
+		{:else}
+			<TranscriptList
+				{events}
+				names={detail.session.speaker_names}
+				providers={actionSetup.providers}
+				showSource={version === 'original'}
+			/>
+		{/if}
 	</Foldable>
 </CardContent>
 

@@ -88,12 +88,38 @@ const speakers = $derived([
 	...new Set(shownEvents.map((e) => e.speaker).filter((s): s is string => !!s)),
 ])
 
+// Bumped on every call, so a fetch that is still in flight when the user
+// switches versions again - even back to the version it started from - can
+// tell it is no longer the most recent request and must not write its
+// result. A plain variable, not $state, for the same reason as
+// jobsWereRunning below: it is only ever compared against after an await,
+// never read reactively.
+let versionRequestToken = 0
+
+// True only while selectVersion's own fetch for a non-original version is in
+// flight. Switching to 'original' needs no fetch, so it never sets this; the
+// background refetch in reloadAfterJobs below does not either, since that is
+// a catch-up for the version already on screen, not a user-initiated switch.
+let versionLoading = $state(false)
+
 async function selectVersion(version: string) {
 	selectedVersion = version
+	const token = ++versionRequestToken
+	if (version === 'original') {
+		versionFeed.items = []
+		versionLoading = false
+		return
+	}
+	versionLoading = true
 	try {
-		versionFeed.items = version === 'original' ? [] : await api.getTranscriptVersion(id, version)
+		const items = await api.getTranscriptVersion(id, version)
+		if (token === versionRequestToken) versionFeed.items = items
 	} catch (err) {
-		error = err instanceof ApiError ? err.message : 'failed to load transcript version'
+		if (token === versionRequestToken) {
+			error = err instanceof ApiError ? err.message : 'failed to load transcript version'
+		}
+	} finally {
+		if (token === versionRequestToken) versionLoading = false
 	}
 }
 
@@ -106,11 +132,15 @@ async function reloadDetail() {
 }
 
 /** A finished run may have rewritten the selected version's rows, so the queue
- *  draining refetches them. */
+ *  draining refetches them. Guarded by the same token as selectVersion: this
+ *  fetch can still be in flight after the user has switched to a different
+ *  version, and a slow refetch of the version they left must not clobber it. */
 async function reloadAfterJobs() {
 	await reloadDetail()
 	if (selectedVersion !== 'original') {
-		versionFeed.items = await api.getTranscriptVersion(id, selectedVersion)
+		const token = versionRequestToken
+		const items = await api.getTranscriptVersion(id, selectedVersion)
+		if (token === versionRequestToken) versionFeed.items = items
 	}
 }
 
@@ -189,6 +219,7 @@ onMount(async () => {
 			{jobs}
 			version={selectedVersion}
 			events={shownEvents}
+			loading={versionLoading}
 			{speakers}
 			bind:open={sections.transcript}
 			onqueued={refreshJobs}
