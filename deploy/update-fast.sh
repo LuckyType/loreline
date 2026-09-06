@@ -19,6 +19,22 @@
 # needs the checkout only to read docker-compose.yml correctly and never looks
 # at the source at all, so folding them together would mean one script whose
 # preconditions depend on which half you asked for.
+#
+# Run by hand it does the whole job and needs no arguments. It is also what the
+# optional `updater` service runs (services/updater/updater.py), and that
+# service needs the two halves separately, which is what UPDATE_STAGE is for:
+#
+#   all    the default, and the only value a person should ever need: both
+#          halves in order, exactly as this script has always behaved
+#   pull   git pull and `docker compose pull app`. Fetches everything, changes
+#          nothing that is running
+#   apply  `docker compose up -d --no-build app`, the half that replaces the
+#          running container
+#
+# The split exists because the app container is what asks the updater service
+# for an update, and the apply half is what stops the app container. Run in one
+# piece, the result would be owed to a process that is already dead. Split, the
+# answer goes out after the pull and the recreate follows it.
 set -euo pipefail
 
 # Same `{ }` wrapper as update.sh and update-source.sh, for the same reason:
@@ -32,8 +48,36 @@ set -euo pipefail
 APP_DIR="${APP_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 cd "${APP_DIR}"
 
+STAGE="${UPDATE_STAGE:-all}"
+case "${STAGE}" in
+  all | pull | apply) ;;
+  *)
+    echo "UPDATE_STAGE must be all, pull or apply (got '${STAGE}')." >&2
+    exit 2
+    ;;
+esac
+
+# Every docker call goes through here so the privilege decision is made once.
+# On a host this is a normal user with sudo, which is what it has always been.
+# In the updater container there is no sudo installed and none needed: it is
+# root already, and the socket is bind-mounted. Deciding on EUID rather than an
+# env var means neither side has to be told which one it is, and it also stops a
+# root-run invocation on the host from becoming `sudo sudo docker`.
+if [[ ${EUID} -eq 0 ]]; then
+  run_docker() { docker "$@"; }
+else
+  run_docker() { sudo docker "$@"; }
+fi
+
 PREV_COMMIT="$(git rev-parse HEAD)"
 echo "previous_commit=${PREV_COMMIT}"
+
+# The pull stage. Its body is left at column 0, like the `{ }` wrapper's above
+# and for a related reason: the operator-facing messages below are heredocs,
+# whose bodies are printed exactly as written, so indenting the block would
+# either indent every line of those messages or leave them visibly detached
+# from the code they belong to. Neither is worth the two spaces.
+if [[ ${STAGE} != apply ]]; then
 
 # The image is the only thing this script skips building. Everything needed to
 # interpret it correctly still arrives by git: docker-compose.yml itself, the
@@ -42,6 +86,27 @@ echo "previous_commit=${PREV_COMMIT}"
 # ends up running, which is whatever CI last published to main.
 git fetch --quiet origin
 git pull --ff-only origin main
+
+# Which image `app` resolves to, asked of Compose rather than read out of the
+# YAML, so interpolation and any docker-compose.override.yml are already
+# applied. Recorded before and after the pull, because comparing the two image
+# IDs is the whole of "did anything actually change" - and knowing that is what
+# lets the updater service skip the recreate entirely on an up-to-date box, and
+# say so, rather than restarting the app to discover there was nothing to do.
+#
+# `config --images` prints one line per image and appends a service's dependent
+# images after the first, so only the first line is the answer. Taken with
+# parameter expansion and not `| head -1`, which would SIGPIPE Compose and,
+# under `set -o pipefail`, fail the script (see have_pkg in deploy/install.sh
+# for the same trap).
+IMAGE_REF=""
+if IMAGE_LIST="$(run_docker compose config --images app 2>/dev/null)"; then
+  IMAGE_REF="${IMAGE_LIST%%$'\n'*}"
+fi
+IMAGE_BEFORE=""
+if [[ -n ${IMAGE_REF} ]]; then
+  IMAGE_BEFORE="$(run_docker image inspect --format '{{.Id}}' "${IMAGE_REF}" 2>/dev/null || true)"
+fi
 
 # One service by name, not the whole project, which also sidesteps the problem
 # update.sh has to work around with --ignore-buildable: a bare
@@ -61,7 +126,7 @@ trap 'rm -f "${PULL_LOG}"' EXIT
 # runs. Safe under `set -o pipefail`: tee reads to EOF, so it cannot SIGPIPE
 # the producer the way an early-exiting `grep -q` can (see the shell gotchas in
 # docs/DEPLOYMENT-NOTES.md).
-if ! sudo docker compose pull app 2>&1 | tee "${PULL_LOG}"; then
+if ! run_docker compose pull app 2>&1 | tee "${PULL_LOG}"; then
   echo >&2
   echo "Pulling ghcr.io/luckytype/loreline failed. Nothing on this box was changed." >&2
   echo >&2
@@ -98,6 +163,48 @@ MSG
   exit 1
 fi
 
+# The same reference, re-resolved. The pull replaces what that tag points at, so
+# a different image ID here means a genuinely newer image and an identical one
+# means this box was already current.
+IMAGE_AFTER=""
+if [[ -n ${IMAGE_REF} ]]; then
+  IMAGE_AFTER="$(run_docker image inspect --format '{{.Id}}' "${IMAGE_REF}" 2>/dev/null || true)"
+fi
+if [[ -z ${IMAGE_REF} ]]; then
+  # Compose could not name the image, so this cannot answer the question.
+  # "unknown" is not "no": whoever reads it should apply anyway, because
+  # `up -d` on an unchanged service is a no-op while a skipped update is a
+  # silent failure.
+  echo "image_changed=unknown"
+elif [[ ${IMAGE_AFTER} == "${IMAGE_BEFORE}" ]]; then
+  echo "image_changed=0"
+else
+  echo "image_changed=1"
+fi
+
+fi # end of the pull stage
+
+NEW_COMMIT="$(git rev-parse HEAD)"
+echo "new_commit=${NEW_COMMIT}"
+
+# Only `app` is recreated, so a compose-file change reaching any other service
+# is still sitting unapplied. Say so rather than let it be discovered later.
+# Printed here, by the half that knows both commits, rather than after the
+# recreate where it used to sit: split into stages, the apply half is a separate
+# run of this script and never sees the pull's before and after. In that half
+# the two commits are the same one, so the diff is empty and this stays quiet.
+if ! git diff --quiet "${PREV_COMMIT}" "${NEW_COMMIT}" -- docker-compose.yml Caddyfile; then
+  echo
+  echo "note: docker-compose.yml or the Caddyfile changed in this pull, and only the"
+  echo "      'app' service is recreated. Run 'docker compose up -d' if that change"
+  echo "      touched another service."
+fi
+
+if [[ ${STAGE} == pull ]]; then
+  echo "Pull complete. Nothing has been applied yet."
+  exit 0
+fi
+
 # `--no-build` is the load-bearing flag here, and the reason this is not just
 # `docker compose up -d app`.
 #
@@ -105,7 +212,7 @@ fi
 # that pair through pull_policy: with no pull_policy set, per the Compose Build
 # Specification, "Compose attempts to pull the image first and then builds from
 # source if the image isn't found in the registry or platform cache". The pull
-# above already put it in the local cache, so a plain `up -d` would in fact use
+# stage already put it in the local cache, so a plain `up -d` would in fact use
 # it. But the build fallback is precisely the thing this script exists to
 # avoid, and on a Pi "quietly started a from-source build" is a long silence,
 # not an error anyone can act on. --no-build ("Don't build an image, even if
@@ -131,24 +238,12 @@ fi
 # and recreating the containers". If CI has published nothing new since the
 # last run, nothing is recreated and this is a no-op, which is the right
 # behaviour for something that might end up on a timer.
-sudo docker compose up -d --no-build app
+run_docker compose up -d --no-build app
 
-NEW_COMMIT="$(git rev-parse HEAD)"
-echo "new_commit=${NEW_COMMIT}"
-
-# What actually got deployed, which the commit above deliberately does not tell
+# What actually got deployed, which the commits above deliberately do not tell
 # you. Non-fatal: it is a report, and failing the update over a failed report
 # would be silly.
-sudo docker compose images app || true
-
-# Only `app` was recreated, so a compose-file change reaching any other service
-# is still sitting unapplied. Say so rather than let it be discovered later.
-if ! git diff --quiet "${PREV_COMMIT}" "${NEW_COMMIT}" -- docker-compose.yml Caddyfile; then
-  echo
-  echo "note: docker-compose.yml or the Caddyfile changed in this pull, and this"
-  echo "      script recreated only the 'app' service. Run 'sudo docker compose up -d'"
-  echo "      if that change touched another service."
-fi
+run_docker compose images app || true
 
 echo "Update complete."
 }

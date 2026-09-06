@@ -142,11 +142,13 @@ async function runUpdate() {
 		revision = updateResult.new_commit
 		// A single-line output is one clear sentence about the outcome, written
 		// by the side that actually knows it: "not available in a Docker
-		// deployment", or - once that deployment can hand the job to WUD -
-		// that there was nothing to update, or that the update was only
-		// *started*. Show it verbatim instead of a verdict this page would be
-		// guessing at, and instead of pointing at the <pre> below, which a
-		// one-line output doesn't render anyway.
+		// deployment", or - once that deployment can hand the job to the
+		// updater service - that there was nothing to update, or that a newer
+		// image was pulled and the app is being recreated onto it. Show it
+		// verbatim instead of a verdict this page would be guessing at, and
+		// instead of pointing at the <pre> below, which a one-line output
+		// doesn't render anyway. A failed update comes back as the update
+		// script's own transcript, which is multi-line and does render there.
 		const single = updateResult.output && !updateResult.output.includes('\n')
 		if (single) {
 			opsMessage = updateResult.output

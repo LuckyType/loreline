@@ -14,13 +14,19 @@ case (``/.dockerenv``, standard Docker marker) and point at the host-side
 ``deploy/update.sh`` instead of attempting the source-only mechanics.
 
 There is one way out of that for ``update``, and it does not move the socket
-boundary an inch: the optional ``wud`` service in docker-compose.yml already
-holds that access, for its own audited reason, and WUD ("What's Up Docker")
-exposes an HTTP API that can re-check the registry and apply a newer image on
-demand. So when a URL and credentials are configured, ``update`` drives that
-API over the compose network and lets the container that already has the
-socket do the work. This app still never sees it. See ``_trigger_wud`` for
-the two-step flow, and for why the second step does not wait for an answer.
+boundary an inch: the optional ``updater`` service in docker-compose.yml holds
+that access for its own audited reason, and answers one HTTP route that runs
+``deploy/update-fast.sh``. So when a URL and a token are configured, ``update``
+posts to it over the compose network and lets the container that already has
+the socket do the work. This app still never sees it, and the request carries
+no arguments at all - nothing in it names an image, a tag or a container, so it
+cannot ask for anything but this one update.
+
+What comes back is a real result rather than a guess, which is new. The two
+third-party updaters this replaces both applied the update from inside the
+container being replaced, so neither could report how it went. This one is a
+separate container that ``docker compose up -d --no-build app`` does not touch,
+and it answers after the pull and before the recreate. See ``_trigger_updater``.
 """
 
 from __future__ import annotations
@@ -30,7 +36,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import httpx
-from pydantic import BaseModel, Field, TypeAdapter
+from pydantic import BaseModel
 
 from loreline.logging import get_logger
 from loreline.updater.process import run_command
@@ -42,16 +48,15 @@ log = get_logger(__name__)
 
 _MAX_OUTPUT = 8000
 _DOCKER_MARKER = Path("/.dockerenv")
-# The trigger this app drives, as `<type>/<name>`. Not configurable because the
-# other half of the pair is docker-compose.yml's WUD_TRIGGER_DOCKER_LOCAL_*,
-# in this same repo: the two are edited together or not at all.
-_WUD_TRIGGER = "docker/local"
-# Step one asks WUD to poll the registry, so it has to allow for a round trip
-# to GHCR (auth handshake, then a manifest fetch) on a slow home connection.
-_WATCH_TIMEOUT = httpx.Timeout(20.0, connect=2.0)
-# Step two connects generously enough to tell "wud isn't running" apart from a
-# busy host, then gives up on *reading* fast: see _trigger_wud.
-_TRIGGER_TIMEOUT = httpx.Timeout(3.0, connect=2.0)
+# The updater service runs the whole pull half of deploy/update-fast.sh before
+# it answers, and on a first run that is the entire image over whatever
+# connection the box has - so the read timeout is minutes, not seconds, and it
+# sits just above that service's own subprocess cap (UPDATER_TIMEOUT_SECONDS,
+# 1800s) so an overrun is reported by the side that knows why. Connecting, by
+# contrast, either happens at once or is not going to: a short connect timeout
+# is what tells "the updater profile isn't running" apart from "this is taking
+# a while", and only the first of those should fall back to the host message.
+_UPDATE_TIMEOUT = httpx.Timeout(1830.0, connect=2.0)
 _CONTAINER_MESSAGE = (
     "Running in a Docker deployment - self-update from the web UI isn't "
     "available here (there's no systemd unit inside the container to "
@@ -60,56 +65,44 @@ _CONTAINER_MESSAGE = (
     "host instead: deploy/update.sh - or enable automatic updates with "
     "`sudo systemctl enable --now loreline-update.timer`."
 )
-_TRIGGERED_MESSAGE = (
-    "Update triggered. WUD is pulling the newer image and recreating the app "
-    "container, which takes a few minutes and ends any recording. No result to "
-    "report from here - the container answering you is the one being replaced."
+_APPLYING_MESSAGE = (
+    "A newer image was pulled. The app container is being recreated onto it now, "
+    "which takes a moment and ends any recording - this page loses its connection "
+    "until the app comes back."
 )
 _UP_TO_DATE_MESSAGE = (
-    "Already up to date. WUD re-checked the registry just now and the running "
-    "image is the newest one published, so there was nothing to apply."
+    "Already up to date. The registry was checked just now and the running image is "
+    "the newest one published, so nothing was applied and nothing was restarted."
 )
 _REJECTED_MESSAGE = (
-    "WUD rejected the update trigger as unauthorized. This app's "
-    "LORELINE_WUD_USER and LORELINE_WUD_PASSWORD have to be the username and "
-    "the plaintext password behind WUD's WUD_AUTH_BASIC_LORELINE_USER and "
-    "WUD_AUTH_BASIC_LORELINE_HASH; deploy/install.sh writes a matching set. "
-    "Update from the host meanwhile: deploy/update.sh"
+    "The updater service rejected this app's token. LORELINE_UPDATER_TOKEN here and "
+    "UPDATER_TOKEN there are both filled from the one UPDATER_TOKEN entry in .env, "
+    "which deploy/install.sh generates - check they still agree, and that the app "
+    "was recreated after .env last changed. Update from the host meanwhile: "
+    "deploy/update.sh"
 )
-_TRIGGER_LOST_MESSAGE = (
-    "WUD answered the update check but stopped answering before the update "
-    "itself was asked for, so nothing has been applied. Try again, or update "
-    "from the host: deploy/update.sh"
+_BUSY_MESSAGE = (
+    "An update is already running. Wait for that one to finish rather than starting a second one."
 )
-_NOT_WATCHED_MESSAGE = (
-    "WUD is running but isn't watching this app's container, so there is "
-    "nothing for it to update. Check that the app service still carries the "
-    "`wud.watch=true` label from docker-compose.yml, and that LORELINE_WUD_IMAGE "
-    "names its image. Update from the host meanwhile: deploy/update.sh"
+_FAILED_MESSAGE = (
+    "The updater service reported a failed update without saying why. "
+    "`docker compose logs updater` has the detail; update from the host meanwhile: "
+    "deploy/update.sh"
 )
 
 
-class _WudImage(BaseModel):
-    """The one field of WUD's image object this app matches on."""
+class _UpdaterReply(BaseModel):
+    """What the updater service answers with; see services/updater/updater.py.
 
-    name: str = ""
-
-
-class _WudContainer(BaseModel):
-    """The few fields this app reads out of an entry in WUD's watch list.
-
-    WUD sends a great deal more per container - registry credentials, digests,
-    labels, its own update-kind breakdown. Naming only what is read here keeps
-    that shape free to grow without breaking this, and every field has a
-    default so a trimmed or unexpected entry parses instead of raising.
+    Every field has a default so a trimmed or unexpected body still parses: a
+    reply this app cannot read is reported as an unexpected answer, and a reply
+    missing a field it did not send is not the same thing.
     """
 
-    id: str = ""
-    image: _WudImage = Field(default_factory=_WudImage)
-    update_available: bool = Field(default=False, alias="updateAvailable")
-
-
-_WUD_CONTAINERS = TypeAdapter(list[_WudContainer])
+    ok: bool = False
+    changed: bool = False
+    returncode: int = 0
+    output: str = ""
 
 
 class UpdateResult(BaseModel):
@@ -132,10 +125,8 @@ class Updater:
         unit: str = "loreline",
         runner: CommandRunner | None = None,
         in_container: bool | None = None,
-        wud_url: str = "",
-        wud_user: str = "",
-        wud_password: str = "",
-        wud_image: str = "",
+        updater_url: str = "",
+        updater_token: str = "",
         client: httpx.AsyncClient | None = None,
     ) -> None:
         self._app_dir = app_dir
@@ -143,10 +134,8 @@ class Updater:
         self._run: CommandRunner = runner or run_command
         self._script = app_dir / "deploy" / "update-source.sh"
         self._in_container = in_container if in_container is not None else _DOCKER_MARKER.exists()
-        self._wud_url = wud_url.rstrip("/")
-        self._wud_user = wud_user
-        self._wud_password = wud_password
-        self._wud_image = wud_image
+        self._updater_url = updater_url.rstrip("/")
+        self._updater_token = updater_token
         self._client = client
 
     async def current_revision(self) -> str | None:
@@ -159,157 +148,117 @@ class Updater:
         revision = await self.current_revision()
         return UpdateResult(ok=ok, previous_commit=revision, new_commit=revision, output=message)
 
-    def _find_own_container(self, containers: list[_WudContainer]) -> _WudContainer | None:
-        """Pick this app's own container out of WUD's watch list.
-
-        Matched on the image name rather than the id, because WUD's container
-        id *is* the Docker container id: it changes every time the container is
-        recreated, which is precisely what an update does. The name would work
-        too, but it carries the compose project name, so it breaks for anyone
-        who renamed the directory. The image is pinned in docker-compose.yml.
-        """
-        for container in containers:
-            if container.id and container.image.name == self._wud_image:
-                return container
-        return None
-
-    async def _wud_watch(
-        self, client: httpx.AsyncClient, auth: httpx.Auth
-    ) -> list[_WudContainer] | UpdateResult | None:
-        """Make WUD re-check the registry now, and return what it reports.
-
-        One call does both: it runs every watcher and answers with the
-        resulting container list. ``None`` means nothing answered, so the
-        caller falls back to the host-side message; an ``UpdateResult`` means
-        WUD answered something only worth reporting verbatim.
-        """
-        try:
-            response = await client.post(
-                f"{self._wud_url}/api/containers/watch", auth=auth, timeout=_WATCH_TIMEOUT
-            )
-        except httpx.HTTPError as exc:
-            # Connect errors land here: nothing is listening, so the wud profile
-            # is not running (or not reachable), and this deployment is in
-            # exactly the position it was in before any of this existed. A slow
-            # registry lands here too, as a ReadTimeout - same answer, because
-            # nothing has been applied either way.
-            log.info("update.wud.unreachable", error=str(exc))
-            return None
-        if response.status_code == HTTPStatus.UNAUTHORIZED:
-            log.warning("update.wud.unauthorized")
-            return await self._message_result(_REJECTED_MESSAGE)
-        if not response.is_success:
-            log.warning("update.wud.watch_failed", status=response.status_code)
-            return await self._message_result(self._unexpected(response.status_code))
-        try:
-            # ValueError covers both halves: a body that isn't JSON, and JSON
-            # that isn't the list of containers this expects (pydantic's
-            # ValidationError is a ValueError).
-            return _WUD_CONTAINERS.validate_python(response.json())
-        except ValueError:
-            log.warning("update.wud.unreadable_watch_response")
-            return await self._message_result(self._unexpected(response.status_code))
-
-    async def _wud_fire(
-        self, client: httpx.AsyncClient, auth: httpx.Auth, container: _WudContainer
-    ) -> UpdateResult:
-        """Apply the update WUD just reported, without waiting to be killed.
-
-        This recreates *this* container, so waiting for the response means
-        waiting to be killed and the browser gets nothing. Hence the short read
-        timeout: a ``ReadTimeout`` here is the ordinary success path, not a
-        failure. It proves the request was delivered, which is all this app can
-        honestly know. Dropping the connection cancels nothing either - WUD
-        runs the trigger to completion without consulting the request.
-        """
-        # WUD looks the container up in its own store from this id, so the
-        # request carries no body: nothing here has to reserialize a container
-        # faithfully enough for its trigger to accept, and nothing here can name
-        # an image or a tag, so this cannot ask for anything but this update.
-        url = f"{self._wud_url}/api/containers/{container.id}/triggers/{_WUD_TRIGGER}"
-        try:
-            response = await client.post(url, auth=auth, timeout=_TRIGGER_TIMEOUT)
-        except httpx.ReadTimeout:
-            log.info("update.wud.triggered", detail="no answer within the read window")
-            return await self._message_result(_TRIGGERED_MESSAGE, ok=True)
-        except httpx.HTTPError as exc:
-            log.warning("update.wud.trigger_unreachable", error=str(exc))
-            return await self._message_result(_TRIGGER_LOST_MESSAGE)
-        if response.is_success:
-            # A prompt 200 means the pull and recreate finished inside the read
-            # window, which would be unusually fast but is not an error. Same
-            # wording either way - this container is on its way out regardless.
-            log.info("update.wud.triggered", status=response.status_code)
-            return await self._message_result(_TRIGGERED_MESSAGE, ok=True)
-        if response.status_code == HTTPStatus.UNAUTHORIZED:
-            log.warning("update.wud.unauthorized")
-            return await self._message_result(_REJECTED_MESSAGE)
-        log.warning("update.wud.trigger_failed", status=response.status_code)
-        return await self._message_result(self._unexpected(response.status_code))
-
-    async def _trigger_wud(self) -> UpdateResult | None:
-        """Ask the sibling WUD container to update this stack.
+    async def _trigger_updater(self) -> UpdateResult | None:
+        """Ask the sibling updater container to update this stack.
 
         ``None`` means there is no trigger to use - unconfigured, or nothing
         answered - and the caller falls back to the host-side message.
 
-        Two steps, and the first one is not optional. WUD splits detection from
-        application: its watcher cron decides whether an update *is available*,
-        and the trigger applies whatever that decided. Firing the trigger alone
-        would act on however stale that verdict is, and worse, the docker
-        trigger builds the tag to pull out of ``updateKind.remoteValue``, which
-        is ``undefined`` while no update is known - so triggering a container
-        WUD believes is current doesn't no-op, it tries to pull a tag named
-        "undefined" and fails. So: ask for a fresh watch, read the verdict, and
-        only then apply.
-
-        The second step is the one that cannot be waited on; see ``_wud_fire``.
+        One request, and it can be waited on, which is the whole difference from
+        what came before. The updater service runs the pull half of
+        ``deploy/update-fast.sh``, answers with what that found, and only then
+        recreates this container. So the answer is a fact rather than a guess
+        read off a timeout: either a newer image was pulled and the recreate is
+        under way, or this box was already current and nothing was touched.
         """
-        if not (self._wud_url and self._wud_user and self._wud_password):
+        if not (self._updater_url and self._updater_token):
             return None
-        # Per-request rather than on the client, so an injected client (tests)
-        # authenticates the same way the real one does.
-        auth = httpx.BasicAuth(self._wud_user, self._wud_password)
         client = self._client or httpx.AsyncClient()
         try:
-            watched = await self._wud_watch(client, auth)
-            if not isinstance(watched, list):
-                # Either nobody answered (None, and the caller falls back to the
-                # host-side message) or WUD said something worth reporting as is.
-                return watched
-            container = self._find_own_container(watched)
-            if container is None:
-                log.warning("update.wud.not_watched", image=self._wud_image)
-                return await self._message_result(_NOT_WATCHED_MESSAGE)
-            if not container.update_available:
-                # Worth saying plainly rather than firing a trigger that would
-                # have nothing to do: this is the common case.
-                log.info("update.wud.up_to_date")
-                return await self._message_result(_UP_TO_DATE_MESSAGE, ok=True)
-            return await self._wud_fire(client, auth, container)
+            return await self._ask_updater(client)
         finally:
             if self._client is None:
                 await client.aclose()
 
+    async def _ask_updater(self, client: httpx.AsyncClient) -> UpdateResult | None:
+        """Post the update request, or report that nothing answered."""
+        try:
+            response = await client.post(
+                f"{self._updater_url}/update",
+                # Bearer rather than Basic: no third-party auth scheme
+                # constrains the choice any more, and a bearer token is what the
+                # rest of this project carries. The far side compares it with
+                # hmac.compare_digest. The request has no body on purpose -
+                # there is nothing to name, so there is nothing to abuse.
+                headers={"Authorization": f"Bearer {self._updater_token}"},
+                timeout=_UPDATE_TIMEOUT,
+            )
+        except httpx.HTTPError as exc:
+            # Connect errors land here: nothing is listening, so the updater
+            # profile is not running (or not reachable), and this deployment is
+            # in exactly the position it was in before any of this existed. A
+            # run that outlasts the read timeout lands here too, and the same
+            # fallback is the honest answer - this app genuinely does not know
+            # how it ended, and the updater's own log does.
+            log.info("update.updater.unreachable", error=str(exc))
+            return None
+        return await self._read_update(response)
+
+    async def _read_update(self, response: httpx.Response) -> UpdateResult:
+        """Say what the updater service said, in this UI's own words."""
+        if response.status_code == HTTPStatus.UNAUTHORIZED:
+            log.warning("update.updater.unauthorized")
+            return await self._message_result(_REJECTED_MESSAGE)
+        if response.status_code == HTTPStatus.CONFLICT:
+            log.info("update.updater.busy")
+            return await self._message_result(_BUSY_MESSAGE)
+        try:
+            # ValueError covers both halves: a body that isn't JSON, and JSON
+            # that isn't the shape this expects (pydantic's ValidationError is a
+            # ValueError).
+            reply = _UpdaterReply.model_validate(response.json())
+        except ValueError:
+            log.warning("update.updater.unreadable_response", status=response.status_code)
+            return await self._message_result(self._unexpected(response.status_code))
+        if not response.is_success:
+            # 503 (no token configured over there, or the checkout is not
+            # mounted where it expects) and 404 both arrive here carrying a
+            # one-line explanation from the side that knows which it is. Repeat
+            # that rather than translate it into something vaguer.
+            log.warning("update.updater.refused", status=response.status_code)
+            return await self._message_result(
+                reply.output or self._unexpected(response.status_code)
+            )
+        if not reply.ok:
+            # The update script failed, and its transcript is by far the most
+            # useful thing to hand back, so it goes back whole. Several lines is
+            # also the signal Settings > Client uses to show the output pane
+            # rather than a one-line message. deploy/update-fast.sh writes a
+            # specific explanation for the GHCR-visibility case that would be a
+            # waste to replace with a generic one here.
+            log.warning("update.updater.failed", returncode=reply.returncode)
+            revision = await self.current_revision()
+            return UpdateResult(
+                ok=False,
+                previous_commit=revision,
+                new_commit=revision,
+                returncode=reply.returncode,
+                output=reply.output[-_MAX_OUTPUT:] or _FAILED_MESSAGE,
+            )
+        log.info("update.updater.done", changed=reply.changed)
+        return await self._message_result(
+            _APPLYING_MESSAGE if reply.changed else _UP_TO_DATE_MESSAGE, ok=True
+        )
+
     @staticmethod
     def _unexpected(status: int) -> str:
-        """One-line report for a WUD answer this app can't read as a result."""
+        """One-line report for an answer this app can't read as a result."""
         return (
-            f"WUD answered the update trigger with HTTP {status}, which this app can't read "
-            "as a result. `docker compose logs wud` has the detail; update from the host "
-            "meanwhile: deploy/update.sh"
+            f"The updater service answered with HTTP {status}, which this app can't read "
+            "as a result. `docker compose logs updater` has the detail; update from the "
+            "host meanwhile: deploy/update.sh"
         )
 
     async def update(self) -> UpdateResult:
         """Update this deployment, by whichever route it has.
 
         A source deployment runs ``deploy/update-source.sh`` and reports the
-        before/after commits. A Docker one has no such route of its own and
-        asks WUD instead, falling back to the host-side message when that
-        isn't configured or isn't there.
+        before/after commits. A Docker one has no such route of its own and asks
+        the updater service instead, falling back to the host-side message when
+        that isn't configured or isn't there.
         """
         if self._in_container:
-            triggered = await self._trigger_wud()
+            triggered = await self._trigger_updater()
             if triggered is not None:
                 return triggered
             return await self._message_result(_CONTAINER_MESSAGE)
@@ -331,9 +280,11 @@ class Updater:
     async def rollback(self, commit: str) -> UpdateResult:
         """Reset to ``commit``, re-sync dependencies, and restart the service."""
         if self._in_container:
-            # No WUD equivalent here on purpose: its docker trigger only ever
-            # moves an image forward to whatever its watcher detected, and with
-            # PRUNE on, the image being rolled back *to* is already gone.
+            # No updater-service equivalent here on purpose. That service runs
+            # deploy/update-fast.sh, which only ever moves forward to whatever
+            # the registry currently publishes; rolling back means naming an
+            # older image, and naming anything at all is exactly what that
+            # endpoint refuses to accept.
             return await self._message_result(_CONTAINER_MESSAGE)
         before = await self.current_revision()
         chunks: list[str] = []
