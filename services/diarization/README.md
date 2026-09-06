@@ -6,8 +6,10 @@ capture device). Exposes the HTTP contract consumed by Loreline's
 
 ## Endpoints
 
-- `GET /healthz` -> `{"status": "ok"}`
-- `POST /diarize` (multipart `file` = mono WAV) -> `{"segments": [{start, end, speaker}, ...]}`
+- `GET /healthz` -> `{"status": "ok"}`, or HTTP 503 with `{"detail": ...}` until
+  both models below are configured and have loaded successfully
+- `POST /diarize` (multipart `file` = mono WAV) -> `{"segments": [{start, end, speaker}, ...]}`,
+  or the same HTTP 503 shape while the models are not ready
 
 Speaker labels are consecutive (`Speaker 0..k-1`) regardless of raw cluster ids. If
 `min_speakers` and `max_speakers` are both sent and equal, that exact cluster count
@@ -40,5 +42,8 @@ docker run --rm -p 8001:8001 \
   -v /path/to/models:/models loreline-diarization
 ```
 
-If the models are not configured, `/diarize` returns HTTP 503. Use
+If the models are not configured, or fail to load, both `/healthz` and `/diarize`
+return HTTP 503: the first successful call loads them and the result is cached
+for the life of the process, so a misconfigured deployment shows unhealthy
+before a diarize job ever runs, not only once one fails. Use
 `mocks/diarization.py` for offline development/tests.

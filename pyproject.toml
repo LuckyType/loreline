@@ -112,7 +112,7 @@ packages = ["src/loreline"]
 [tool.ruff]
 target-version = "py312"
 line-length = 100
-src = ["src", "tests", "mocks"]
+src = ["src", "tests", "mocks", "services"]
 
 [tool.ruff.lint]
 select = [
@@ -137,7 +137,7 @@ ignore = [
 "tests/**" = ["PLR2004", "S101"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["loreline", "mocks"]
+known-first-party = ["loreline", "mocks", "services"]
 
 # ----------------------------------------------------------------------------
 # Pyright - strict type checking
