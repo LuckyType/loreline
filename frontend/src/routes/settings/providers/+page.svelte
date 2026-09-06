@@ -306,6 +306,24 @@ $effect(() => {
 	}
 })
 
+// A default's model half means nothing once its provider half points at a
+// different vendor - an OpenAI model id could not resolve on Gemini. The live
+// pickers never carry a stale cross-vendor model forward either, because
+// their model is a derived over the current provider rather than state of its
+// own (see preferredModel in capabilities.svelte.ts). These three reuse the
+// same rule through preferredModelFor, so a provider switch here lands on
+// exactly what a live picker would: this row's own saved model if the switch
+// lands back on it, else the new provider's first favourite, else blank.
+$effect(() => {
+	draft.stt_model = actionSetup.preferredModelFor('transcribe', sttSrcProvider)
+})
+$effect(() => {
+	draft.summarize_model = actionSetup.preferredModelFor('summarize', llmSrcProvider)
+})
+$effect(() => {
+	draft.video_model = actionSetup.preferredModelFor('video', videoSrcProvider)
+})
+
 // Hidden models are held back from every picker, favourites included: the
 // flag is the release gate for a connector nobody has verified yet.
 const offeredModels = $derived(availableModels.filter((m) => !isHiddenModel(form.kind, m.id)))
