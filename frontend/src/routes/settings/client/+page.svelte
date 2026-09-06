@@ -7,6 +7,7 @@ import { Label } from '$lib/components/ui/label'
 import { Separator } from '$lib/components/ui/separator'
 import { Switch } from '$lib/components/ui/switch'
 import Dropdown from '$lib/Dropdown.svelte'
+import LevelMeter from '$lib/LevelMeter.svelte'
 import type { InputDevice, UpdateResult } from '$lib/wire'
 
 let devices = $state<InputDevice[]>([])
@@ -28,8 +29,6 @@ let autostartBusy = $state(false)
 // itself settles back to the value it started at.
 let autostartGeneration = $state(0)
 let opsMessage = $state('')
-
-const meterColor = $derived(peak > 0.9 ? '#ef4444' : peak > 0.6 ? '#f59e0b' : '#22c55e')
 
 // A previously-picked device (e.g. a Bluetooth mic) can disappear from the
 // device list without the stored selection changing - flagged here instead
@@ -203,12 +202,7 @@ onDestroy(stopMeter)
 			<span class="text-sm text-muted-foreground">Input level</span>
 			<div class="flex items-center gap-2">
 				<Button variant="outline" onclick={toggleMeter}>{metering ? 'Stop' : 'Test'}</Button>
-				<div class="h-2.5 flex-1 overflow-hidden rounded-full bg-foreground/15">
-					<div
-						class="h-full rounded-full transition-[width] duration-75"
-						style="width: {Math.min(100, Math.round(peak * 100))}%; background: {meterColor};"
-					></div>
-				</div>
+				<LevelMeter {peak} class="flex-1" />
 			</div>
 		</div>
 	</CardContent>
