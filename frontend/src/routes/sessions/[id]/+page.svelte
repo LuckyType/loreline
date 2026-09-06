@@ -3,10 +3,11 @@
  * One session: its transcript versions, the transcript itself, its summary.
  *
  * The page owns only what more than one card reads - the session, its job
- * rows, and which version is selected - plus the two things that follow the
- * whole page rather than any one card: the poll that runs while a job is in
- * flight, and the socket a running job publishes to. Each card below owns its
- * own controls, its own dialog and its own teardown.
+ * rows, which version is selected, and the audio player one card renders and
+ * another seeks - plus the two things that follow the whole page rather than
+ * any one card: the poll that runs while a job is in flight, and the socket a
+ * running job publishes to. Each card below owns its own controls, its own
+ * dialog and its own teardown.
  */
 
 import { onMount } from 'svelte'
@@ -27,6 +28,23 @@ let jobs = $state<ReprocessJob[]>([])
 let error = $state('')
 
 const id = $derived(page.params.id ?? '')
+
+// The header's player, borrowed so a transcript timestamp can drive it. It
+// stays null when the header decided there was nothing worth playing (no
+// recording, or an empty one), and that is what keeps the transcript from
+// offering to seek a player that is not there: one emptiness check, made
+// once, in the card that owns the element.
+let audioEl = $state<HTMLAudioElement | null>(null)
+
+/** Play from a segment's start. `start_ts` is already on the session clock,
+ *  which is the WAV's own timeline, so it needs no conversion. */
+function seekAudio(seconds: number) {
+	if (!audioEl) return
+	audioEl.currentTime = seconds
+	// Started by a click, so autoplay policy allows it; a browser that still
+	// declines leaves the player parked at the new position, which is fine.
+	audioEl.play().catch(() => {})
+}
 
 /** Every card reports what went wrong here: one banner, at the top. */
 function setError(message: string) {
@@ -196,6 +214,7 @@ onMount(async () => {
 			sessionId={id}
 			session={detail.session}
 			audioDurationS={detail.audio_duration_s}
+			bind:audioEl
 		/>
 
 		<div class="border-t"></div>
@@ -225,6 +244,7 @@ onMount(async () => {
 			onqueued={refreshJobs}
 			onrenamed={reloadDetail}
 			onerror={setError}
+			onseek={audioEl ? seekAudio : undefined}
 		/>
 
 		<div class="border-t"></div>

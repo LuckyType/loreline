@@ -8,6 +8,11 @@
  * only exists when there is a recording to hand over - and says so plainly
  * when that "recording" is a bare WAV header with nothing in it (a session
  * that errored before capturing any audio still writes one).
+ *
+ * The player next to it plays that same recording without downloading it, and
+ * reads the same emptiness off the same duration: an empty WAV gets the note
+ * the menu entry gets rather than controls that would play nothing. The page
+ * borrows the element so a transcript timestamp can seek it.
  */
 
 import { ChevronDown } from '@lucide/svelte'
@@ -23,7 +28,16 @@ let {
 	sessionId,
 	session,
 	audioDurationS,
-}: { sessionId: string; session: Session; audioDurationS: number | null } = $props()
+	audioEl = $bindable(null),
+}: {
+	sessionId: string
+	session: Session
+	audioDurationS: number | null
+	/** The player, for the page to seek from the transcript. Null whenever
+	 *  there is nothing to play, which is what tells the page not to offer
+	 *  seeking at all. */
+	audioEl?: HTMLAudioElement | null
+} = $props()
 
 const formats: ExportFormat[] = ['txt', 'md', 'srt', 'vtt', 'json']
 const formatLabels: Record<ExportFormat, string> = {
@@ -39,6 +53,7 @@ const hasAudio = $derived(!!session.audio_path)
 // ~44-byte header decodes to exactly 0 s. The small margin above zero is
 // only for rounding - any real utterance clears it easily.
 const EMPTY_AUDIO_MAX_S = 0.05
+const EMPTY_AUDIO_NOTE = 'This session has no captured audio - the recording is empty.'
 const audioEmpty = $derived(audioDurationS != null && audioDurationS <= EMPTY_AUDIO_MAX_S)
 
 let exportOpen = $state(false)
@@ -92,9 +107,7 @@ const durationText = $derived.by(() => {
 								? 'cursor-not-allowed text-muted-foreground'
 								: 'hover:bg-accent'}"
 							disabled={audioEmpty}
-							title={audioEmpty
-								? 'This session has no captured audio - the recording is empty.'
-								: undefined}
+							title={audioEmpty ? EMPTY_AUDIO_NOTE : undefined}
 							onclick={() => {
 								exportOpen = false
 								window.location.href = api.audioUrl(sessionId)
@@ -106,6 +119,21 @@ const durationText = $derived.by(() => {
 				</div>
 			{/if}
 		</div>
+		{#if hasAudio}
+			{#if audioEmpty}
+				<span class="text-muted-foreground" title={EMPTY_AUDIO_NOTE}>Audio (empty)</span>
+			{:else}
+				<!-- preload="metadata" keeps a long session's WAV off the wire until it
+				     is played or a timestamp seeks it. -->
+				<audio
+					bind:this={audioEl}
+					class="h-8 w-64 max-w-full shrink-0"
+					controls
+					preload="metadata"
+					src={api.audioUrl(sessionId)}
+				></audio>
+			{/if}
+		{/if}
 	</div>
 	<a class="text-primary text-sm hover:underline" href="/sessions">← Back</a>
 </CardContent>
