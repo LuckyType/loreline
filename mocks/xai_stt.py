@@ -35,8 +35,11 @@ from collections.abc import Sequence
 from fastapi import FastAPI, Request, UploadFile
 from fastapi.responses import JSONResponse
 
-# Field name out of one multipart part's Content-Disposition header.
-_FIELD_NAME = re.compile(rb'name="([^"]+)"')
+# Field name out of one multipart part's Content-Disposition header. The
+# lookbehind is load bearing: the audio part reads
+# `name="file"; filename="utterance.wav"`, and without it the filename counts
+# as a second field and is always the last one found.
+_FIELD_NAME = re.compile(rb'(?<!file)name="([^"]+)"')
 
 
 def _wav_seconds(data: bytes) -> float:
