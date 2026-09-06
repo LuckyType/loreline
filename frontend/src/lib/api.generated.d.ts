@@ -88,7 +88,7 @@ export interface paths {
         put?: never;
         /**
          * Trigger Update
-         * @description Run the self-update: git pull + uv sync + restart, or a watchtower trigger.
+         * @description Run the self-update: git pull + uv sync + restart, or a WUD trigger in Docker.
          */
         post: operations["trigger_update_api_system_update_post"];
         delete?: never;

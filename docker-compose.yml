@@ -15,12 +15,12 @@
 # (`COMPOSE_PROFILES=local-stt,diarization` in .env works too, for a
 # permanent default without typing the flag every time.)
 #
-# There is a third profile, `watchtower`, and it is opt-in for a different
-# reason than those two: not a download, but host access. It hands a container
-# the Docker socket so it can replace this stack's `app` container with a newer
-# published image on its own. Read the README section "Updating" before
-# enabling it - it is an alternative to deploy/update.sh, not an upgrade over
-# it, and it is off unless you ask for it by name.
+# There is a third profile, `wud`, and it is opt-in for a different reason
+# than those two: not a download, but host access. It hands a container the
+# Docker socket so it can replace this stack's `app` container with a newer
+# published image. Read the README section "Updating" before enabling it - it
+# is an alternative to deploy/update.sh, not an upgrade over it, and it is off
+# unless you ask for it by name.
 
 services:
   app:
@@ -32,20 +32,21 @@ services:
     # from this checkout and simply tags the result with this name. What the
     # `image:` line adds is that `docker compose pull` now has something to
     # fetch instead of printing "Skipped - No image to be pulled", which is
-    # what the optional watchtower service below needs to exist at all.
+    # what the optional wud service below needs to exist at all.
     #
     # The image does not exist until that workflow has actually run on GitHub,
     # and a GHCR package is private on first publish - so until it is switched
     # to public, pulling it needs `docker login ghcr.io` first.
     image: ghcr.io/luckytype/loreline:latest
     labels:
-      # Read by the optional watchtower service below (it runs with
-      # --label-enable, so an unlabelled container is ignored entirely). This
-      # is the only container in this file that carries it, deliberately:
-      # Caddy, the docker proxy, the STT server and the diarizer are other
-      # people's images, and auto-replacing those on a box that holds session
-      # audio is a different risk that nobody here reviewed.
-      com.centurylinklabs.watchtower.enable: "true"
+      # Read by the optional wud service below (it runs with
+      # WATCHBYDEFAULT=false, so an unlabelled container is ignored entirely -
+      # that is WUD's only container-scoping mechanism, there is no name or
+      # regex filter on the watcher). This is the only container in this file
+      # that carries it, deliberately: Caddy, the docker proxy, the STT server
+      # and the diarizer are other people's images, and replacing those on a
+      # box that holds session audio is a different risk nobody here reviewed.
+      wud.watch: "true"
     ports:
       - "${LORELINE_PORT:-8000}:8000"
     # deploy/install.sh writes .env (login password, port). Optional so a bare
@@ -59,16 +60,18 @@ services:
       LORELINE_LOG_JSON: "true"
       # Unset this to turn Settings > Services off entirely.
       LORELINE_DOCKER_API: http://docker-proxy:2375
-      # Lets the web UI's "Update now" button trigger the optional watchtower
-      # service below, over the compose network. Note what this is not: the app
-      # still has no Docker socket and no path to one. It sends a single
-      # token-gated HTTP request to a container that already holds that access
-      # for its own reason, and learns nothing back beyond "delivered" - the
-      # boundary described at the bottom of this file is unmoved. Same secret as
-      # WATCHTOWER_HTTP_API_TOKEN down there, read from one .env entry so the
-      # two halves can't drift apart. Empty (the default) leaves the button
-      # reporting that updates run from the host, exactly as before.
-      LORELINE_WATCHTOWER_TOKEN: ${WATCHTOWER_HTTP_API_TOKEN:-}
+      # Lets the web UI's "Update now" button drive the optional wud service
+      # below, over the compose network. Note what this is not: the app still
+      # has no Docker socket and no path to one. It sends two authenticated
+      # HTTP requests to a container that already holds that access for its own
+      # reason, and learns nothing back beyond whether an update exists - the
+      # boundary described at the bottom of this file is unmoved. The username
+      # is the same .env entry WUD reads below, so the two halves can't drift
+      # apart; the password is the plaintext whose hash WUD holds, because
+      # HTTP Basic has the client send the password itself. Empty (the default)
+      # leaves the button reporting that updates run from the host, as before.
+      LORELINE_WUD_USER: ${WUD_AUTH_USER:-}
+      LORELINE_WUD_PASSWORD: ${WUD_AUTH_PASSWORD:-}
       # Peers whose X-Forwarded-Proto this app believes when it decides whether
       # to mark the login cookie Secure. This is the private range Compose puts
       # its own network in, so it covers the caddy service below - and, what
@@ -172,109 +175,92 @@ services:
       - ./models:/models:ro
     restart: unless-stopped
 
-  # Opt-in automatic updates from the registry, for people who want the box to
-  # update itself without a shell on it and without a git checkout:
+  # Opt-in registry updates, for people who want the box to update itself
+  # without a shell on it and without a git checkout:
   #
-  #   docker compose --profile watchtower up -d
+  #   docker compose --profile wud up -d
   #
-  # It polls GHCR for a newer `app` image and, when it finds one, stops the
-  # container, pulls, and recreates it with the same config. That is a
+  # WUD ("What's Up Docker") polls GHCR for a newer `app` image and can stop
+  # the container, pull, and recreate it with the same config. That is a
   # different mechanism from deploy/update.sh (git pull + rebuild on a systemd
   # timer), not a better one - see the README section "Updating" for the choice
   # between them. Running both is the one combination to avoid: update.sh
-  # rebuilds the image locally and watchtower replaces it with the registry
-  # one, so each undoes the other on its own schedule and the container is
-  # recreated more often than either alone.
+  # rebuilds the image locally and WUD replaces it with the registry one, so
+  # each undoes the other on its own schedule and the container is recreated
+  # more often than either alone.
+  #
+  # Note what this profile does by default, because it changed: detection runs
+  # on the cron below, but *applying* an update waits for the web UI's Update
+  # button (WUD_TRIGGER_DOCKER_LOCAL_AUTO below is false). Set WUD_AUTO_UPDATE
+  # in .env to restore unattended updates at that cron time.
   #
   # What you are agreeing to by starting it: this container gets the raw Docker
   # socket, which is root-equivalent on the host. It cannot go behind
   # deploy/docker-proxy.Caddyfile the way the app does, because that proxy
   # exists specifically to refuse POST /containers/create, and creating
-  # containers is the entire job here. The `:ro` below is honest about intent
-  # and nothing more: a read-only bind mount of a *unix socket* does not make
-  # the socket read-only (the kernel's read-only check covers regular files,
-  # directories and symlinks, not socket I/O), so watchtower still stops,
-  # removes and creates containers through it. What actually limits the blast
-  # radius is the label filter, not the mount flag.
+  # containers is the entire job here. The mount below is deliberately not
+  # `:ro`: a read-only bind mount of a *unix socket* does not make the socket
+  # read-only anyway (the kernel's read-only check covers regular files,
+  # directories and symlinks, not socket I/O), so the flag would only imply a
+  # limit that isn't there, and WUD's own compose examples don't use it. What
+  # actually limits the blast radius is the label filter, not a mount flag.
   #
-  # Upstream containrrr/watchtower was archived in December 2025 and its last
-  # release, pinned below, is from November 2023. It works, and it is small and
-  # frozen, but nothing is coming to fix it either. `nickfedor/watchtower` is an
-  # active fork using the same env vars and the same label, and swapping the
-  # image line is all it takes - this file does not point at it because nobody
-  # here has audited it, and the containrrr maintainers declined to vouch for
-  # any fork.
-  watchtower:
-    image: containrrr/watchtower:1.7.1
-    profiles: ["watchtower"]
+  # Why this and not watchtower, which used to be here: containrrr/watchtower
+  # was archived in December 2025, and its last release, 1.7.1 from November
+  # 2023, does not work on a current Docker Engine at all - its bundled client
+  # negotiates an API version below the 1.44 floor that Engine 29 enforces, so
+  # every call is refused. The maintained fork does not disclose being a fork,
+  # which is not a thing to hand the Docker socket. WUD is its own project
+  # (MIT, active, ~3.8k stars) and talks to Docker through dockerode, which
+  # tracks current API versions.
+  wud:
+    image: getwud/wud:8.4.0
+    profiles: ["wud"]
     environment:
-      # Only containers carrying com.centurylinklabs.watchtower.enable=true are
-      # even looked at, which in this file is `app` and nothing else. Note the
-      # scope is the whole Docker host rather than this compose project: any
-      # other container on the box carrying that same label is fair game too.
-      # (Upstream's --scope flag exists if that ever becomes a problem.)
-      WATCHTOWER_LABEL_ENABLE: "true"
+      # Container scoping, and the only mechanism WUD has for it: its watcher
+      # takes no name filter and no include/exclude regex, just this default
+      # plus the `wud.watch` label, which in this file only `app` carries. As
+      # with watchtower before it, the scope is the whole Docker host rather
+      # than this compose project: another container on the box carrying that
+      # same label is fair game too.
+      WUD_WATCHER_LOCAL_WATCHBYDEFAULT: "false"
       # 04:00 daily, in this container's timezone, which is UTC unless TZ is
-      # set below. A 6 field cron expression, seconds first - that is
-      # watchtower's format, not a typo. Deliberately a fixed quiet hour rather
-      # than the default 24 hour interval: the interval counts from whenever
-      # the container last started, so it drifts onto whatever time of day that
-      # was, and an update means the app container is recreated, which ends a
-      # recording that happens to be running. Roughly the same cadence as
-      # deploy/loreline-update.timer when that is enabled (OnCalendar=daily).
-      WATCHTOWER_SCHEDULE: "0 0 4 * * *"
-      # Delete the image that was replaced. This one is not optional in
-      # practice: the image is a couple of GB, and without it every update
-      # leaves the old copy behind until the Pi's card is full.
-      WATCHTOWER_CLEANUP: "true"
-      # Watchtower's own notifications, which have nothing to do with Settings,
-      # Alerts in the web UI - that page does not know this container exists and
-      # this file does not connect the two. Set it in .env to switch them on;
-      # .env.example lists the shoutrrr URL forms.
-      #
-      # Leaving it unset is safe rather than merely tidy: this resolves to an
-      # empty string, and watchtower reads its config through viper, which
-      # treats an empty environment variable as unset, so it starts with no
-      # notifier configured. (That is checked against the 1.7.1 source pinned
-      # above. Note it is only true for the environment variable: passing
-      # --notification-url "" on the command line really would abort at
-      # startup.)
-      WATCHTOWER_NOTIFICATION_URL: ${WATCHTOWER_NOTIFICATION_URL:-}
-      # Only relevant once the above is set: report mode notifies about
-      # containers that were actually updated or actually failed, instead of
-      # forwarding log lines on every poll.
-      WATCHTOWER_NOTIFICATION_REPORT: "true"
+      # set below. Five fields, ordinary cron - WUD's own default is hourly.
+      # A fixed quiet hour because applying an update recreates the app
+      # container, which ends a recording that happens to be running. Roughly
+      # the cadence of deploy/loreline-update.timer when that is enabled.
+      WUD_WATCHER_LOCAL_CRON: "0 4 * * *"
+      # false means "detect, but wait to be asked". WUD keeps watching on the
+      # cron above and keeps its updateAvailable verdict current; it just does
+      # not act on it, so the web UI's Update button is what applies an update
+      # (see the app service's LORELINE_WUD_USER, and the README's "Updating").
+      # Set WUD_AUTO_UPDATE=true in .env for unattended updates at 04:00.
+      WUD_TRIGGER_DOCKER_LOCAL_AUTO: ${WUD_AUTO_UPDATE:-false}
+      # Delete the image that was replaced. Not optional in practice: the image
+      # is a couple of GB, and without this every update leaves the old copy
+      # behind until the Pi's card is full.
+      WUD_TRIGGER_DOCKER_LOCAL_PRUNE: "true"
+      # HTTP Basic credentials for WUD's own API, which is what the app
+      # authenticates with. WUD stores the password only as an htpasswd hash,
+      # so .env carries both that hash and the plaintext the app sends;
+      # deploy/install.sh generates a matching pair. Leave both unset and WUD
+      # allows anonymous access instead, which is survivable only because the
+      # port below is not published. Note WUD does not crash on a bad or empty
+      # hash the way watchtower did on an empty token: it logs, registers no
+      # strategy, and answers 401, and the button reports exactly that.
+      WUD_AUTH_BASIC_LORELINE_USER: ${WUD_AUTH_USER:-}
+      WUD_AUTH_BASIC_LORELINE_HASH: ${WUD_AUTH_HASH:-}
       TZ: ${TZ:-UTC}
-      # HTTP API mode. Adds `POST /v1/update` on :8080, which runs the same
-      # check the schedule above runs, on demand - that is what makes the web
-      # UI's update button work in a Docker deployment (see the app service's
-      # LORELINE_WATCHTOWER_TOKEN, and the README's "Updating"). It is a second
-      # way to reach one mechanism, not a second mechanism.
-      #
-      # Set both of these or neither. 1.7.1 calls log.Fatal and exits the whole
-      # process when an API handler is registered with an empty token, so
-      # turning the first on without the second turns this container into a
-      # crash loop. deploy/install.sh writes both into .env for you.
-      WATCHTOWER_HTTP_API_UPDATE: ${WATCHTOWER_HTTP_API_UPDATE:-false}
-      WATCHTOWER_HTTP_API_TOKEN: ${WATCHTOWER_HTTP_API_TOKEN:-}
-      # Not optional once the API is on, for a reason that is invisible from
-      # the outside: in 1.7.1, `httpAPI.Start(enableUpdateAPI && !periodicPolls)`
-      # runs ListenAndServe on the main goroutine, so the runUpgradesOnSchedule
-      # call below it is never reached and WATCHTOWER_SCHEDULE above silently
-      # becomes dead config. With this set, the API server moves to its own
-      # goroutine, the cron scheduler runs as it always did, and one shared lock
-      # stops the two from updating at the same time. Harmless when the API is
-      # off (nothing registers a handler, so no server starts either way).
-      WATCHTOWER_HTTP_API_PERIODIC_POLLS: "true"
-    # Reachable at http://watchtower:8080 from the other services and from
-    # nowhere else: no `ports:` here, deliberately. `expose` publishes nothing -
+    # Reachable at http://wud:3000 from the other services and from nowhere
+    # else: no `ports:` here, deliberately. `expose` publishes nothing -
     # containers on a compose network can already reach each other's ports - it
-    # only records which port the app is expected to use. A token-gated trigger
-    # that recreates containers has no business answering the LAN.
+    # only records which port the app is expected to use. WUD serves a full web
+    # UI from this same port with no switch to turn it off, on top of an API
+    # that recreates containers, and neither has any business answering the LAN.
     expose:
-      - "8080"
+      - "3000"
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
 
 volumes:

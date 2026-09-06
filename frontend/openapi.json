@@ -109,7 +109,7 @@
           "system"
         ],
         "summary": "Trigger Update",
-        "description": "Run the self-update: git pull + uv sync + restart, or a watchtower trigger.",
+        "description": "Run the self-update: git pull + uv sync + restart, or a WUD trigger in Docker.",
         "operationId": "trigger_update_api_system_update_post",
         "responses": {
           "200": {
