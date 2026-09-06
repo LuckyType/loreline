@@ -475,7 +475,8 @@ onMount(() => {
 						bind:value={primary}
 						defaultValue={actionSetup.defaults.stt_provider}
 						options={sttProviders.map((p) => ({ value: p.id, label: p.name }))}
-						placeholder="Select provider…"
+						placeholder={actionSetup.ready ? 'Select provider…' : 'Loading providers…'}
+						loading={!actionSetup.ready}
 					/>
 				</div>
 				<div class="flex flex-col gap-2">

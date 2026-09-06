@@ -4,9 +4,11 @@ Runs on a LAN x86 host (off the capture device per D1/D2). Wraps sherpa-onnx
 offline speaker diarization behind the HTTP contract expected by Loreline's
 ``RemoteDiarizer``:
 
-- ``GET  /healthz`` -> ``{"status": "ok"}``
+- ``GET  /healthz`` -> ``{"status": "ok"}``, or ``503`` with ``{"detail": ...}``
+  until both models below are configured and have loaded successfully
 - ``POST /diarize`` (multipart ``file`` = mono WAV) ->
-  ``{"segments": [{"start", "end", "speaker"}, ...]}``
+  ``{"segments": [{"start", "end", "speaker"}, ...]}``, or the same ``503``
+  shape while the models are not ready
 
 Models are configured via environment variables (see README). The sherpa-onnx
 import is deferred so the module imports cleanly where the native wheel is
@@ -17,6 +19,7 @@ from __future__ import annotations
 
 import io
 import os
+import threading
 import wave
 
 from fastapi import FastAPI, Form, HTTPException, UploadFile
@@ -72,9 +75,35 @@ def create_app() -> FastAPI:
     """Build the sherpa-onnx diarization service app."""
     app = FastAPI(title="loreline-diarization")
     state: dict[str, object] = {}
+    lock = threading.Lock()
+
+    def _ensure_pipeline(num_clusters: int) -> tuple[object, object]:
+        """Return the cached pipeline for ``num_clusters``, loading it once.
+
+        Shared by ``/healthz`` and ``/diarize`` so both agree on what "ready"
+        means: whatever ``_load_pipeline`` raises when the models are not
+        configured or fail to load is exactly what fails a health check too,
+        instead of ``/healthz`` keeping its own, separate notion of readiness
+        that can drift from what a real diarize call actually does.
+        """
+        pipelines: dict[int, tuple[object, object]] = state.setdefault("pipelines", {})  # type: ignore[assignment]
+        if num_clusters in pipelines:
+            return pipelines[num_clusters]
+        with lock:
+            if num_clusters not in pipelines:
+                pipelines[num_clusters] = _load_pipeline(num_clusters)
+            return pipelines[num_clusters]
 
     @app.get("/healthz")
-    async def healthz() -> JSONResponse:
+    def healthz() -> JSONResponse:
+        # Plain `def`, not `async def`: the first call loads the pipeline
+        # (real file IO plus ONNX init), which is exactly the synchronous,
+        # possibly slow work the comment on `/diarize` below already offloads
+        # to the threadpool rather than run on the event loop.
+        try:
+            _ensure_pipeline(-1)
+        except (RuntimeError, ImportError) as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
         return JSONResponse({"status": "ok"})
 
     @app.post("/diarize")
@@ -90,15 +119,11 @@ def create_app() -> FastAPI:
         # concurrent work worth protecting the loop for, so offloading it is
         # strictly better than blocking every other in-flight request on it.
         num_clusters = _resolve_num_clusters(min_speakers, max_speakers)
-        pipelines: dict[int, tuple[object, object]] = state.get("pipelines", {})  # type: ignore[assignment]
-        if num_clusters not in pipelines:
-            try:
-                pipelines[num_clusters] = _load_pipeline(num_clusters)
-            except (RuntimeError, ImportError) as exc:
-                raise HTTPException(status_code=503, detail=str(exc)) from exc
-            state["pipelines"] = pipelines
+        try:
+            pipeline, np = _ensure_pipeline(num_clusters)
+        except (RuntimeError, ImportError) as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
 
-        pipeline, np = pipelines[num_clusters]
         samples, rate = _read_wav(file.file.read())
         audio = np.array(samples, dtype=np.float32)
         result = pipeline.process(audio).sort_by_start_time()

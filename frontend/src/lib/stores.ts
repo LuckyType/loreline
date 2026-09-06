@@ -1,12 +1,13 @@
 import { writable } from 'svelte/store'
 import type { Health, ProviderConfig, ReprocessJob } from './wire'
+import type { ConnectionStatus } from './ws'
 
 export const health = writable<Health | null>(null)
 export const authed = writable<boolean>(true)
 
 /** Live-feed WebSocket state (set by the Dashboard, surfaced in the header health bubble). */
-export const transcriptWs = writable<boolean>(false)
-export const logsWs = writable<boolean>(false)
+export const transcriptWs = writable<ConnectionStatus>('offline')
+export const logsWs = writable<ConnectionStatus>('offline')
 
 /** Deterministic speaker color from a label, for transcript rendering. */
 export function speakerColor(speaker: string | null): string {
