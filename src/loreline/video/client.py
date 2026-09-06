@@ -1,22 +1,26 @@
-"""OpenRouter video-generation API client.
+"""Video-generation API client, one HTTP path for every video vendor.
 
 Video generation is asynchronous *at the source*, which is what shapes this
 module. Unlike chat completions, there is no request that returns the result:
 
-    POST /videos             -> {"id", "status", "polling_url", …}
-    GET  /videos/{id}        -> {"status": pending|in_progress|completed|
-                                            failed|cancelled|expired, "error", …}
-    GET  /videos/{id}/content -> the encoded video bytes
-    GET  /videos/models      -> per-model parameter support (read through
-                                the shared catalogue reader, loreline.catalog)
+    POST <submit path>       -> a job handle
+    GET  <poll path>         -> a status, until it is terminal
+    <fetch the bytes>        -> the encoded video
 
 A generation runs for minutes, so nothing here blocks a request thread; the
 polling loop lives in :mod:`loreline.video.jobs`, which owns the job row.
 
-Written against ``httpx`` rather than OpenRouter's official SDK for the same
-reason :mod:`loreline.llm` is: one HTTP client, one auth path, one set of
-mockable transports in the tests. The endpoints are a handful of plain REST
-calls and the SDK would pin an upper bound on ``pydantic`` for them.
+Which path, which field carries the handle, which word means success and where
+the finished bytes are all differ per vendor, and are answered by
+:mod:`loreline.video.vendors` - one adapter per vendor, exactly as the STT side
+has one connector per vendor and transport. What stays here is everything that
+does not differ: the client, the two timeouts, and the single way a failed
+request becomes a message a GM can act on.
+
+Written against ``httpx`` rather than a vendor SDK for the same reason
+:mod:`loreline.llm` is: one HTTP client, one auth path, one set of mockable
+transports in the tests. These are a handful of plain REST calls and an SDK
+would pin an upper bound on ``pydantic`` for them.
 """
 
 from __future__ import annotations
@@ -31,6 +35,12 @@ from loreline.capabilities import supports, surface_for
 from loreline.catalog import VendorModel, VendorVideo, probe
 from loreline.logging import get_logger
 from loreline.models import Interaction, ProviderConfig, ProviderKind, VideoModelInfo
+from loreline.video.vendors import (
+    GenerationRequest,
+    GenerationState,
+    VideoError,
+    vendor_for,
+)
 
 log = get_logger(__name__)
 
@@ -39,26 +49,31 @@ log = get_logger(__name__)
 _TIMEOUT_S = 60.0
 _DOWNLOAD_TIMEOUT_S = 600.0
 
-# Upstream job states. Only `completed` yields bytes; the other three terminal
-# states are failures from this app's point of view, `expired` included - it
-# means the result was collected too late, which is still no video.
-_TERMINAL_OK = "completed"
-_TERMINAL_FAILED = frozenset({"failed", "cancelled", "expired"})
-
 ClientFactory = Callable[[], httpx.AsyncClient]
 
-
-class VideoError(Exception):
-    """A video-generation call failed, or the generation itself did."""
+__all__ = [
+    "ClientFactory",
+    "GenerationRequest",
+    "GenerationState",
+    "VideoError",
+    "build_payload",
+    "download_video",
+    "list_video_models",
+    "poll_generation",
+    "start_generation",
+    "supports_video",
+]
 
 
 def supports_video(kind: ProviderKind) -> bool:
     """Whether a provider kind can generate video.
 
-    OpenRouter only: it is the one configured provider here that exposes a
-    video API at all. A plain OpenAI-compatible chat endpoint (Ollama, LM
-    Studio, vLLM) has no equivalent, so those must not be offered. Answered
-    from the one capability table - see loreline.capabilities.
+    OpenRouter and xAI today: they are the configured providers here that
+    expose a video API at all. A plain OpenAI-compatible chat endpoint (Ollama,
+    LM Studio, vLLM) has no equivalent, so those must not be offered. Answered
+    from the one capability table - see loreline.capabilities - so declaring the
+    interaction in capabilities.yaml is what turns a kind on, and
+    :func:`loreline.video.vendors.vendor_for` is what it then needs.
     """
     return supports(kind, Interaction.VIDEO)
 
@@ -72,8 +87,8 @@ def _client(
 ) -> httpx.AsyncClient:
     if factory is not None:
         return factory()
-    # The kind's video surface: the gateway base plus the same attribution
-    # headers the chat connector sends, both declared in capabilities.yaml.
+    # The kind's video surface: the vendor's base plus whatever headers it
+    # declares (OpenRouter's attribution pair), both from capabilities.yaml.
     endpoint = surface_for(config, Interaction.VIDEO)
     return httpx.AsyncClient(
         base_url=endpoint.url, headers=endpoint.request_headers(api_key), timeout=timeout
@@ -97,6 +112,19 @@ def _error_detail(response: httpx.Response) -> str:
     return f"{response.status_code} {response.reason_phrase}"
 
 
+def _body(response: httpx.Response) -> dict[str, object]:
+    """A JSON object response, or a VideoError naming what arrived instead."""
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        msg = "the provider answered with something that is not JSON"
+        raise VideoError(msg) from exc
+    if not isinstance(payload, dict):
+        msg = "unexpected response shape"
+        raise VideoError(msg)
+    return cast("dict[str, object]", payload)
+
+
 async def list_video_models(
     *,
     config: ProviderConfig,
@@ -111,6 +139,12 @@ async def list_video_models(
     than raising, so the dialog can still open and say so instead of erroring
     the page. The lists stay None where the vendor published none, which the
     form reads as "this model takes no such parameter".
+
+    An empty list is also the ordinary answer for a vendor that publishes no
+    video catalogue at all (xAI): the dialog then builds its controls from the
+    model's ``video`` block in capabilities.yaml, which is its primary source in
+    either case - the vendor's own lists are the fallback for a model that file
+    does not annotate.
     """
     answer = await probe(
         config.kind,
@@ -146,6 +180,7 @@ def _video_row(model: VendorModel) -> VideoModelInfo:
 
 def build_payload(
     *,
+    kind: ProviderKind,
     model: str,
     prompt: str,
     duration: int | None = None,
@@ -154,25 +189,24 @@ def build_payload(
     generate_audio: bool = False,
     seed: int | None = None,
 ) -> dict[str, object]:
-    """The ``POST /videos`` body.
+    """The submit body, in this vendor's spelling.
 
-    Optional parameters are omitted when unset rather than sent as null:
-    models differ in which ones they accept at all (see VideoModelInfo), and a
-    model handed a parameter it does not support rejects the whole request.
-    ``generate_audio`` is only sent when true for the same reason.
+    Scoped by kind because the bodies genuinely differ, and not only in field
+    names: ``generate_audio`` defaults to false on OpenRouter and true on xAI,
+    so "the GM wants no audio" is silence on one and an explicit false on the
+    other. See :mod:`loreline.video.vendors` for each.
     """
-    payload: dict[str, object] = {"model": model, "prompt": prompt}
-    if duration is not None:
-        payload["duration"] = duration
-    if resolution:
-        payload["resolution"] = resolution
-    if aspect_ratio:
-        payload["aspect_ratio"] = aspect_ratio
-    if generate_audio:
-        payload["generate_audio"] = True
-    if seed is not None:
-        payload["seed"] = seed
-    return payload
+    return vendor_for(kind).payload(
+        GenerationRequest(
+            model=model,
+            prompt=prompt,
+            duration=duration,
+            resolution=resolution,
+            aspect_ratio=aspect_ratio,
+            generate_audio=generate_audio,
+            seed=seed,
+        )
+    )
 
 
 async def start_generation(
@@ -188,47 +222,17 @@ async def start_generation(
     unsupported parameter, an unknown model or a billing failure all surface
     here as the provider's own message.
     """
+    vendor = vendor_for(config.kind)
     client = _client(config, api_key, client_factory)
     try:
-        try:
-            response = await client.post("/videos", json=payload)
-        except httpx.HTTPError as exc:
-            msg = f"could not reach {client.base_url}: {exc}"
-            raise VideoError(msg) from exc
-        if response.status_code >= HTTPStatus.BAD_REQUEST:
-            raise VideoError(_error_detail(response))
-        body = response.json()
-        remote_id = cast("dict[str, object]", body).get("id") if isinstance(body, dict) else None
-        if not isinstance(remote_id, str) or not remote_id:
+        response = await _request(client, "POST", vendor.submit_path, json=payload)
+        remote_id = vendor.remote_id(_body(response))
+        if not remote_id:
             msg = "provider accepted the request but returned no job id"
             raise VideoError(msg)
         return remote_id
     finally:
         await client.aclose()
-
-
-class GenerationState:
-    """A poll result: still running, finished, or failed.
-
-    A tiny class rather than a bare tuple because all three call sites read
-    the fields by name, and `done`/`failed` are not the same question.
-    """
-
-    def __init__(self, status: str, error: str | None = None) -> None:
-        self.status = status
-        self.error = error
-
-    @property
-    def done(self) -> bool:
-        return self.status == _TERMINAL_OK
-
-    @property
-    def failed(self) -> bool:
-        return self.status in _TERMINAL_FAILED
-
-    @property
-    def finished(self) -> bool:
-        return self.done or self.failed
 
 
 async def poll_generation(
@@ -239,26 +243,11 @@ async def poll_generation(
     client_factory: ClientFactory | None = None,
 ) -> GenerationState:
     """One status check for a submitted generation."""
+    vendor = vendor_for(config.kind)
     client = _client(config, api_key, client_factory)
     try:
-        try:
-            response = await client.get(f"/videos/{remote_id}")
-        except httpx.HTTPError as exc:
-            msg = f"could not reach {client.base_url}: {exc}"
-            raise VideoError(msg) from exc
-        if response.status_code >= HTTPStatus.BAD_REQUEST:
-            raise VideoError(_error_detail(response))
-        body = response.json()
-        if not isinstance(body, dict):
-            msg = "unexpected polling response"
-            raise VideoError(msg)
-        entry = cast("dict[str, object]", body)
-        status = entry.get("status")
-        error = entry.get("error")
-        return GenerationState(
-            status=status if isinstance(status, str) else "unknown",
-            error=error if isinstance(error, str) else None,
-        )
+        response = await _request(client, "GET", vendor.poll_path(remote_id))
+        return vendor.state(_body(response))
     finally:
         await client.aclose()
 
@@ -268,25 +257,57 @@ async def download_video(
     config: ProviderConfig,
     api_key: str | None,
     remote_id: str,
+    state: GenerationState | None = None,
     client_factory: ClientFactory | None = None,
 ) -> bytes:
     """Fetch a completed generation's bytes.
 
-    Downloaded rather than linked on purpose: OpenRouter's result URLs expire,
-    and a session's video should still play months later, next to its audio.
+    Downloaded rather than linked on purpose: both vendors' result URLs expire
+    (OpenRouter has a literal ``expired`` job state, and xAI hands back a URL on
+    a storage host), and a session's video should still play months later, next
+    to its audio.
+
+    ``state`` is the terminal poll result, because for one vendor that *is* the
+    address: xAI answers the poll with the URL rather than serving the bytes
+    from a path built off the job id. The credential goes only where the
+    vendor's own API is called (see ContentTarget).
     """
-    client = _client(config, api_key, client_factory, timeout=_DOWNLOAD_TIMEOUT_S)
+    vendor = vendor_for(config.kind)
+    target = vendor.content(remote_id, state)
+    client = _client(
+        config,
+        api_key if target.authenticated else None,
+        client_factory,
+        timeout=_DOWNLOAD_TIMEOUT_S,
+    )
     try:
-        try:
-            response = await client.get(f"/videos/{remote_id}/content")
-        except httpx.HTTPError as exc:
-            msg = f"could not reach {client.base_url}: {exc}"
-            raise VideoError(msg) from exc
-        if response.status_code >= HTTPStatus.BAD_REQUEST:
-            raise VideoError(_error_detail(response))
+        response = await _request(client, "GET", target.url)
         if not response.content:
             msg = "provider reported the video ready but returned no content"
             raise VideoError(msg)
         return response.content
     finally:
         await client.aclose()
+
+
+async def _request(
+    client: httpx.AsyncClient,
+    method: str,
+    url: str,
+    *,
+    json: dict[str, object] | None = None,
+) -> httpx.Response:
+    """One call, with the two failures every caller reports the same way.
+
+    A transport error names the host that could not be reached; a 4xx or 5xx
+    carries the provider's own message, because "400 Bad Request" never says
+    which parameter was wrong.
+    """
+    try:
+        response = await client.request(method, url, json=json)
+    except httpx.HTTPError as exc:
+        msg = f"could not reach {client.base_url}: {exc}"
+        raise VideoError(msg) from exc
+    if response.status_code >= HTTPStatus.BAD_REQUEST:
+        raise VideoError(_error_detail(response))
+    return response

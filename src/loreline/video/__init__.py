@@ -1,8 +1,10 @@
-"""Video generation from a session summary (OpenRouter ``/videos``).
+"""Video generation from a session summary.
 
-:mod:`loreline.video.client` speaks the API, :mod:`loreline.video.jobs` owns
-the long-running job and its polling loop, and :mod:`loreline.video.store`
-keeps the finished files next to session audio under ``data_dir``.
+:mod:`loreline.video.vendors` holds what differs per vendor (the paths, the
+field names, the word that means done), :mod:`loreline.video.client` speaks the
+HTTP that does not, :mod:`loreline.video.jobs` owns the long-running job and its
+polling loop, and :mod:`loreline.video.store` keeps the finished files next to
+session audio under ``data_dir``.
 """
 
 from loreline.video.client import VideoError, list_video_models, supports_video

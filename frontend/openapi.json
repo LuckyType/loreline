@@ -3689,7 +3689,8 @@
           "openai_compat",
           "assemblyai",
           "gemini",
-          "openrouter"
+          "openrouter",
+          "xai"
         ],
         "title": "ProviderKind",
         "description": "Supported provider kinds (STT + LLM)."

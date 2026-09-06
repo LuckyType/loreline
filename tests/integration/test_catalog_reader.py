@@ -474,5 +474,8 @@ def test_the_shipped_file_declares_which_catalogues_a_picker_may_read() -> None:
         for interaction in spec.interactions
         if (catalog := spec.catalog(interaction)) is not None and not catalog.picker
     }
-    assert live == {"openai", "openai_compat", "openrouter"}
+    # xAI is in the live set for its chat list alone: it declares a catalog for
+    # summarize and for neither of its other two interactions, because
+    # /v1/models lists no speech or video model there is any point offering.
+    assert live == {"openai", "openai_compat", "openrouter", "xai"}
     assert checked_only == {"deepgram", "gemini"}

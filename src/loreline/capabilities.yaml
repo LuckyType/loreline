@@ -1529,6 +1529,204 @@ providers:
       # image_input: true
       # prompt_max_chars: null            # documented as 1,024 tokens
       #
+  xai:
+    label: xAI (Grok)
+    hosting: cloud
+    auth: api_key
+    # Keys are minted in the xAI console, under Team -> API Keys. The console
+    # root rather than the deep link: the latter carries a team slug.
+    key_url: https://console.x.ai/
+    key_env: [XAI_API_KEY]
+    # One host, one key, four addresses, and every one of them authenticates
+    # with "Authorization: Bearer <key>".
+    # Researched against xAI's documentation on 2026-09-06.
+    surfaces:
+      transcribe:
+        # Configured entirely by query string - sample_rate, encoding, diarize,
+        # keyterm and friends - with no setup frame, and audio arrives as raw
+        # binary websocket frames. The server greets with transcript.created as
+        # soon as the socket is up, so the health probe reads that greeting and
+        # this surface declares no frame to send (unlike Deepgram's, which
+        # waits for the client to speak first).
+        # https://docs.x.ai/developers/model-capabilities/audio/speech-to-text
+        realtime: {url: "wss://api.x.ai/v1/stt", auth: bearer, overridable: true}
+        # POST https://api.x.ai/v1/stt, multipart/form-data. The surface is the
+        # API base and the connector adds /stt, because that same base serves
+        # chat and video; probed at the default /models.
+        batch: {url: "https://api.x.ai/v1", auth: bearer, overridable: true}
+      # POST /chat/completions on the same base. Explicitly OpenAI-compatible
+      # ("Authorization: Bearer $XAI_API_KEY", same request and response
+      # schema), so the one summarize connector in loreline/llm.py serves this
+      # vendor with no new code: the surface below is the whole integration.
+      # https://docs.x.ai/developers/model-capabilities/text/generate-text
+      summarize: {url: "https://api.x.ai/v1", auth: bearer, overridable: true}
+      # POST /videos/generations, then poll GET /videos/{request_id}, on the
+      # same base. Not OpenRouter's shape at all, which is what the vendor split
+      # in loreline/video/vendors.py exists for.
+      # https://docs.x.ai/developers/model-capabilities/video/generation
+      video: {url: "https://api.x.ai/v1", auth: bearer, overridable: true}
+      # GET /v1/models lists the chat catalogue and only that: no STT entry
+      # (that endpoint takes no model at all, see grok-stt-1.0 below) and no
+      # video entry. Declared for summarize alone, therefore, so the
+      # transcription and video pickers read the curated lists below instead of
+      # being handed a chat model to transcribe with - which is the exact
+      # failure an unscoped /models list caused for OpenAI.
+      catalog:
+        summarize: {url: "https://api.x.ai/v1/models", auth: bearer}
+    interactions: [transcribe, summarize, video]
+    models:
+
+      # ---------------------------------------------------------------- transcribe
+
+      # THE transcription entry, and its id is a label rather than a wire value.
+      #
+      # xAI's speech-to-text API takes NO model parameter. Neither
+      # POST /v1/stt nor wss://api.x.ai/v1/stt documents one, the REST reference
+      # lists every field for both and `model` is absent from each, and the
+      # vendor names no STT model anywhere in its own docs. The connectors
+      # therefore send none, and a guard test asserts that.
+      #
+      # An entry is still needed, for two reasons: a picker with nothing in it
+      # cannot start a session, and this is where the transport preference, the
+      # diarization answer and the glossary ceiling have to be written down. The
+      # id is the one every gateway that does name this engine uses - OpenRouter
+      # publishes it as x-ai/grok-stt-1.0, listed above in this same file, and
+      # Cloudflare as xai/grok-stt - so a GM holding both an xAI row and an
+      # OpenRouter row sees one engine under one name. Nothing is sent, so
+      # nothing here can be wrong on the wire.
+      #
+      # The self-hosted precedent (no models, discovered at runtime) is the
+      # wrong shape for this: that kind's catalogue is whatever an operator
+      # installed and its server publishes a list to read, while this vendor has
+      # exactly one engine and publishes no list at all.
+      #
+      # UNVERIFIED against the real API, like the Deepgram batch connector: this
+      # environment has no xAI key, so the connectors match the documented
+      # request and response shapes and have only ever run against the mocks in
+      # mocks/xai_ws.py and mocks/xai_stt.py. It is NOT hidden, unlike
+      # whisper-large above, because hiding the only transcription model a kind
+      # has would leave the interaction declared and unofferable. What a
+      # maintainer with a key should check first: that the socket's
+      # transcript.done really carries the whole utterance (this file's reading
+      # of "Final transcript after audio.done"), and that words[] carries
+      # `speaker` under diarize=true on both transports.
+      - id: grok-stt-1.0
+        label: Grok STT
+        interactions: [transcribe]
+        default: true
+        transcribe:
+          # One engine reached two ways: the socket streams it, POST /v1/stt
+          # posts a whole file. Same parameter names on both, which is why the
+          # two connectors share _xai.py.
+          realtime: true
+          batch: true
+          # Live capture is what the socket is for; a re-processing run passes
+          # prefer_batch and lands on the multipart endpoint instead.
+          prefer: realtime
+          # "diarize: When true, enables speaker diarization. Words in
+          # transcript.partial and transcript.done events include a speaker
+          # field (integer)." Documented for both transports.
+          inline_diarization: true
+          # "keyterm: A key term to bias transcription toward (e.g. product
+          # names, proper nouns), repeatable for each term." Max 100 terms, each
+          # at most 50 characters. Same field name and the same repeated-field
+          # form on both transports, so no per-transport override is needed.
+          glossary: {supported: true, field: keyterm, max_terms: 100, max_term_chars: 50}
+          # words[] carries text/start/end in seconds on both transports.
+          word_timestamps: true
+          # 25+ languages with auto-detection; `language` is a BCP-47 hint, and
+          # xAI documents no code-switching claim, so this is multi, not
+          # codeswitch.
+          languages: multi
+        deprecated: null
+
+      # ---------------------------------------------------------------- summarize
+
+      # The chat catalogue, from the published model roster. Context lengths are
+      # the vendor's own; max_output_tokens is not documented for any of them
+      # and is left unset rather than guessed.
+      #
+      # GAP: xAI documents no reasoning_effort support per model, so the
+      # reasoning block is omitted throughout and the effort dropdown stays
+      # hidden. Offering a control the endpoint ignores looks exactly like the
+      # setting not working - see apply_reasoning_effort in loreline/llm.py,
+      # which sends the flat OpenAI spelling for every non-OpenRouter kind.
+      # https://docs.x.ai/developers/models
+
+      - id: grok-4.6
+        label: Grok 4.6
+        interactions: [summarize]
+        # The current flagship, and 500k of context is already far more than a
+        # session transcript. grok-4.3 below is the one to move to if a campaign
+        # ever outgrows that.
+        default: true
+        llm:
+          context_length: 500000
+          system_prompt: true
+          # "temperature (0-2, default: 1)" is accepted on chat completions, so
+          # the explicit 0.3 the summarizer sends is fine here. The retry in
+          # llm.py covers a model that rejects it anyway.
+          temperature: true
+
+      - id: grok-4.5
+        label: Grok 4.5
+        interactions: [summarize]
+        llm:
+          context_length: 500000
+          system_prompt: true
+          temperature: true
+
+      - id: grok-4.3
+        label: Grok 4.3
+        interactions: [summarize]
+        llm:
+          # The long-context option: 1M against the flagship's 500k.
+          context_length: 1000000
+          system_prompt: true
+          temperature: true
+
+      # ---------------------------------------------------------------- video
+
+      # Grok Imagine. Parameters are the generation page's own, field by field:
+      # duration 1-15 s, resolution 480p/720p/1080p (default 480p), the seven
+      # aspect ratios below (default 16:9), generate_audio default true, and
+      # `image` for image-to-video. No prompt length limit is documented.
+      # https://docs.x.ai/developers/model-capabilities/video/generation
+      #
+      # Only the versioned id is offered. The model roster also names a bare
+      # "grok-imagine-video", which is almost certainly the unversioned alias
+      # (the image family pairs "grok-imagine-image" with
+      # "grok-imagine-image-2.0" the same way), but the generation page
+      # documents the parameters for 1.5 alone, and one of them is version
+      # specific: "1080p is supported on grok-imagine-video-1.5 for
+      # text-to-video and image-to-video". Offering the alias would mean
+      # promising a resolution against whatever it happens to point at. Add it
+      # here when the docs state its ceiling.
+      #
+      # This is the same engine as x-ai/grok-imagine-video-1.5 under openrouter
+      # above, and the two entries agree on every list, which is the closest
+      # thing to a cross-check this file has: one was read from xAI's docs and
+      # the other from OpenRouter's live /videos/models.
+      - id: grok-imagine-video-1.5
+        label: Grok Imagine Video 1.5
+        interactions: [video]
+        # The only video model offered, so it is the default by arithmetic, but
+        # it is marked rather than inferred like every other offered
+        # interaction. Nothing is handed it unasked: the generate dialog makes
+        # the GM pick.
+        default: true
+        video:
+          durations: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+          resolutions: ["480p", "720p", "1080p"]
+          aspect_ratios: ["16:9", "9:16", "1:1", "4:3", "3:4", "3:2", "2:3"]
+          # "generate_audio (boolean, optional): Include audio track (default:
+          # true)". OpenRouter reports null for the same model, hence the
+          # disagreement with the entry above, which omits the field.
+          audio: true
+          # `image` takes an image URL for image-to-video.
+          image_input: true
+          prompt_max_chars: null
+
   openai_compat:
     label: Self-hosted (OpenAI compatible)
     hosting: selfhosted

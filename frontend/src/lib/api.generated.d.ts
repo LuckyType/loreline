@@ -1601,7 +1601,7 @@ export interface components {
          * @description Supported provider kinds (STT + LLM).
          * @enum {string}
          */
-        ProviderKind: "deepgram" | "openai" | "openai_compat" | "assemblyai" | "gemini" | "openrouter";
+        ProviderKind: "deepgram" | "openai" | "openai_compat" | "assemblyai" | "gemini" | "openrouter" | "xai";
         /**
          * ProviderModelsRequest
          * @description Connection details for listing a provider's available models.

@@ -18,6 +18,8 @@ from loreline.stt.backends.gemini import GeminiSTTBackend
 from loreline.stt.backends.gemini_live import GeminiLiveBackend
 from loreline.stt.backends.openai_compat import OpenAICompatBackend
 from loreline.stt.backends.openai_realtime import OpenAIRealtimeBackend
+from loreline.stt.backends.xai import XaiBackend
+from loreline.stt.backends.xai_batch import XaiBatchBackend
 from loreline.stt.base import transcribe_capabilities
 from loreline.stt.registry import registered_kinds
 
@@ -181,6 +183,21 @@ class TestModelResolution:
             "universal-3-5-pro",
         )
         assert isinstance(backend, AssemblyAIBackend)
+
+    def test_xai_routes_one_engine_to_two_connectors(self, tmp_path: Path) -> None:
+        """xAI has a single, unnamed speech engine reachable two ways, so the
+        model id decides nothing here and the caller's context decides
+        everything: a live capture streams, a re-processing job posts."""
+        secrets = self._secrets(tmp_path)
+        live = create_backend(_config(ProviderKind.XAI, base_url=None), secrets, "grok-stt-1.0")
+        stored = create_backend(
+            _config(ProviderKind.XAI, base_url=None),
+            secrets,
+            "grok-stt-1.0",
+            prefer_batch=True,
+        )
+        assert isinstance(live, XaiBackend)
+        assert isinstance(stored, XaiBatchBackend)
 
 
 class TestStoredAudioPrefersBatch:

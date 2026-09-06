@@ -19,6 +19,10 @@ class ProviderKind(StrEnum):
     ASSEMBLYAI = "assemblyai"
     GEMINI = "gemini"  # Gemini API transcription (accepts a plain API key)
     OPENROUTER = "openrouter"  # OpenRouter gateway: transcription, summaries and video
+    # xAI's own API: streaming + batch transcription, chat summaries and Grok
+    # Imagine video. Reachable through the OpenRouter gateway as well, but that
+    # is a different row with a different key, not a different vendor.
+    XAI = "xai"
 
 
 class Interaction(StrEnum):

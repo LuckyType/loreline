@@ -611,8 +611,14 @@ def test_summarize_and_video_providers_have_a_client_that_can_serve_them() -> No
     def kinds(interaction: Interaction) -> set[str]:
         return {k.value for k, p in cfg.providers.items() if interaction in p.interactions}
 
-    assert kinds(Interaction.SUMMARIZE) <= {"openai", "openai_compat", "openrouter", "gemini"}
-    assert kinds(Interaction.VIDEO) <= {"openrouter"}
+    assert kinds(Interaction.SUMMARIZE) <= {
+        "openai",
+        "openai_compat",
+        "openrouter",
+        "gemini",
+        "xai",
+    }
+    assert kinds(Interaction.VIDEO) <= {"openrouter", "xai"}
 
     openai_chat = cfg.providers[ProviderKind.OPENAI].surface(Interaction.SUMMARIZE)
     assert openai_chat is not None

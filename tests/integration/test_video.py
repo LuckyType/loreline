@@ -39,6 +39,7 @@ from loreline.secrets import SecretStore
 from loreline.settings import Settings
 from loreline.stt.catalog import list_models
 from loreline.video.client import (
+    GenerationState,
     VideoError,
     build_payload,
     download_video,
@@ -55,6 +56,7 @@ from loreline.video.jobs import (
     VideoManager,
 )
 from loreline.video.store import VideoStore
+from loreline.video.vendors import vendor_for
 from loreline.web.app import AppState, create_app
 from loreline.web.schemas import VideoGenerateRequest
 
@@ -63,8 +65,16 @@ def _openrouter() -> ProviderConfig:
     return ProviderConfig(id="v1", name="OpenRouter", kind=ProviderKind.OPENROUTER)
 
 
+def _xai() -> ProviderConfig:
+    return ProviderConfig(id="x1", name="xAI", kind=ProviderKind.XAI)
+
+
 def _client(transport: httpx.MockTransport) -> httpx.AsyncClient:
     return httpx.AsyncClient(transport=transport, base_url="https://openrouter.ai/api/v1")
+
+
+def _xai_client(transport: httpx.MockTransport) -> httpx.AsyncClient:
+    return httpx.AsyncClient(transport=transport, base_url="https://api.x.ai/v1")
 
 
 class Repos(NamedTuple):
@@ -98,12 +108,22 @@ async def video_repos(tmp_path: Path) -> AsyncIterator[Repos]:
 
 
 class TestCapability:
-    def test_only_openrouter_can_generate_video(self) -> None:
+    def test_only_the_kinds_with_a_video_api_can_generate(self) -> None:
         """A plain OpenAI-compatible chat endpoint has no video API; offering
         it would produce a request that can only ever fail."""
         assert supports_video(ProviderKind.OPENROUTER) is True
+        assert supports_video(ProviderKind.XAI) is True
         assert supports_video(ProviderKind.OPENAI_COMPAT) is False
         assert supports_video(ProviderKind.DEEPGRAM) is False
+
+    def test_every_video_kind_has_an_adapter_to_speak_with(self) -> None:
+        """The two halves of the same fact, checked against each other: the
+        yaml decides which kinds are offered, vendors.py decides which can be
+        spoken to, and a kind in one and not the other fails at submit time
+        with the job already created and paid for."""
+        for kind in ProviderKind:
+            if supports_video(kind):
+                assert vendor_for(kind) is not None
 
 
 class TestPayload:
@@ -111,11 +131,12 @@ class TestPayload:
         """Video models differ in which parameters they accept at all, and one
         handed a parameter it does not support rejects the whole request - so
         an unset knob must be absent from the body, not present as null."""
-        payload = build_payload(model="m", prompt="a wizard")
+        payload = build_payload(kind=ProviderKind.OPENROUTER, model="m", prompt="a wizard")
         assert payload == {"model": "m", "prompt": "a wizard"}
 
     def test_set_parameters_ride_along(self) -> None:
         payload = build_payload(
+            kind=ProviderKind.OPENROUTER,
             model="m",
             prompt="a wizard",
             duration=8,
@@ -134,10 +155,56 @@ class TestPayload:
             "seed": 42,
         }
 
-    def test_generate_audio_false_is_omitted(self) -> None:
-        """False is the default everywhere; sending it explicitly would trip
+    def test_generate_audio_false_is_omitted_on_the_gateway(self) -> None:
+        """False is OpenRouter's default; sending it explicitly would trip
         models that do not take the parameter at all."""
-        assert "generate_audio" not in build_payload(model="m", prompt="p", generate_audio=False)
+        payload = build_payload(
+            kind=ProviderKind.OPENROUTER, model="m", prompt="p", generate_audio=False
+        )
+        assert "generate_audio" not in payload
+
+
+class TestXaiPayload:
+    """The same dialog, a different body. Worth its own class because one of
+    these differences is silent: the audio default is inverted."""
+
+    def test_generate_audio_is_always_explicit(self) -> None:
+        """xAI defaults generate_audio to TRUE, so omitting it - which is right
+        for OpenRouter - would hand back a clip with sound to a GM who turned it
+        off, and nothing anywhere would report an error."""
+        off = build_payload(kind=ProviderKind.XAI, model="m", prompt="p", generate_audio=False)
+        on = build_payload(kind=ProviderKind.XAI, model="m", prompt="p", generate_audio=True)
+        assert off["generate_audio"] is False
+        assert on["generate_audio"] is True
+
+    def test_seed_is_not_sent(self) -> None:
+        """xAI documents no seed parameter, and an unknown field is a rejected
+        request rather than an ignored one."""
+        payload = build_payload(kind=ProviderKind.XAI, model="m", prompt="p", seed=42)
+        assert "seed" not in payload
+
+    def test_the_shared_knobs_ride_along(self) -> None:
+        payload = build_payload(
+            kind=ProviderKind.XAI,
+            model="grok-imagine-video-1.5",
+            prompt="a wizard",
+            duration=8,
+            resolution="720p",
+            aspect_ratio="16:9",
+            generate_audio=True,
+        )
+        assert payload == {
+            "model": "grok-imagine-video-1.5",
+            "prompt": "a wizard",
+            "duration": 8,
+            "resolution": "720p",
+            "aspect_ratio": "16:9",
+            "generate_audio": True,
+        }
+
+    def test_an_unset_knob_is_absent_rather_than_null(self) -> None:
+        payload = build_payload(kind=ProviderKind.XAI, model="m", prompt="p")
+        assert payload == {"model": "m", "prompt": "p", "generate_audio": False}
 
 
 class TestModelCatalog:
@@ -195,7 +262,7 @@ class TestClientCalls:
         remote_id = await start_generation(
             config=_openrouter(),
             api_key="k",
-            payload=build_payload(model="m", prompt="p"),
+            payload=build_payload(kind=ProviderKind.OPENROUTER, model="m", prompt="p"),
             client_factory=lambda: _client(httpx.MockTransport(handle)),
         )
         assert remote_id == "gen_1"
@@ -269,6 +336,149 @@ class TestClientCalls:
                 api_key="k",
                 remote_id="gen_1",
                 client_factory=lambda: _client(httpx.MockTransport(handle)),
+            )
+
+
+class TestXaiClientCalls:
+    """The same three calls against xAI, which spells every one of them
+    differently: a different submit path, a different id field, a different word
+    for success, and the result at a URL instead of a path."""
+
+    async def test_start_posts_to_the_generations_path_and_reads_request_id(self) -> None:
+        seen: dict[str, object] = {}
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            seen["path"] = request.url.path
+            return httpx.Response(200, json={"request_id": "d97415a1-5796"})
+
+        remote_id = await start_generation(
+            config=_xai(),
+            api_key="k",
+            payload=build_payload(kind=ProviderKind.XAI, model="m", prompt="p"),
+            client_factory=lambda: _xai_client(httpx.MockTransport(handle)),
+        )
+
+        assert remote_id == "d97415a1-5796"
+        assert str(seen["path"]).endswith("/videos/generations")
+
+    async def test_an_openrouter_shaped_answer_is_no_job_id(self) -> None:
+        """The failure the vendor split exists to prevent, in one assertion: an
+        "id" field is not what this vendor returns, and reading one would leave
+        a job polling a handle the service never issued."""
+
+        def handle(_r: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"id": "gen_1", "status": "pending"})
+
+        with pytest.raises(VideoError, match="no job id"):
+            await start_generation(
+                config=_xai(),
+                api_key="k",
+                payload={"model": "m", "prompt": "p"},
+                client_factory=lambda: _xai_client(httpx.MockTransport(handle)),
+            )
+
+    @pytest.mark.parametrize(
+        ("status", "done", "failed"),
+        [
+            ("pending", False, False),
+            # "done", not "completed": waiting for OpenRouter's word here would
+            # poll until the hour deadline and then fail a finished generation.
+            ("done", True, False),
+            ("failed", False, True),
+            ("expired", False, True),
+        ],
+    )
+    async def test_poll_classifies_every_upstream_state(
+        self, status: str, done: bool, failed: bool
+    ) -> None:
+        def handle(_r: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"status": status, "model": "m"})
+
+        state = await poll_generation(
+            config=_xai(),
+            api_key="k",
+            remote_id="req_1",
+            client_factory=lambda: _xai_client(httpx.MockTransport(handle)),
+        )
+        assert (state.done, state.failed) == (done, failed)
+
+    async def test_the_poll_carries_the_result_url_and_the_error_message(self) -> None:
+        """Two things the gateway puts elsewhere: the address of the video, and
+        a failure reason that is an object rather than a string."""
+
+        def finished(_r: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={"status": "done", "video": {"url": "https://vidgen.x.ai/a/video.mp4"}},
+            )
+
+        def refused(_r: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200, json={"status": "failed", "error": {"code": "x", "message": "prompt refused"}}
+            )
+
+        ok = await poll_generation(
+            config=_xai(),
+            api_key="k",
+            remote_id="req_1",
+            client_factory=lambda: _xai_client(httpx.MockTransport(finished)),
+        )
+        bad = await poll_generation(
+            config=_xai(),
+            api_key="k",
+            remote_id="req_1",
+            client_factory=lambda: _xai_client(httpx.MockTransport(refused)),
+        )
+
+        assert ok.video_url == "https://vidgen.x.ai/a/video.mp4"
+        assert bad.error == "prompt refused"
+
+    def test_the_result_url_is_fetched_without_the_row_credential(self) -> None:
+        """The result sits on a storage host with the credential already in the
+        URL, and such hosts reject a request that also carries an Authorization
+        header. The gateway is the opposite case: it serves the bytes from its
+        own API, behind the same key as everything else."""
+        finished = GenerationState(
+            status="done", done=True, video_url="https://vidgen.x.ai/a/video.mp4"
+        )
+        target = vendor_for(ProviderKind.XAI).content("req_1", finished)
+        assert target.url == "https://vidgen.x.ai/a/video.mp4"
+        assert target.authenticated is False
+
+        gateway = vendor_for(ProviderKind.OPENROUTER).content("gen_1", None)
+        assert gateway.url == "/videos/gen_1/content"
+        assert gateway.authenticated is True
+
+    async def test_the_download_asks_for_the_url_the_poll_returned(self) -> None:
+        seen: list[httpx.Request] = []
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            return httpx.Response(200, content=b"mp4-bytes")
+
+        data = await download_video(
+            config=_xai(),
+            api_key="k",
+            remote_id="req_1",
+            state=GenerationState(status="done", done=True, video_url="https://vidgen.x.ai/v.mp4"),
+            client_factory=lambda: _xai_client(httpx.MockTransport(handle)),
+        )
+
+        assert data == b"mp4-bytes"
+        assert str(seen[0].url) == "https://vidgen.x.ai/v.mp4"
+
+    async def test_a_finished_generation_with_no_url_fails_the_job(self) -> None:
+        """There is no second place to look, so saying so names the vendor's
+        broken promise instead of writing a zero-byte file."""
+        with pytest.raises(VideoError, match="no video URL"):
+            await download_video(
+                config=_xai(),
+                api_key="k",
+                remote_id="req_1",
+                state=GenerationState(status="done", done=True),
+                client_factory=lambda: _xai_client(
+                    httpx.MockTransport(lambda _r: httpx.Response(200, content=b"x"))
+                ),
             )
 
 
