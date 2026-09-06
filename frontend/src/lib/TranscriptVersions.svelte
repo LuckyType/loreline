@@ -10,6 +10,10 @@
  * it, but a finished one that wrote nothing does not. Only re-transcriptions
  * can be deleted - the original is the capture itself and nothing can produce
  * it again.
+ *
+ * Open, the section takes an equal share of the card's leftover height and
+ * scrolls inside it, so a session with a dozen re-transcriptions still leaves
+ * room for the transcript below it.
  */
 
 import { actionSetup } from '$lib/actionSetup.svelte'
@@ -30,6 +34,7 @@ import Foldable from '$lib/Foldable.svelte'
 import ReprocessPanel from '$lib/ReprocessPanel.svelte'
 import SessionLogsDialog from '$lib/SessionLogsDialog.svelte'
 import { diarizerLabel, fmtWhen, inFlight, providerName } from '$lib/stores'
+import { cn } from '$lib/utils'
 import type { ReprocessJob, SessionDetail } from '$lib/wire'
 
 let {
@@ -151,11 +156,12 @@ const originalStatus = $derived.by(() => {
 })
 </script>
 
-<CardContent class="flex flex-col gap-3">
+<CardContent class={cn('flex flex-col gap-3', open ? 'min-h-0 flex-1' : 'shrink-0')}>
 	<Foldable
 		title="Transcriptions"
 		meta="{transcribeJobs.length + 1} version{transcribeJobs.length === 0 ? '' : 's'}"
 		bind:open
+		bodyClass="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto"
 	>
 		<Table>
 			<TableHeader>

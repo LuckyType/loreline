@@ -9,7 +9,10 @@
  * has no player to seek and no stored session to rename speakers in.
  *
  * Filtering stays with the caller, which owns the count in its own header;
- * `query` comes back down only to mark the hits where they were found.
+ * `query` comes back down only to mark the hits where they were found. The
+ * segment being played comes down the same way, by its start rather than by
+ * its position, so a filtered list still lights the right line - or none,
+ * when the search has hidden it.
  */
 
 import { Input } from '$lib/components/ui/input'
@@ -28,6 +31,8 @@ let {
 	emptyText = 'No transcript segments.',
 	class: className = 'max-h-[calc(100vh-240px)] overflow-auto',
 	element = $bindable(null),
+	activeStart = null,
+	revealNonce = 0,
 	onseek,
 	onrename,
 }: {
@@ -45,6 +50,13 @@ let {
 	class?: string
 	/** The scrolling box, for a caller that follows the tail. */
 	element?: HTMLElement | null
+	/** The segment being played, by its `start_ts`. It is marked, and scrolled
+	 *  into view as playback moves from one segment to the next. */
+	activeStart?: number | null
+	/** Bumped by the caller to reveal the active segment again even though it
+	 *  has not changed: a seek that lands inside the segment already shown is
+	 *  still a request to look at it. */
+	revealNonce?: number
 	/** Set to make each timestamp play the session audio from that point. */
 	onseek?: (seconds: number) => void
 	/** Set to make a speaker's name editable in place. A blank name clears it,
@@ -55,6 +67,20 @@ let {
 function displaySpeaker(label: string): string {
 	return names[label] ?? label
 }
+
+/** Keep the segment being played on screen, karaoke-style.
+ *
+ * Found in the DOM rather than kept as a ref per row: the row that is marked
+ * is the one to reveal, so the mark is the only bookkeeping either job needs.
+ * `nearest` scrolls only when the line is actually out of view, which is what
+ * keeps a paused, hand-scrolled transcript still - nothing here fires unless
+ * the active segment changed or a seek asked for it. */
+$effect(() => {
+	const segment = activeStart
+	void revealNonce // tracked: a seek inside the current segment still reveals it
+	if (segment == null || !element) return
+	element.querySelector('[data-active]')?.scrollIntoView({ block: 'nearest' })
+})
 
 // Which row's speaker is being edited, and the name being typed into it. By
 // row rather than by label because one label appears on dozens of segments,
@@ -99,7 +125,18 @@ function editKeydown(e: KeyboardEvent, label: string) {
 <div bind:this={element} class={className}>
 	{#each events as ev, i (i)}
 		{@const speaker = ev.speaker}
-		<div class="flex items-baseline gap-2.5 py-1">
+		{@const active = activeStart != null && ev.start_ts === activeStart}
+		<!-- The mark is padded inwards rather than bled outwards with a negative
+		     margin: this box scrolls, so a row wider than it would put a
+		     horizontal scrollbar under every transcript on the site, and the
+		     bar down its left edge would be clipped away with the overflow. -->
+		<div
+			class={cn(
+				'flex items-baseline gap-2.5 rounded-md px-2 py-1',
+				active && 'bg-primary/10 [box-shadow:inset_2px_0_0_var(--color-primary)]',
+			)}
+			data-active={active ? 'true' : undefined}
+		>
 			{#if onseek}
 				<button
 					type="button"
