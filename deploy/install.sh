@@ -167,12 +167,26 @@ if [[ -z $AUTH_PASSWORD ]]; then
   GENERATED_PASSWORD=1
 fi
 
-# Watchtower's HTTP API token. Generated unprompted, whether or not this box
-# ever runs the watchtower profile: it costs one line in .env, nothing else
-# reads it, and it means a later `docker compose --profile watchtower up -d`
-# comes up with the web UI's update button already working instead of needing a
-# hand-edited .env first. Same generator as the login password above.
-WATCHTOWER_TOKEN=$(gen_password)
+# WUD's HTTP Basic credentials. Generated unprompted, whether or not this box
+# ever runs the wud profile: they cost three lines in .env, nothing else reads
+# them, and it means a later `docker compose --profile wud up -d` comes up with
+# the web UI's update button already working instead of needing a hand-edited
+# .env first. Same generator as the login password above, which also keeps the
+# password free of the `:` that WUD's basic-auth library cannot parse.
+#
+# Written as a pair on purpose: WUD checks an htpasswd hash and never sees a
+# plaintext password, while the app has to send that plaintext, since that is
+# what HTTP Basic is. Only openssl can produce the hash here, so without it
+# both are left empty - that disables the update button and nothing else,
+# whereas a hash this script could not generate would fail at 401 instead.
+WUD_USER=loreline
+WUD_PASSWORD=$(gen_password)
+if command -v openssl &>/dev/null; then
+  WUD_HASH=$(openssl passwd -apr1 "$WUD_PASSWORD")
+else
+  WUD_PASSWORD=""
+  WUD_HASH=""
+fi
 
 # --- docker -----------------------------------------------------------------
 # No pipe into `grep -q` here on purpose: it exits at the first match, which
@@ -226,13 +240,14 @@ if ((WRITE_ENV == 1)); then
 LORELINE_PORT=${LORELINE_PORT}
 LORELINE_AUTH_PASSWORD=${AUTH_PASSWORD}
 
-# Read only while the optional watchtower profile is running. Together they let
-# the web UI's update button ask Watchtower to run its update check now instead
-# of at 04:00; docker-compose.yml gives the app the same token so it can. Both
-# lines or neither - Watchtower exits at startup if its API is enabled with an
-# empty token.
-WATCHTOWER_HTTP_API_UPDATE=true
-WATCHTOWER_HTTP_API_TOKEN=${WATCHTOWER_TOKEN}
+# Read only while the optional wud profile is running. Together they let the web
+# UI's update button ask WUD to check for a newer image and apply it;
+# docker-compose.yml passes the username and password to the app, and the
+# username and hash to WUD. The hash is single-quoted because it contains \$,
+# which is a variable reference to everything that reads this file otherwise.
+WUD_AUTH_USER=${WUD_USER}
+WUD_AUTH_PASSWORD=${WUD_PASSWORD}
+WUD_AUTH_HASH='${WUD_HASH}'
 ENVFILE
   )
   own .env

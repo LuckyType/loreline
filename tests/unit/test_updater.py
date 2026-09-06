@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 from collections.abc import Callable
 from pathlib import Path
 
@@ -85,66 +86,132 @@ async def test_rollback_refuses_in_container() -> None:
     assert not any(a[:2] == ["git", "reset"] for a in runner.calls)
 
 
-# --- Docker deployment: the watchtower HTTP trigger --------------------------
+# --- Docker deployment: the WUD HTTP trigger ---------------------------------
+# Two steps, in this order: POST /api/containers/watch to make WUD re-check the
+# registry and report what it found, then POST the container's own trigger route
+# if that report says an update exists. The second step is skipped when it
+# doesn't, because WUD's docker trigger builds the tag to pull out of
+# updateKind.remoteValue, which is undefined until an update is detected.
+
+_WUD_IMAGE = "luckytype/loreline"
+_WATCH_URL = "http://wud:3000/api/containers/watch"
+_TRIGGER_URL = "http://wud:3000/api/containers/c0ffee/triggers/docker/local"
+
+
+def _wud_container(*, update_available: bool = True, image: str = _WUD_IMAGE) -> dict[str, object]:
+    """One entry of WUD's watch list, trimmed to the fields the updater reads."""
+    return {
+        "id": "c0ffee",
+        "name": "loreline-app-1",
+        "watcher": "local",
+        "image": {"name": image, "tag": {"value": "latest"}},
+        "updateAvailable": update_available,
+    }
 
 
 def _in_container_updater(
-    handler: Callable[[httpx.Request], httpx.Response], *, token: str = "s3cret"
+    handler: Callable[[httpx.Request], httpx.Response], *, password: str = "s3cret"
 ) -> tuple[Updater, FakeRunner]:
-    """An updater that believes it's containerised, wired to a fake watchtower."""
+    """An updater that believes it's containerised, wired to a fake WUD."""
     runner = FakeRunner(lambda argv: CommandResult(0, "sha\n", ""))
     updater = Updater(
         app_dir=Path("/app"),
         runner=runner,
         in_container=True,
-        watchtower_url="http://watchtower:8080/v1/update",
-        watchtower_token=token,
+        wud_url="http://wud:3000",
+        wud_user="loreline",
+        wud_password=password,
+        wud_image=_WUD_IMAGE,
         client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
     )
     return updater, runner
 
 
-async def test_update_in_container_triggers_watchtower() -> None:
-    seen: list[httpx.Request] = []
+def _wud_routes(
+    seen: list[httpx.Request],
+    *,
+    containers: list[dict[str, object]] | None = None,
+    trigger: Callable[[httpx.Request], httpx.Response] | None = None,
+) -> Callable[[httpx.Request], httpx.Response]:
+    """Answer the watch call with ``containers``, everything else with ``trigger``."""
+    listed = [_wud_container()] if containers is None else containers
 
     def handle(request: httpx.Request) -> httpx.Response:
         seen.append(request)
-        return httpx.Response(200)
+        if request.url.path == "/api/containers/watch":
+            return httpx.Response(200, json=listed)
+        return trigger(request) if trigger else httpx.Response(200)
 
-    updater, runner = _in_container_updater(handle)
+    return handle
+
+
+async def test_update_in_container_watches_then_triggers_wud() -> None:
+    seen: list[httpx.Request] = []
+    updater, runner = _in_container_updater(_wud_routes(seen))
+
     result = await updater.update()
 
     assert result.ok
-    assert "Watchtower" in result.output
+    assert "WUD" in result.output
     # "triggered", never "complete": the container answering is the one being
     # replaced, so it cannot have watched the update finish.
     assert "complete" not in result.output.lower()
     # One line, so Settings > Client shows it as the message instead of burying
     # it in the output pane.
     assert "\n" not in result.output
-    assert len(seen) == 1
-    assert str(seen[0].url) == "http://watchtower:8080/v1/update"
-    # The header 1.7.1's RequireToken actually compares, not the bare `Token:`
-    # one its docs at that tag also describe.
-    assert seen[0].headers["authorization"] == "Bearer s3cret"
+    # Watch first, then the trigger - and the trigger is addressed by the id the
+    # watch call just reported, never a remembered one.
+    assert [str(r.url) for r in seen] == [_WATCH_URL, _TRIGGER_URL]
+    assert [r.method for r in seen] == ["POST", "POST"]
+    # WUD looks the container up itself, so the trigger carries no body.
+    assert seen[1].content == b""
     # And still no attempt at the source-only script from inside a container.
     assert not any(a[0] == "bash" for a in runner.calls)
 
 
-async def test_update_in_container_treats_a_read_timeout_as_triggered() -> None:
-    """/v1/update answers only once the update it started is over - i.e. never."""
+async def test_update_in_container_sends_basic_auth_on_both_calls() -> None:
+    seen: list[httpx.Request] = []
+    updater, _ = _in_container_updater(_wud_routes(seen))
 
-    def handle(request: httpx.Request) -> httpx.Response:
-        raise httpx.ReadTimeout("timed out", request=request)
+    await updater.update()
 
-    updater, _ = _in_container_updater(handle)
+    # HTTP Basic, not a bearer token: WUD holds only an htpasswd hash of the
+    # password, so the plaintext travels on every request.
+    expected = "Basic " + base64.b64encode(b"loreline:s3cret").decode()
+    assert [r.headers["authorization"] for r in seen] == [expected, expected]
+
+
+async def test_update_in_container_reports_up_to_date_without_triggering() -> None:
+    """No update means no trigger: WUD would try to pull a tag named 'undefined'."""
+    seen: list[httpx.Request] = []
+    updater, _ = _in_container_updater(
+        _wud_routes(seen, containers=[_wud_container(update_available=False)])
+    )
+
     result = await updater.update()
 
     assert result.ok
-    assert "Watchtower" in result.output
+    assert "up to date" in result.output.lower()
+    assert "\n" not in result.output
+    assert [str(r.url) for r in seen] == [_WATCH_URL]
 
 
-async def test_update_in_container_falls_back_when_watchtower_is_absent() -> None:
+async def test_update_in_container_treats_a_read_timeout_as_triggered() -> None:
+    """The trigger recreates the caller, so it can't answer before killing it."""
+    seen: list[httpx.Request] = []
+
+    def times_out(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("timed out", request=request)
+
+    updater, _ = _in_container_updater(_wud_routes(seen, trigger=times_out))
+    result = await updater.update()
+
+    assert result.ok
+    assert "triggered" in result.output.lower()
+    assert len(seen) == 2
+
+
+async def test_update_in_container_falls_back_when_wud_is_absent() -> None:
     def handle(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("connection refused", request=request)
 
@@ -155,14 +222,26 @@ async def test_update_in_container_falls_back_when_watchtower_is_absent() -> Non
     assert "deploy/update.sh" in result.output
 
 
-async def test_update_in_container_without_a_token_never_calls_out() -> None:
+async def test_update_in_container_reports_a_container_wud_does_not_watch() -> None:
+    """WUD is up but the app lost its wud.watch label, or the image was renamed."""
+    seen: list[httpx.Request] = []
+    updater, _ = _in_container_updater(
+        _wud_routes(seen, containers=[_wud_container(image="someone/else")])
+    )
+
+    result = await updater.update()
+
+    assert not result.ok
+    assert "deploy/update.sh" in result.output
+    assert "\n" not in result.output
+    # Nothing else was asked to update in its place.
+    assert [str(r.url) for r in seen] == [_WATCH_URL]
+
+
+async def test_update_in_container_without_a_password_never_calls_out() -> None:
     calls: list[httpx.Request] = []
+    updater, _ = _in_container_updater(_wud_routes(calls), password="")
 
-    def handle(request: httpx.Request) -> httpx.Response:
-        calls.append(request)
-        return httpx.Response(200)
-
-    updater, _ = _in_container_updater(handle, token="")
     result = await updater.update()
 
     assert not result.ok
@@ -170,7 +249,7 @@ async def test_update_in_container_without_a_token_never_calls_out() -> None:
     assert not calls
 
 
-async def test_update_in_container_reports_a_rejected_token() -> None:
+async def test_update_in_container_reports_rejected_credentials() -> None:
     def handle(request: httpx.Request) -> httpx.Response:
         return httpx.Response(401)
 
@@ -178,19 +257,31 @@ async def test_update_in_container_reports_a_rejected_token() -> None:
     result = await updater.update()
 
     assert not result.ok
-    assert "WATCHTOWER_HTTP_API_TOKEN" in result.output
+    assert "LORELINE_WUD_PASSWORD" in result.output
+    assert "WUD_AUTH_BASIC_LORELINE_HASH" in result.output
     assert "\n" not in result.output
 
 
-async def test_rollback_in_container_never_triggers_watchtower() -> None:
-    """Watchtower only moves forward, and cleanup already deleted the old image."""
+async def test_update_in_container_reports_a_failed_trigger() -> None:
+    """WUD answers 500 when its own pull or recreate raised."""
+    seen: list[httpx.Request] = []
+    updater, _ = _in_container_updater(
+        _wud_routes(seen, trigger=lambda request: httpx.Response(500))
+    )
+
+    result = await updater.update()
+
+    assert not result.ok
+    assert "500" in result.output
+    assert "deploy/update.sh" in result.output
+    assert "\n" not in result.output
+
+
+async def test_rollback_in_container_never_triggers_wud() -> None:
+    """WUD only moves forward, and prune already deleted the old image."""
     calls: list[httpx.Request] = []
+    updater, _ = _in_container_updater(_wud_routes(calls))
 
-    def handle(request: httpx.Request) -> httpx.Response:
-        calls.append(request)
-        return httpx.Response(200)
-
-    updater, _ = _in_container_updater(handle)
     result = await updater.rollback("deadbeef")
 
     assert not result.ok

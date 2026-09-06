@@ -164,99 +164,107 @@ container holding the socket. Note what it does not do: it updates the image and
 only the image. Changes to `docker-compose.yml`, the Caddyfile or anything under
 `deploy/` still arrive by `git pull`, which is why `deploy/update.sh` does both.
 
-**Watchtower, if you want that pull to happen without you.** Watchtower is a
-small container that polls the registry and recreates a container when the image
-behind its tag has changed. It is off by default; opt in by name:
+**WUD, if you want the update button to work.** [WUD](https://github.com/getwud/wud)
+("What's Up Docker") is a small container that watches a registry for a newer
+image and can stop, pull and recreate a container onto it. It is off by default;
+opt in by name:
 
 ```bash
-sudo docker compose --profile watchtower up -d
+sudo docker compose --profile wud up -d
 ```
 
-It is scoped by label. The `app` service carries
-`com.centurylinklabs.watchtower.enable=true` and nothing else in
-`docker-compose.yml` does, so Caddy, the docker proxy, the self-hosted STT
-server and the diarizer are never candidates. It checks at 04:00 in the
-container's timezone, UTC unless you set `TZ`, which is roughly the cadence of
-the systemd timer above.
+It is scoped by label. The `app` service carries `wud.watch=true` and nothing
+else in `docker-compose.yml` does, so Caddy, the docker proxy, the self-hosted
+STT server and the diarizer are never candidates. That label is the whole
+mechanism: WUD's watcher takes no name filter and no include/exclude regex, so
+`WUD_WATCHER_LOCAL_WATCHBYDEFAULT=false` plus one label is how the scope is
+kept to one container. It checks at 04:00 in the container's timezone, UTC
+unless you set `TZ`, which is roughly the cadence of the systemd timer above.
 
-The trade, plainly: Watchtower needs the Docker socket, and the Docker socket is
-root on the host. It is the same access the app container is refused at the top
-of this section. The blast radius is smaller than granting it to the app -
-Watchtower is one small binary doing one thing, it is not reachable from your
-LAN, and it never handles anything a user typed - and it is a common and
-reasonable pattern on self-hosted boxes. It is still root on the host, held by a
-container, and the `:ro` on the socket mount does not soften that: a read-only
-bind mount of a unix socket does not make the socket read-only, so Watchtower
-stops, removes and creates containers through it exactly as it needs to. Against
-the systemd timer, which gives no container any Docker access at all, this is
-more privilege inside the stack in exchange for never needing a shell on the
-box. Both are supported; pick on your own risk tolerance.
+**What it does with what it finds is the part that changed.** WUD separates
+noticing an update from applying one, and this repo configures it to notice
+only: the 04:00 check keeps `updateAvailable` current, and applying it waits for
+you to press Settings > Client's "Update now". If you want the old unattended
+behaviour back, set `WUD_AUTO_UPDATE=true` in `.env` and updates land at 04:00
+without being asked.
+
+The trade, plainly: WUD needs the Docker socket, and the Docker socket is root
+on the host. It is the same access the app container is refused at the top of
+this section. The blast radius is smaller than granting it to the app - WUD does
+one thing, it is not reachable from your LAN, and it never handles anything a
+user typed - and it is a common and reasonable pattern on self-hosted boxes. It
+is still root on the host, held by a container. The socket mount is not marked
+`:ro`, and that is not an oversight: a read-only bind mount of a unix socket does
+not make the socket read-only, so the flag would only imply a restriction that
+was never there, and WUD's own examples do not use it. What limits the blast
+radius is the label, not a mount flag. Against the systemd timer, which gives no
+container any Docker access at all, this is more privilege inside the stack in
+exchange for never needing a shell on the box. Both are supported; pick on your
+own risk tolerance.
 
 Three things worth knowing before you enable it:
 
 - **Do not run it alongside `loreline-update.timer`.** The timer rebuilds the
-  image from source, Watchtower replaces it with the registry one, and each
-  undoes the other on its own schedule. Pick one.
+  image from source, WUD replaces it with the registry one, and each undoes the
+  other on its own schedule. Pick one.
 - **An update recreates the container**, which ends a recording that is running
   at the time. 04:00 is picked for that reason. The systemd timer has the same
   property.
-- **Upstream is archived.** containrrr/watchtower was archived in December 2025,
-  and the version pinned here, 1.7.1, is from November 2023. Frozen rather than
-  broken, but nothing is coming to fix it either. The active fork
-  `nickfedor/watchtower` reads the same environment variables and the same
-  label, so it is a one line change in `docker-compose.yml` if you would rather
-  run that. This repo does not point at it by default because nobody here has
-  audited it.
+- **The scope is the Docker host, not this project.** Another container on the
+  same box carrying `wud.watch=true` is a candidate too, whether or not it has
+  anything to do with Loreline.
 
-**With Watchtower running, the update button works again.** Watchtower 1.7.1 can
-also answer an HTTP request that runs its update check immediately, and the app
-can reach that over the compose network. Set both of these in `.env`
-(`deploy/install.sh` writes them for you, whether or not you enabled the
-profile):
+**How the button reaches it.** WUD authenticates with HTTP Basic and holds only
+a hash of the password, so `.env` carries three values, which `deploy/install.sh`
+generates for you whether or not you enabled the profile:
 
 ```bash
-WATCHTOWER_HTTP_API_UPDATE=true
-WATCHTOWER_HTTP_API_TOKEN=<a long random string>
+WUD_AUTH_USER=loreline
+WUD_AUTH_PASSWORD=<the plaintext the app sends>
+WUD_AUTH_HASH='<openssl passwd -apr1 of that plaintext>'
 ```
 
-Settings > Client's "Update now" then triggers exactly the update the 04:00
-check triggers. This is a fourth way to reach one mechanism, not a fourth
-mechanism: without the Watchtower profile there is nothing for the button to
-call, and with it, asking early does what waiting until 04:00 would have done.
+Keep the hash in single quotes: it contains `$`, which is a variable reference
+to anything else that reads that file. Avoid `:` in the password, which the
+library WUD authenticates with cannot parse.
 
-The socket boundary is untouched. The app sends one token-carrying POST to a
-sibling container, holds no Docker access before or after, and can ask for
-nothing beyond "run your check now". What it gets back is nothing worth
-reporting, and the button says so: it reports the update as *triggered*, not
-finished. The container it recreates is the one that answered you, so that
-container is in no position to describe how it ends, and "Update complete" would
-be a guess. You see it land when the app comes back on its own a few minutes
-later, or in `sudo docker compose logs watchtower`.
+The socket boundary is untouched. The app makes two authenticated requests to a
+sibling container and holds no Docker access before or after. The first asks WUD
+to re-check the registry now and answers with what it found; the second, sent
+only if that says an update exists, asks it to apply that update to this app's
+own container. Nothing in either request names an image or a tag: WUD looks the
+container up in its own store and updates it to whatever its own watcher
+decided, so the app cannot ask it to pull something else.
 
-Three more things, these ones specific to the API:
+Both steps have to be there. Triggering without checking first would act on
+however stale the last check was, and worse, WUD builds the tag to pull out of
+the update it detected, so telling it to update a container it believes is
+already current makes it try to pull a tag named `undefined` and fail.
 
-- **Both variables or neither.** Watchtower exits at startup when its API is
-  enabled with an empty token, so half-configuring this is a crash loop, not a
-  disabled feature. With neither set, the button reports what it always
-  reported: update from the host.
-- **The 04:00 check keeps running.** Worth knowing because 1.7.1 does not do
-  that on its own: enabling the API replaces the schedule rather than adding to
-  it, since the API server takes over the process and the cron scheduler is
-  never started at all, silently. `docker-compose.yml` sets
-  `WATCHTOWER_HTTP_API_PERIODIC_POLLS=true` to keep both, which is why you do
-  not have to.
-- **Port 8080 stays on the compose network.** `docker-compose.yml` does not
-  publish it, so the trigger answers the other services and nothing on your LAN.
-  In 1.7.1 that port is hardcoded and the API binds every interface inside the
-  container, so publishing it is the one thing not to do here.
+What the button reports is therefore one of three things, and never "complete":
+that there was nothing to update, that an update was *triggered*, or a plain
+reason it could not. The container being recreated is the one that answered you,
+so it is in no position to describe how it ends, and "Update complete" would be
+a guess. You see it land when the app comes back on its own a few minutes later,
+or in `sudo docker compose logs wud`.
 
-Watchtower's notifications are its own, not Loreline's: it does not appear under
-Settings, Alerts and this repo does not wire it in there. It speaks
-[shoutrrr](https://containrrr.dev/shoutrrr/) URLs, so set
-`WATCHTOWER_NOTIFICATION_URL` in `.env` if you want to hear when it updated
-something. See [`.env.example`](./.env.example). It will also appear under
-Settings, Services as a container the UI cannot start or stop, since only the
-STT and diarization services are controllable from there.
+Two more things, these ones specific to the API:
+
+- **Unset is a working state, unlike before.** With no credentials the button
+  reports what it always reported: update from the host. WUD started without
+  them allows anonymous access rather than refusing to boot, which is survivable
+  only because of the next point.
+- **Port 3000 stays on the compose network.** `docker-compose.yml` does not
+  publish it, so WUD answers the other services and nothing on your LAN. This
+  matters more than it did for Watchtower: WUD serves a full web UI from the
+  same port as its API, with no switch to serve one without the other.
+
+WUD's notifications are its own, not Loreline's: it does not appear under
+Settings, Alerts and this repo does not wire it in there. It has its own
+triggers for Discord, Slack, ntfy, SMTP and a couple of dozen others, all
+configured through `WUD_TRIGGER_*` environment variables if you want them. It
+will also appear under Settings, Services as a container the UI cannot start or
+stop, since only the STT and diarization services are controllable from there.
 
 None of the registry paths work until that workflow has actually run on GitHub
 and the package it publishes has been switched to public. A GHCR package is

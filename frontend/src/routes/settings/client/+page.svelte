@@ -142,10 +142,11 @@ async function runUpdate() {
 		revision = updateResult.new_commit
 		// A single-line output is one clear sentence about the outcome, written
 		// by the side that actually knows it: "not available in a Docker
-		// deployment", or - once that deployment can hand the job to Watchtower -
-		// that the update was only *started*. Show it verbatim instead of a
-		// verdict this page would be guessing at, and instead of pointing at the
-		// <pre> below, which a one-line output doesn't render anyway.
+		// deployment", or - once that deployment can hand the job to WUD -
+		// that there was nothing to update, or that the update was only
+		// *started*. Show it verbatim instead of a verdict this page would be
+		// guessing at, and instead of pointing at the <pre> below, which a
+		// one-line output doesn't render anyway.
 		const single = updateResult.output && !updateResult.output.includes('\n')
 		if (single) {
 			opsMessage = updateResult.output
