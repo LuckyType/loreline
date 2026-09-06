@@ -123,10 +123,8 @@ def _build_state(
         app_dir=settings.app_dir,
         unit=settings.systemd_unit,
         runner=command_runner,
-        wud_url=settings.wud_url,
-        wud_user=settings.wud_user,
-        wud_password=settings.wud_password,
-        wud_image=settings.wud_image,
+        updater_url=settings.updater_url,
+        updater_token=settings.updater_token,
     )
     autostart = Autostart(unit=settings.systemd_unit, runner=command_runner)
     transcript_bus: EventBus[TranscriptEvent] = EventBus()

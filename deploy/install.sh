@@ -260,26 +260,19 @@ if [[ -z $AUTH_PASSWORD ]]; then
   GENERATED_PASSWORD=1
 fi
 
-# WUD's HTTP Basic credentials. Generated unprompted, whether or not this box
-# ever runs the wud profile: they cost three lines in .env, nothing else reads
-# them, and it means a later `docker compose --profile wud up -d` comes up with
-# the web UI's update button already working instead of needing a hand-edited
-# .env first. Same generator as the login password above, which also keeps the
-# password free of the `:` that WUD's basic-auth library cannot parse.
+# The updater service's bearer token. Generated unprompted, whether or not this
+# box ever runs the updater profile: it costs one line in .env, nothing else
+# reads it, and it means a later `docker compose --profile updater up -d` comes
+# up with the web UI's update button already working instead of needing a
+# hand-edited .env first. Same generator as the login password above.
 #
-# Written as a pair on purpose: WUD checks an htpasswd hash and never sees a
-# plaintext password, while the app has to send that plaintext, since that is
-# what HTTP Basic is. Only openssl can produce the hash here, so without it
-# both are left empty - that disables the update button and nothing else,
-# whereas a hash this script could not generate would fail at 401 instead.
-WUD_USER=loreline
-WUD_PASSWORD=$(gen_password)
-if command -v openssl &>/dev/null; then
-  WUD_HASH=$(openssl passwd -apr1 "$WUD_PASSWORD")
-else
-  WUD_PASSWORD=""
-  WUD_HASH=""
-fi
+# One value rather than the pair its predecessor needed: the app sends this
+# token and the updater service compares it, both reading the same .env entry,
+# so there is no hash to keep in step with a plaintext and no second way for the
+# two halves to drift apart. It also needs no openssl - gen_password falls back
+# to /dev/urandom - so unlike that pair there is no box where this quietly comes
+# out empty and leaves the button dead.
+UPDATER_TOKEN=$(gen_password)
 
 # --- docker -----------------------------------------------------------------
 # No pipe into `grep -q` here on purpose: it exits at the first match, which
@@ -333,14 +326,15 @@ if ((WRITE_ENV == 1)); then
 LORELINE_PORT=${LORELINE_PORT}
 LORELINE_AUTH_PASSWORD=${AUTH_PASSWORD}
 
-# Read only while the optional wud profile is running. Together they let the web
-# UI's update button ask WUD to check for a newer image and apply it;
-# docker-compose.yml passes the username and password to the app, and the
-# username and hash to WUD. The hash is single-quoted because it contains \$,
-# which is a variable reference to everything that reads this file otherwise.
-WUD_AUTH_USER=${WUD_USER}
-WUD_AUTH_PASSWORD=${WUD_PASSWORD}
-WUD_AUTH_HASH='${WUD_HASH}'
+# Read only while the optional updater profile is running. The token lets the
+# web UI's update button ask the updater service to pull a newer image and
+# recreate the app container; docker-compose.yml hands the same value to both
+# sides, so they cannot disagree. UPDATER_REPO_DIR is this checkout's path on
+# this host, and that service is given the repo at the identical path inside
+# itself: the two have to match, or the app container would be recreated against
+# bind mounts that do not exist here.
+UPDATER_TOKEN=${UPDATER_TOKEN}
+UPDATER_REPO_DIR=${APP_DIR}
 ENVFILE
   )
   own .env

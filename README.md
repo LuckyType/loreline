@@ -227,107 +227,130 @@ is not here at all, whereas `update.sh` builds whatever you have checked out. On
 a Raspberry Pi, where that build is the slow part by a wide margin, the trade is
 usually worth making. On a box that builds in two minutes it buys much less.
 
-**WUD, if you want the update button to work.** [WUD](https://github.com/getwud/wud)
-("What's Up Docker") is a small container that watches a registry for a newer
-image and can stop, pull and recreate a container onto it. It is off by default;
-opt in by name:
+**The `updater` service, if you want the update button to work.** The button in
+Settings > Client cannot update a Docker deployment on its own, for the reason at
+the top of this section. What it can do is hand the job to a container that
+already holds that access, and that container is in this repo:
+`services/updater/`, a single Python file of a couple of hundred lines, most of
+them comments. It is off by default; opt in by name:
 
 ```bash
-sudo docker compose --profile wud up -d
+sudo docker compose --profile updater up -d
 ```
 
-It is scoped by label. The `app` service carries `wud.watch=true` and nothing
-else in `docker-compose.yml` does, so Caddy, the docker proxy, the self-hosted
-STT server and the diarizer are never candidates. That label is the whole
-mechanism: WUD's watcher takes no name filter and no include/exclude regex, so
-`WUD_WATCHER_LOCAL_WATCHBYDEFAULT=false` plus one label is how the scope is
-kept to one container. It checks at 04:00 in the container's timezone, UTC
-unless you set `TZ`, which is roughly the cadence of the systemd timer above.
+It answers exactly one route, `POST /update`, gated by a bearer token, and that
+route takes no arguments at all - no image, no tag, no container id, no command.
+The most a leaked token buys is the same update the button performs. What it runs
+is `deploy/update-fast.sh`, the same script documented above from the same
+checkout, so there is one copy of the update logic on the box rather than two
+that can drift apart.
 
-**What it does with what it finds is the part that changed.** WUD separates
-noticing an update from applying one, and this repo configures it to notice
-only: the 04:00 check keeps `updateAvailable` current, and applying it waits for
-you to press Settings > Client's "Update now". If you want the old unattended
-behaviour back, set `WUD_AUTO_UPDATE=true` in `.env` and updates land at 04:00
-without being asked.
+**It reimplements nothing about registries, deliberately.** This is the third
+answer this feature has had and the first that is ours. Watchtower was archived
+upstream and its last release cannot talk to a current Docker Engine at all: its
+bundled client negotiates below the API 1.44 floor that Engine 29 enforces, so on
+the real box every call it made was refused. WUD replaced it, started cleanly,
+and then could not see `ghcr.io/luckytype/loreline` even after the package was
+made public - its GHCR provider never performs the anonymous OCI token exchange,
+sending a placeholder where a bearer token belongs, so it demands an access token
+for a package that needs none. Both faults were the same fault: a partial
+reimplementation of something Docker's own client already does correctly. This
+one shells out to the real `docker` and `docker compose` CLIs and has no registry
+code of its own.
 
-The trade, plainly: WUD needs the Docker socket, and the Docker socket is root
-on the host. It is the same access the app container is refused at the top of
-this section. The blast radius is smaller than granting it to the app - WUD does
-one thing, it is not reachable from your LAN, and it never handles anything a
-user typed - and it is a common and reasonable pattern on self-hosted boxes. It
-is still root on the host, held by a container. The socket mount is not marked
-`:ro`, and that is not an oversight: a read-only bind mount of a unix socket does
-not make the socket read-only, so the flag would only imply a restriction that
-was never there, and WUD's own examples do not use it. What limits the blast
-radius is the label, not a mount flag. Against the systemd timer, which gives no
-container any Docker access at all, this is more privilege inside the stack in
-exchange for never needing a shell on the box. Both are supported; pick on your
-own risk tolerance.
+**What it needs.** Two entries in `.env`, both written by `deploy/install.sh`
+whether or not you enabled the profile:
 
-Three things worth knowing before you enable it:
+```bash
+UPDATER_TOKEN=<random string; the app sends it, the service checks it>
+UPDATER_REPO_DIR=/opt/loreline   # this checkout's path on this host
+```
+
+On a box installed before this existed, `deploy/install.sh` leaves an existing
+`.env` alone, so add those two lines by hand and delete the three stale
+`WUD_AUTH_*` ones sitting next to them, then `sudo docker compose up -d app` so
+the app picks the token up. Until you do, the button reports what it always
+reported: that updates run from the host.
+
+`UPDATER_REPO_DIR` is not decoration. The updater container is given the checkout
+at that same absolute path inside itself, because it drives the *host's* Docker
+daemon: the relative bind mounts in `docker-compose.yml` (`./data`,
+`./Caddyfile`) are resolved against the project directory inside the container
+and then handed to the host to interpret. Mount the repo anywhere else and the
+recreated app container would bind a host path that does not exist, which Docker
+would helpfully create, empty - and the app would come back appearing to have
+lost every session. The same equality is also what makes Compose derive the same
+project name on both sides, so the update reaches the running stack instead of
+starting a second one beside it. If you cloned to `/opt/loreline` the default is
+already right; the service refuses to run, naming the variable, rather than
+guess.
+
+**The trade, plainly:** this container gets the Docker socket, and the Docker
+socket is root on the host. It is the same access the app container is refused at
+the top of this section. It cannot go behind the socket proxy the app uses,
+because that proxy exists to refuse `POST /containers/create` and creating
+containers is the entire job here. The socket mount is not marked `:ro`, and that
+is not an oversight: a read-only bind mount of a unix socket does not make the
+socket read-only, since the kernel refuses writes to files, directories and
+symlinks on a read-only mount but not the connect-and-send path a socket is
+actually used through. The flag would only imply a restriction that was never
+there. For the same reason the repo mount is not trimmed down to a handful of
+files: a container holding the socket can start another container with any mount
+it likes, so narrowing its own would be decoration rather than a boundary.
+
+What does narrow it is the shape of the endpoint and the scope of what it runs.
+`docker compose up -d --no-build app` names one service, so Caddy, the socket
+proxy, the self-hosted STT server and the diarizer are never candidates. That is
+tighter than either predecessor managed: both scoped themselves with a container
+label, which is host-wide, so any other container on the box carrying that label
+was fair game too. This one cannot be asked about another container at all.
+
+Also worth knowing before you enable it:
 
 - **Do not run it alongside `loreline-update.timer`.** The timer rebuilds the
-  image from source, WUD replaces it with the registry one, and each undoes the
+  image from source, this replaces it with the registry one, and each undoes the
   other on its own schedule. Pick one.
-- **An update recreates the container**, which ends a recording that is running
-  at the time. 04:00 is picked for that reason. The systemd timer has the same
-  property.
-- **The scope is the Docker host, not this project.** Another container on the
-  same box carrying `wud.watch=true` is a candidate too, whether or not it has
-  anything to do with Loreline.
+- **It applies an update only when you press the button.** There is no scheduler
+  in it, which is the other half of the previous point. Unattended updates are
+  the systemd timer's job.
+- **An update recreates the app container**, which ends a recording running at
+  the time, and it needs the GHCR package to be pullable from this box - the same
+  prerequisite `deploy/update-fast.sh` has above, reported the same way.
+- **It does not update itself.** That is what makes an honest answer possible,
+  below; the flip side is that a release changing `services/updater/` is not
+  applied by the button. Run
+  `sudo docker compose --profile updater up -d --build updater` for that.
+- **git runs in the checkout as root**, since that is what the container is, so
+  files it writes there end up root-owned. A later host-side `git pull` still
+  works, because git creates and renames rather than writing existing files in
+  place, but `ls -l` will show a mixture of owners.
 
-**How the button reaches it.** WUD authenticates with HTTP Basic and holds only
-a hash of the password, so `.env` carries three values, which `deploy/install.sh`
-generates for you whether or not you enabled the profile:
+**What the button reports, and why it can be believed.** The update runs in two
+halves. The first, `git pull` then `docker compose pull app`, touches nothing
+that is running, so the app is alive to hear how it went; the answer goes out,
+and only then does the second half recreate the app container. So the button
+tells you one of:
 
-```bash
-WUD_AUTH_USER=loreline
-WUD_AUTH_PASSWORD=<the plaintext the app sends>
-WUD_AUTH_HASH='<openssl passwd -apr1 of that plaintext>'
-```
+- *Already up to date.* Nothing was pulled, nothing applied, nothing restarted.
+  This is the common case, and it is now a real answer rather than a guess.
+- *A newer image was pulled and the app is being recreated onto it.* The page
+  loses its connection a moment later and comes back on its own.
+- *The update script's own output*, verbatim, if it failed - including the
+  specific explanation `deploy/update-fast.sh` writes for the GHCR-visibility
+  case, rather than a generic error in its place.
 
-Keep the hash in single quotes: it contains `$`, which is a variable reference
-to anything else that reads that file. Avoid `:` in the password, which the
-library WUD authenticates with cannot parse.
+That split is not decorative. Run in one piece, `docker compose up -d` stops the
+app container while the app container is still waiting for the answer: Compose
+waits for it to exit, uvicorn waits for the in-flight request, and that request
+waits on Compose. The cycle breaks only when Docker kills the app at the end of
+its stop grace period, so a single-shot version can never report to the caller it
+is about to replace. Both previous attempts had exactly that problem and had to
+answer "triggered, no idea how it went".
 
-The socket boundary is untouched. The app makes two authenticated requests to a
-sibling container and holds no Docker access before or after. The first asks WUD
-to re-check the registry now and answers with what it found; the second, sent
-only if that says an update exists, asks it to apply that update to this app's
-own container. Nothing in either request names an image or a tag: WUD looks the
-container up in its own store and updates it to whatever its own watcher
-decided, so the app cannot ask it to pull something else.
-
-Both steps have to be there. Triggering without checking first would act on
-however stale the last check was, and worse, WUD builds the tag to pull out of
-the update it detected, so telling it to update a container it believes is
-already current makes it try to pull a tag named `undefined` and fail.
-
-What the button reports is therefore one of three things, and never "complete":
-that there was nothing to update, that an update was *triggered*, or a plain
-reason it could not. The container being recreated is the one that answered you,
-so it is in no position to describe how it ends, and "Update complete" would be
-a guess. You see it land when the app comes back on its own a few minutes later,
-or in `sudo docker compose logs wud`.
-
-Two more things, these ones specific to the API:
-
-- **Unset is a working state, unlike before.** With no credentials the button
-  reports what it always reported: update from the host. WUD started without
-  them allows anonymous access rather than refusing to boot, which is survivable
-  only because of the next point.
-- **Port 3000 stays on the compose network.** `docker-compose.yml` does not
-  publish it, so WUD answers the other services and nothing on your LAN. This
-  matters more than it did for Watchtower: WUD serves a full web UI from the
-  same port as its API, with no switch to serve one without the other.
-
-WUD's notifications are its own, not Loreline's: it does not appear under
-Settings, Alerts and this repo does not wire it in there. It has its own
-triggers for Discord, Slack, ntfy, SMTP and a couple of dozen others, all
-configured through `WUD_TRIGGER_*` environment variables if you want them. It
-will also appear under Settings, Services as a container the UI cannot start or
-stop, since only the STT and diarization services are controllable from there.
+**The socket boundary is untouched.** The app makes one authenticated request to
+a sibling container and holds no Docker access before or after. The updater will
+also appear under Settings, Services as a container the UI cannot start or stop,
+since only the STT and diarization services are controllable from there.
 
 None of the registry paths work until that workflow has actually run on GitHub
 and the package it publishes has been switched to public. A GHCR package is

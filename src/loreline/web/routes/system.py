@@ -207,7 +207,7 @@ async def revision(request: Request) -> RevisionResponse:
 
 @router.post("/update", dependencies=_auth)
 async def trigger_update(request: Request) -> UpdateResult:
-    """Run the self-update: git pull + uv sync + restart, or a WUD trigger in Docker."""
+    """Run the self-update: git pull + uv sync + restart, or the updater service in Docker."""
     return await get_state(request).updater.update()
 
 

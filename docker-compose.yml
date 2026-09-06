@@ -15,12 +15,13 @@
 # (`COMPOSE_PROFILES=local-stt,diarization` in .env works too, for a
 # permanent default without typing the flag every time.)
 #
-# There is a third profile, `wud`, and it is opt-in for a different reason
+# There is a third profile, `updater`, and it is opt-in for a different reason
 # than those two: not a download, but host access. It hands a container the
 # Docker socket so it can replace this stack's `app` container with a newer
-# published image. Read the README section "Updating" before enabling it - it
-# is an alternative to deploy/update.sh, not an upgrade over it, and it is off
-# unless you ask for it by name.
+# published image, which is what makes the web UI's "Update now" button work
+# here. Read the README section "Updating" before enabling it - it is an
+# alternative to deploy/update.sh, not an upgrade over it, and it is off unless
+# you ask for it by name.
 
 services:
   app:
@@ -32,21 +33,13 @@ services:
     # from this checkout and simply tags the result with this name. What the
     # `image:` line adds is that `docker compose pull` now has something to
     # fetch instead of printing "Skipped - No image to be pulled", which is
-    # what the optional wud service below needs to exist at all.
+    # what deploy/update-fast.sh, and the optional updater service below,
+    # need to exist at all.
     #
     # The image does not exist until that workflow has actually run on GitHub,
     # and a GHCR package is private on first publish - so until it is switched
     # to public, pulling it needs `docker login ghcr.io` first.
     image: ghcr.io/luckytype/loreline:latest
-    labels:
-      # Read by the optional wud service below (it runs with
-      # WATCHBYDEFAULT=false, so an unlabelled container is ignored entirely -
-      # that is WUD's only container-scoping mechanism, there is no name or
-      # regex filter on the watcher). This is the only container in this file
-      # that carries it, deliberately: Caddy, the docker proxy, the STT server
-      # and the diarizer are other people's images, and replacing those on a
-      # box that holds session audio is a different risk nobody here reviewed.
-      wud.watch: "true"
     ports:
       - "${LORELINE_PORT:-8000}:8000"
     # deploy/install.sh writes .env (login password, port). Optional so a bare
@@ -60,18 +53,21 @@ services:
       LORELINE_LOG_JSON: "true"
       # Unset this to turn Settings > Services off entirely.
       LORELINE_DOCKER_API: http://docker-proxy:2375
-      # Lets the web UI's "Update now" button drive the optional wud service
-      # below, over the compose network. Note what this is not: the app still
-      # has no Docker socket and no path to one. It sends two authenticated
-      # HTTP requests to a container that already holds that access for its own
-      # reason, and learns nothing back beyond whether an update exists - the
-      # boundary described at the bottom of this file is unmoved. The username
-      # is the same .env entry WUD reads below, so the two halves can't drift
-      # apart; the password is the plaintext whose hash WUD holds, because
-      # HTTP Basic has the client send the password itself. Empty (the default)
-      # leaves the button reporting that updates run from the host, as before.
-      LORELINE_WUD_USER: ${WUD_AUTH_USER:-}
-      LORELINE_WUD_PASSWORD: ${WUD_AUTH_PASSWORD:-}
+      # Lets the web UI's "Update now" button drive the optional updater
+      # service below, over the compose network. Note what this is not: the app
+      # still has no Docker socket and no path to one. It sends one
+      # authenticated HTTP request, carrying no arguments, to a container that
+      # already holds that access for its own reason - the boundary described
+      # at the bottom of this file is unmoved. Both halves read the same .env
+      # entry, so they cannot drift apart. Empty (the default) leaves the
+      # button reporting that updates run from the host, as before.
+      #
+      # Written as ${UPDATER_TOKEN:-} rather than a bare `UPDATER_TOKEN:`,
+      # deliberately: the bare form omits the variable from the container
+      # entirely when .env does not set it, while this one always delivers it,
+      # empty if need be. Both read as "no token" to the code on either side,
+      # but only one of them is the same thing twice.
+      LORELINE_UPDATER_TOKEN: ${UPDATER_TOKEN:-}
       # Peers whose X-Forwarded-Proto this app believes when it decides whether
       # to mark the login cookie Secure. This is the private range Compose puts
       # its own network in, so it covers the caddy service below - and, what
@@ -175,92 +171,99 @@ services:
       - ./models:/models:ro
     restart: unless-stopped
 
-  # Opt-in registry updates, for people who want the box to update itself
-  # without a shell on it and without a git checkout:
+  # Opt-in registry updates, for people who want the box to update itself from
+  # the web UI without a shell on it:
   #
-  #   docker compose --profile wud up -d
+  #   docker compose --profile updater up -d
   #
-  # WUD ("What's Up Docker") polls GHCR for a newer `app` image and can stop
-  # the container, pull, and recreate it with the same config. That is a
-  # different mechanism from deploy/update.sh (git pull + rebuild on a systemd
-  # timer), not a better one - see the README section "Updating" for the choice
-  # between them. Running both is the one combination to avoid: update.sh
-  # rebuilds the image locally and WUD replaces it with the registry one, so
-  # each undoes the other on its own schedule and the container is recreated
-  # more often than either alone.
+  # It is a different mechanism from deploy/update.sh (git pull + rebuild on a
+  # systemd timer), not a better one - see the README section "Updating" for the
+  # choice between them. Running both is the one combination to avoid: update.sh
+  # rebuilds the image locally and this replaces it with the registry one, so
+  # each undoes the other on its own schedule.
   #
-  # Note what this profile does by default, because it changed: detection runs
-  # on the cron below, but *applying* an update waits for the web UI's Update
-  # button (WUD_TRIGGER_DOCKER_LOCAL_AUTO below is false). Set WUD_AUTO_UPDATE
-  # in .env to restore unattended updates at that cron time.
+  # This is Loreline's own, which is the third answer this feature has had and
+  # the reason it stopped being someone else's. containrrr/watchtower was
+  # archived upstream and its bundled Docker client negotiates below the API
+  # 1.44 floor Engine 29 enforces, so on the real box every call it made was
+  # refused. WUD, which replaced it, started cleanly but cannot see
+  # ghcr.io/luckytype/loreline even now that the package is public: its GHCR
+  # provider never performs the anonymous OCI token exchange, sending a
+  # placeholder where a bearer token belongs, so it demands an access token for
+  # a package that needs none. Both faults were the same fault - a
+  # reimplementation of something Docker already does correctly. This service
+  # reimplements nothing. It runs deploy/update-fast.sh, which runs the real
+  # `docker` and `docker compose` CLIs. See services/updater/updater.py; it is
+  # deliberately one short file, because of what it is mounted with.
   #
   # What you are agreeing to by starting it: this container gets the raw Docker
   # socket, which is root-equivalent on the host. It cannot go behind
   # deploy/docker-proxy.Caddyfile the way the app does, because that proxy
   # exists specifically to refuse POST /containers/create, and creating
-  # containers is the entire job here. The mount below is deliberately not
+  # containers is the entire job here. The socket mount is deliberately not
   # `:ro`: a read-only bind mount of a *unix socket* does not make the socket
-  # read-only anyway (the kernel's read-only check covers regular files,
-  # directories and symlinks, not socket I/O), so the flag would only imply a
-  # limit that isn't there, and WUD's own compose examples don't use it. What
-  # actually limits the blast radius is the label filter, not a mount flag.
+  # read-only anyway (the kernel refuses writes to regular files, directories
+  # and symlinks on a read-only mount, not the connect-and-send path a socket is
+  # actually used through), so the flag would only imply a limit that isn't
+  # there. For the same reason the repo mount below is not narrowed to a handful
+  # of files: a container holding the socket can start another container with
+  # any mount it likes, so trimming its own would be decoration, not a boundary.
   #
-  # Why this and not watchtower, which used to be here: containrrr/watchtower
-  # was archived in December 2025, and its last release, 1.7.1 from November
-  # 2023, does not work on a current Docker Engine at all - its bundled client
-  # negotiates an API version below the 1.44 floor that Engine 29 enforces, so
-  # every call is refused. The maintained fork does not disclose being a fork,
-  # which is not a thing to hand the Docker socket. WUD is its own project
-  # (MIT, active, ~3.8k stars) and talks to Docker through dockerode, which
-  # tracks current API versions.
-  wud:
-    image: getwud/wud:8.4.0
-    profiles: ["wud"]
+  # What does limit it is the shape of the endpoint. This service answers
+  # exactly one route, POST /update, and that route takes no arguments at all -
+  # no image, no tag, no container id, no command - so the most a leaked token
+  # buys is the update the button already performs. And that update names one
+  # service, `app`, so Caddy, the docker proxy, the STT server and the diarizer
+  # are never candidates. Both predecessors scoped themselves with a label
+  # instead, which is host-wide: any other container on the box carrying it was
+  # fair game too. This one cannot be asked about another container at all.
+  #
+  # It never updates itself, which is the simplification that makes an honest
+  # answer possible: the container running the update is not the container being
+  # replaced. The flip side is that a release which changes this service is not
+  # applied by the button - run
+  # `docker compose --profile updater up -d --build updater` on the host for
+  # that, as the README's "Updating" section says.
+  updater:
+    build: ./services/updater
+    profiles: ["updater"]
     environment:
-      # Container scoping, and the only mechanism WUD has for it: its watcher
-      # takes no name filter and no include/exclude regex, just this default
-      # plus the `wud.watch` label, which in this file only `app` carries. As
-      # with watchtower before it, the scope is the whole Docker host rather
-      # than this compose project: another container on the box carrying that
-      # same label is fair game too.
-      WUD_WATCHER_LOCAL_WATCHBYDEFAULT: "false"
-      # 04:00 daily, in this container's timezone, which is UTC unless TZ is
-      # set below. Five fields, ordinary cron - WUD's own default is hourly.
-      # A fixed quiet hour because applying an update recreates the app
-      # container, which ends a recording that happens to be running. Roughly
-      # the cadence of deploy/loreline-update.timer when that is enabled.
-      WUD_WATCHER_LOCAL_CRON: "0 4 * * *"
-      # false means "detect, but wait to be asked". WUD keeps watching on the
-      # cron above and keeps its updateAvailable verdict current; it just does
-      # not act on it, so the web UI's Update button is what applies an update
-      # (see the app service's LORELINE_WUD_USER, and the README's "Updating").
-      # Set WUD_AUTO_UPDATE=true in .env for unattended updates at 04:00.
-      WUD_TRIGGER_DOCKER_LOCAL_AUTO: ${WUD_AUTO_UPDATE:-false}
-      # Delete the image that was replaced. Not optional in practice: the image
-      # is a couple of GB, and without this every update leaves the old copy
-      # behind until the Pi's card is full.
-      WUD_TRIGGER_DOCKER_LOCAL_PRUNE: "true"
-      # HTTP Basic credentials for WUD's own API, which is what the app
-      # authenticates with. WUD stores the password only as an htpasswd hash,
-      # so .env carries both that hash and the plaintext the app sends;
-      # deploy/install.sh generates a matching pair. Leave both unset and WUD
-      # allows anonymous access instead, which is survivable only because the
-      # port below is not published. Note WUD does not crash on a bad or empty
-      # hash the way watchtower did on an empty token: it logs, registers no
-      # strategy, and answers 401, and the button reports exactly that.
-      WUD_AUTH_BASIC_LORELINE_USER: ${WUD_AUTH_USER:-}
-      WUD_AUTH_BASIC_LORELINE_HASH: ${WUD_AUTH_HASH:-}
-      TZ: ${TZ:-UTC}
-    # Reachable at http://wud:3000 from the other services and from nowhere
-    # else: no `ports:` here, deliberately. `expose` publishes nothing -
-    # containers on a compose network can already reach each other's ports - it
-    # only records which port the app is expected to use. WUD serves a full web
-    # UI from this same port with no switch to turn it off, on top of an API
-    # that recreates containers, and neither has any business answering the LAN.
-    expose:
-      - "3000"
+      # The same .env entry the app service reads above, so the two halves
+      # cannot drift apart. Empty means no token is configured, and every
+      # request is refused with a message saying exactly that - an unset token
+      # is never a way in.
+      UPDATER_TOKEN: ${UPDATER_TOKEN:-}
+      # This checkout's path on the host, mounted below at that same path inside
+      # the container. The equality is load-bearing and not tidiness: this
+      # container drives the *host's* daemon, so the relative bind mounts in this
+      # file (./data, ./Caddyfile) are resolved against the project directory
+      # here and then handed to the host to interpret. Mount the repo at some
+      # other path and the recreated app container would bind a host path that
+      # does not exist, which Docker would helpfully create, empty - and the app
+      # would come back appearing to have lost every session. The same equality
+      # is also what makes Compose derive the same project name on both sides,
+      # so this updates the running stack instead of starting a second one
+      # beside it.
+      #
+      # /opt/loreline is where the README and deploy/install.sh put it. Set
+      # UPDATER_REPO_DIR in .env if this checkout lives anywhere else - the
+      # service refuses to run, naming that variable, rather than guess.
+      UPDATER_REPO_DIR: ${UPDATER_REPO_DIR:-/opt/loreline}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      # Read-write, which the `git pull --ff-only` half of the update needs;
+      # everything after that only reads. Note that git runs here as root
+      # against a checkout owned by whoever cloned it, so objects and files it
+      # writes end up root-owned. A later host-side `git pull` still works -
+      # git creates and renames rather than writing existing files in place -
+      # but `ls -l` in the checkout will show a mixture.
+      - ${UPDATER_REPO_DIR:-/opt/loreline}:${UPDATER_REPO_DIR:-/opt/loreline}
+    # Reachable at http://updater:8080 from the other services and from nowhere
+    # else: no `ports:` here, deliberately. `expose` publishes nothing -
+    # containers on a compose network can already reach each other's ports - it
+    # only records which port the app is expected to use.
+    expose:
+      - "8080"
     restart: unless-stopped
 
 volumes:

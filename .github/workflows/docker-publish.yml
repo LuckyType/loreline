@@ -3,7 +3,7 @@
 # Pi). Nothing in the repo depends on the result. `docker compose up -d --build`
 # and deploy/update.sh keep building locally exactly as they did before this
 # workflow existed; a published image is what makes `docker compose pull` and
-# the optional wud profile mean anything at all (see docker-compose.yml).
+# the optional updater profile mean anything at all (see docker-compose.yml).
 #
 # Two things worth knowing before this is turned loose:
 #

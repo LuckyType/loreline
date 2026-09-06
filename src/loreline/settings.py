@@ -54,40 +54,23 @@ class Settings(BaseSettings):
             "Enables Settings > Services; blank disables it."
         ),
     )
-    # --- Ops / self-update: WUD trigger (Docker deployments only) ---
+    # --- Ops / self-update: the updater service (Docker deployments only) ---
     # Read only when the app is running in a container, where its own
-    # git-and-systemd update path cannot work. All four are ignored otherwise.
-    wud_url: str = Field(
-        default="http://wud:3000",
+    # git-and-systemd update path cannot work. Both are ignored otherwise.
+    updater_url: str = Field(
+        default="http://updater:8080",
         description=(
-            "Base URL of the optional WUD (What's Up Docker) service on the compose "
-            "network, with no trailing path. Only consulted in a Docker deployment, "
-            "and only when credentials are set. Blank disables the in-app trigger."
+            "Base URL of the optional updater service on the compose network, with no "
+            "trailing path. Only consulted in a Docker deployment, and only when a "
+            "token is set. Blank disables the in-app trigger."
         ),
     )
-    wud_user: str = Field(
+    updater_token: str = Field(
         default="",
         description=(
-            "Username for WUD's HTTP Basic auth, matching its "
-            "WUD_AUTH_BASIC_LORELINE_USER. Blank (the default) leaves the in-app "
-            "Update button reporting that updates run from the host."
-        ),
-    )
-    wud_password: str = Field(
-        default="",
-        description=(
-            "Password for the above. WUD holds only an htpasswd hash of it "
-            "(WUD_AUTH_BASIC_LORELINE_HASH); this is the plaintext that hashes to "
-            "it. Blank disables the in-app trigger, as a blank username does."
-        ),
-    )
-    wud_image: str = Field(
-        default="luckytype/loreline",
-        description=(
-            "Image name identifying this app's own container in WUD's watch list, "
-            "registry host stripped (WUD reports ghcr.io/luckytype/loreline as "
-            "luckytype/loreline). Matched on every trigger, because the Docker "
-            "container id changes every time the container is recreated."
+            "Bearer token the updater service accepts, matching its UPDATER_TOKEN. "
+            "Blank (the default) leaves the in-app Update button reporting that "
+            "updates run from the host."
         ),
     )
     disk_alert_threshold_mb: int = Field(
