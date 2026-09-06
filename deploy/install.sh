@@ -167,6 +167,13 @@ if [[ -z $AUTH_PASSWORD ]]; then
   GENERATED_PASSWORD=1
 fi
 
+# Watchtower's HTTP API token. Generated unprompted, whether or not this box
+# ever runs the watchtower profile: it costs one line in .env, nothing else
+# reads it, and it means a later `docker compose --profile watchtower up -d`
+# comes up with the web UI's update button already working instead of needing a
+# hand-edited .env first. Same generator as the login password above.
+WATCHTOWER_TOKEN=$(gen_password)
+
 # --- docker -----------------------------------------------------------------
 # No pipe into `grep -q` here on purpose: it exits at the first match, which
 # SIGPIPEs apt-cache, and `set -o pipefail` then reports the whole pipeline as
@@ -218,6 +225,14 @@ if ((WRITE_ENV == 1)); then
 # Written by deploy/install.sh - see .env.example for every available option.
 LORELINE_PORT=${LORELINE_PORT}
 LORELINE_AUTH_PASSWORD=${AUTH_PASSWORD}
+
+# Read only while the optional watchtower profile is running. Together they let
+# the web UI's update button ask Watchtower to run its update check now instead
+# of at 04:00; docker-compose.yml gives the app the same token so it can. Both
+# lines or neither - Watchtower exits at startup if its API is enabled with an
+# empty token.
+WATCHTOWER_HTTP_API_UPDATE=true
+WATCHTOWER_HTTP_API_TOKEN=${WATCHTOWER_TOKEN}
 ENVFILE
   )
   own .env

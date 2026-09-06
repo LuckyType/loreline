@@ -140,14 +140,17 @@ async function runUpdate() {
 	try {
 		updateResult = await api.update()
 		revision = updateResult.new_commit
-		if (updateResult.ok) {
-			opsMessage = 'Update complete.'
+		// A single-line output is one clear sentence about the outcome, written
+		// by the side that actually knows it: "not available in a Docker
+		// deployment", or - once that deployment can hand the job to Watchtower -
+		// that the update was only *started*. Show it verbatim instead of a
+		// verdict this page would be guessing at, and instead of pointing at the
+		// <pre> below, which a one-line output doesn't render anyway.
+		const single = updateResult.output && !updateResult.output.includes('\n')
+		if (single) {
+			opsMessage = updateResult.output
 		} else {
-			// A single-line output is one clear reason (e.g. "not available in a
-			// Docker deployment") - show it directly instead of a generic
-			// failure message plus a redundant pointer at the <pre> below.
-			const single = updateResult.output && !updateResult.output.includes('\n')
-			opsMessage = single ? updateResult.output : 'Update failed (see output).'
+			opsMessage = updateResult.ok ? 'Update complete.' : 'Update failed (see output).'
 		}
 	} catch (err) {
 		opsMessage = err instanceof ApiError ? err.message : 'update failed'
