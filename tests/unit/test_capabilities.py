@@ -52,10 +52,15 @@ class TestCapabilityTable:
             ProviderKind.OPENAI_COMPAT,
             ProviderKind.OPENROUTER,
             ProviderKind.GEMINI,
+            ProviderKind.XAI,
         }
 
-    def test_only_openrouter_generates_video(self) -> None:
-        assert kinds_for(Interaction.VIDEO) == {ProviderKind.OPENROUTER}
+    def test_the_video_kinds_are_the_ones_with_a_connector(self) -> None:
+        """Two vendors expose a video API here, and they agree on almost none of
+        its spelling - see loreline/video/vendors.py. Declaring the interaction
+        for a third without an adapter there would put it in the picker and fail
+        the job at submit time."""
+        assert kinds_for(Interaction.VIDEO) == {ProviderKind.OPENROUTER, ProviderKind.XAI}
 
     def test_openrouter_is_a_single_kind_doing_everything(self) -> None:
         """One entry, three abilities. Its chat, transcription and video
@@ -722,3 +727,72 @@ class TestSurfaces:
             surface_for(_row(ProviderKind.DEEPGRAM), Interaction.TRANSCRIBE, "batch").url
             == "https://api.deepgram.com"
         )
+
+
+class TestXai:
+    """One vendor, three interactions, and an STT endpoint with no model.
+
+    The pieces that would each fail somewhere else in the app if this file got
+    them wrong, pinned where the answer is written down.
+    """
+
+    def test_it_serves_all_three_interactions_from_one_row(self) -> None:
+        assert interactions_for(ProviderKind.XAI) == {
+            Interaction.TRANSCRIBE,
+            Interaction.SUMMARIZE,
+            Interaction.VIDEO,
+        }
+
+    def test_the_defaults_are_scoped_to_the_interaction(self) -> None:
+        """One row, three catalogues that share nothing: a per-kind default
+        would be wrong for two of them."""
+        assert default_model(ProviderKind.XAI, Interaction.TRANSCRIBE) == "grok-stt-1.0"
+        assert default_model(ProviderKind.XAI, Interaction.SUMMARIZE) == "grok-4.6"
+        assert default_model(ProviderKind.XAI, Interaction.VIDEO) == "grok-imagine-video-1.5"
+
+    def test_live_capture_streams_and_re_processing_posts(self) -> None:
+        """One engine, two transports, and the choice is the caller's context:
+        a live table goes to the socket, a stored recording to the multipart
+        endpoint, which is what `prefer: realtime` plus prefer_batch means."""
+        assert is_realtime_model(ProviderKind.XAI, "grok-stt-1.0") is True
+        assert is_realtime_model(ProviderKind.XAI, "grok-stt-1.0", prefer_batch=True) is False
+
+    def test_the_transcription_picker_never_reads_the_chat_catalogue(self) -> None:
+        """/v1/models lists chat models and no speech model at all. Offering it
+        for transcription is the exact failure the curated lists exist to stop -
+        a GM picking a chat model to transcribe with."""
+        assert catalog_for(ProviderKind.XAI, Interaction.TRANSCRIBE) is None
+        assert catalog_for(ProviderKind.XAI, Interaction.VIDEO) is None
+        chat = catalog_for(ProviderKind.XAI, Interaction.SUMMARIZE)
+        assert chat is not None and chat.url == "https://api.x.ai/v1/models"
+        assert curated_models(ProviderKind.XAI, Interaction.TRANSCRIBE) == ["grok-stt-1.0"]
+
+    def test_the_two_transports_are_two_addresses_on_one_key(self) -> None:
+        realtime = surface(ProviderKind.XAI, Interaction.TRANSCRIBE, "realtime")
+        batch = surface(ProviderKind.XAI, Interaction.TRANSCRIBE, "batch")
+        assert realtime is not None and realtime.url == "wss://api.x.ai/v1/stt"
+        assert batch is not None and batch.url == "https://api.x.ai/v1"
+        assert realtime.request_headers("k") == {"Authorization": "Bearer k"}
+        assert batch.request_headers("k") == {"Authorization": "Bearer k"}
+
+    def test_the_socket_is_probed_by_listening_not_by_speaking(self) -> None:
+        """It greets with transcript.created on connect, so unlike Deepgram's
+        there is no frame to send to make it answer."""
+        realtime = surface(ProviderKind.XAI, Interaction.TRANSCRIBE, "realtime")
+        assert realtime is not None
+        assert realtime.health is None
+
+    def test_the_glossary_ceiling_is_both_a_count_and_a_length(self) -> None:
+        """100 terms of at most 50 characters. Two different limits, and the
+        connector has to honour both - see tests/integration/test_xai_batch.py."""
+        entry = config().providers[ProviderKind.XAI].find("grok-stt-1.0")
+        assert entry is not None and entry.transcribe is not None
+        glossary = entry.transcribe.glossary
+        assert glossary.field == "keyterm"
+        assert glossary.max_terms_for(realtime=True) == 100
+        assert glossary.max_terms_for(realtime=False) == 100
+        assert glossary.max_term_chars == 50
+
+    def test_it_diarizes_and_says_which_model_does(self) -> None:
+        assert supports_inline_diarization(ProviderKind.XAI, "grok-stt-1.0") is True
+        assert default_diarizing_model(ProviderKind.XAI) == "grok-stt-1.0"

@@ -52,6 +52,16 @@ def _gemini_config() -> ProviderConfig:
     )
 
 
+def _xai_config() -> ProviderConfig:
+    """xAI as the wizard stores it: a cloud kind, so no ``base_url`` of its own
+    and the surface in capabilities.yaml is the whole address."""
+    return ProviderConfig(
+        id="l4",
+        name="xAI",
+        kind=ProviderKind.XAI,
+    )
+
+
 def _client(transport: httpx.MockTransport) -> httpx.AsyncClient:
     # The injected client owns its base_url, just like the real one in llm.py.
     return httpx.AsyncClient(transport=transport, base_url=_BASE_URL)
@@ -289,6 +299,51 @@ async def test_gemini_summarizes_through_googles_openai_compatible_base(
     assert out == "A summary."
     assert seen["base_url"] == "https://generativelanguage.googleapis.com/v1beta/openai"
     assert seen["path"] == "/v1beta/openai/chat/completions"
+    assert seen["Authorization"] == "Bearer k"
+    assert "HTTP-Referer" not in seen
+
+
+async def test_xai_summarizes_through_the_shared_openai_compatible_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The whole of xAI's summarize integration, and it is a yaml entry.
+
+    Its chat API is OpenAI-compatible down to the auth header, so adding the
+    vendor added no code here: the surface says where to post and how to spell
+    the key, and this connector does the rest. None of OpenRouter's attribution
+    headers, and none of its nested reasoning object, belong on it.
+    """
+    seen: dict[str, str] = {}
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        return httpx.Response(200, json={"choices": [{"message": {"content": "A summary."}}]})
+
+    real_client = httpx.AsyncClient
+
+    def fake_client(
+        *,
+        base_url: str,
+        headers: dict[str, str],
+        timeout: float,
+    ) -> httpx.AsyncClient:
+        seen["base_url"] = base_url
+        seen.update(headers)
+        return real_client(
+            base_url=base_url,
+            headers=headers,
+            timeout=timeout,
+            transport=httpx.MockTransport(handle),
+        )
+
+    monkeypatch.setattr(httpx, "AsyncClient", fake_client)
+    out = await summarize_transcript(
+        config=_xai_config(), api_key="k", model="grok-4.6", transcript="x"
+    )
+
+    assert out == "A summary."
+    assert seen["base_url"] == "https://api.x.ai/v1"
+    assert seen["path"] == "/v1/chat/completions"
     assert seen["Authorization"] == "Bearer k"
     assert "HTTP-Referer" not in seen
 

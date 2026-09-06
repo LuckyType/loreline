@@ -1,9 +1,10 @@
 """Video-generation jobs.
 
-Turns a session summary into a video via OpenRouter's ``/videos`` API. Runs as
-in-process ``asyncio`` tasks with state in the ``video_jobs`` table - the same
-shape as :mod:`loreline.reprocess.jobs`, for the same reason: the work outlives
-the HTTP request that started it.
+Turns a session summary into a video through whichever vendor the chosen
+provider row names (:mod:`loreline.video.vendors`; OpenRouter and xAI today).
+Runs as in-process ``asyncio`` tasks with state in the ``video_jobs`` table -
+the same shape as :mod:`loreline.reprocess.jobs`, for the same reason: the work
+outlives the HTTP request that started it.
 
 What differs from re-processing is *where* the waiting happens. A re-transcribe
 is slow because this process is doing the work; a generation is slow because
@@ -25,6 +26,7 @@ from loreline.logging import get_logger
 from loreline.models import JobStatus, ProviderConfig, VideoJob, VideoModelInfo
 from loreline.video.client import (
     ClientFactory,
+    GenerationState,
     VideoError,
     build_payload,
     download_video,
@@ -67,7 +69,7 @@ class ProviderNotFoundError(ValueError):
 
 
 class ProviderNotVideoCapableError(ValueError):
-    """Raised when the chosen provider cannot generate video (non-OpenRouter)."""
+    """Raised when the chosen provider's kind cannot generate video."""
 
 
 class EmptyPromptError(ValueError):
@@ -193,6 +195,7 @@ class VideoManager:
 
     async def _generate(self, job: VideoJob, provider: ProviderConfig, api_key: str | None) -> None:
         payload = build_payload(
+            kind=provider.kind,
             model=job.model,
             prompt=job.prompt,
             duration=job.duration,
@@ -212,12 +215,15 @@ class VideoManager:
         await self._videos.update(job)
         log.info("video.job.submitted", job_id=job.id, remote_id=job.remote_id)
 
-        await self._await_completion(job, provider, api_key)
+        state = await self._await_completion(job, provider, api_key)
 
         data = await download_video(
             config=provider,
             api_key=api_key,
             remote_id=job.remote_id,
+            # The terminal poll, handed on rather than discarded: one vendor
+            # answers it with the address of the result (see download_video).
+            state=state,
             client_factory=self._client_factory,
         )
         path = self._store.write(job.id, data)
@@ -229,8 +235,13 @@ class VideoManager:
 
     async def _await_completion(
         self, job: VideoJob, provider: ProviderConfig, api_key: str | None
-    ) -> None:
-        """Poll until the generation finishes, fails, or outruns the deadline."""
+    ) -> GenerationState:
+        """Poll until the generation finishes, fails, or outruns the deadline.
+
+        Returns the poll that ended it, which is more than a formality: for a
+        vendor that answers with the result's URL rather than serving it from a
+        path, that last response is the only place the address exists.
+        """
         remote_id = job.remote_id
         if remote_id is None:  # pragma: no cover - _generate always sets it first
             msg = "no upstream job id to poll"
@@ -246,7 +257,7 @@ class VideoManager:
                 client_factory=self._client_factory,
             )
             if state.done:
-                return
+                return state
             if state.failed:
                 # The provider's own message where there is one - "failed" on
                 # its own tells the GM nothing about what to change.

@@ -92,6 +92,7 @@ const PRESENTATION: Record<ProviderKind, ProviderPresentation> = {
 	openai: { note: 'Realtime transcription and session summaries.' },
 	gemini: { note: 'API key · diarization · word timestamps.' },
 	openrouter: { note: 'One key for many vendors. Transcription, summaries and video.' },
+	xai: { note: 'Streaming WS · inline diarization. Summaries and Grok Imagine video.' },
 	openai_compat: {
 		baseUrlPlaceholder: 'http://localhost:8000/v1',
 		note: 'Speaches, whisper.cpp, Ollama, LM Studio, vLLM. Transcription and/or summaries.',

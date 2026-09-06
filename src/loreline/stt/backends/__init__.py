@@ -18,6 +18,8 @@ _BACKEND_MODULES = (
     "loreline.stt.backends.assemblyai_batch",
     "loreline.stt.backends.gemini",
     "loreline.stt.backends.gemini_live",
+    "loreline.stt.backends.xai",
+    "loreline.stt.backends.xai_batch",
 )
 
 
