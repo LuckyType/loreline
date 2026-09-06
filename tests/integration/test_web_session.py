@@ -128,8 +128,9 @@ class FakeDiarizer:
         sample_rate: int = 16000,
         min_speakers: int | None = None,
         max_speakers: int | None = None,
+        session_id: str | None = None,
     ) -> list[SpeakerSegment]:
-        _ = (wav, sample_rate, min_speakers, max_speakers)
+        _ = (wav, sample_rate, min_speakers, max_speakers, session_id)
         return []
 
     async def aclose(self) -> None:

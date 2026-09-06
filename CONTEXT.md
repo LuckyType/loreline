@@ -104,3 +104,9 @@ DiarizationMode: inline from the STT's labels, a remote sherpa-onnx service, Ope
 model, or none. One factory, `DiarizerFactory`, owns construction and the credential
 precedence, a configured OpenAI row's stored key before the environment.
 _Avoid_: diarization provider (the class name it keeps in `DiarizationProvider`)
+
+**Speaker bank**: The voices one session has been heard to contain, kept by the remote
+service under the `session_id` every call carries, so a label means the same person in the
+first utterance and the hundredth. Without it each call clusters alone and calls whoever
+spoke "Speaker 0". Dropped when the diarizer closes, and on an idle TTL besides. See
+`docs/adr/0007`.

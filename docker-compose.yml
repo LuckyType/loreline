@@ -159,6 +159,11 @@ services:
   # files under ./models (not provided) - opt in with
   # `docker compose --profile diarization up -d`, then configure a `remote`
   # diarizer at http://diarization:8001.
+  #
+  # One replica, deliberately: it remembers a session's speakers between calls
+  # so the labels hold across a whole session, and two of them behind one
+  # address would answer with different ones. The knobs for that memory all
+  # have defaults; services/diarization/README.md documents them.
   diarization:
     build: ./services/diarization
     profiles: ["diarization"]

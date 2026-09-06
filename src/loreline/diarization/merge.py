@@ -41,7 +41,18 @@ def assign_speakers(event: TranscriptEvent, segments: list[SpeakerSegment]) -> T
     """Return a copy of ``event`` with speakers assigned from ``segments``.
 
     Each word is labelled with the speaker of the maximally overlapping
-    segment. The event-level speaker is set to the dominant word speaker.
+    segment. The event's own speaker is the one that holds most of its words,
+    else the segment covering most of the event's span, else whatever it
+    already carried.
+
+    That order is what makes this work for every connector rather than only
+    for the ones that return words. The OpenAI Realtime and Gemini Live
+    sessions return none at all, and a connector that does return them can still have every one
+    of them fall in a gap the diarizer heard as silence; in both cases the
+    event is still one voiced stretch of audio with a speaker, and taking the
+    dominant segment over its span says who it was. Answering None there, which
+    is what a dominant word speaker of None used to write over the event, threw
+    away a speaker the audio had already been asked about.
     """
     if not segments:
         return event
@@ -51,9 +62,11 @@ def assign_speakers(event: TranscriptEvent, segments: list[SpeakerSegment]) -> T
         speaker = _speaker_for(word.start, word.end, segments) or word.speaker
         labelled.append(word.model_copy(update={"speaker": speaker}))
 
-    event_speaker = _dominant_speaker(labelled)
-    if not labelled:
-        event_speaker = _speaker_for(event.start_ts, event.end_ts, segments) or event.speaker
+    event_speaker = (
+        _dominant_speaker(labelled)
+        or _speaker_for(event.start_ts, event.end_ts, segments)
+        or event.speaker
+    )
     return event.model_copy(update={"words": labelled, "speaker": event_speaker})
 
 
