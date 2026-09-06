@@ -20,6 +20,7 @@ from functools import partial
 from typing import TYPE_CHECKING, Protocol, cast, runtime_checkable
 
 from loreline.audio.chunker import SpeechDetector, Utterance, VadChunker
+from loreline.audio.level import levels
 from loreline.bus import EventBus
 from loreline.capabilities import supports_inline_diarization, supports_live_capture
 from loreline.logging import bind_log_context, get_logger, log_context
@@ -182,6 +183,10 @@ _DISK_CHECK_INTERVAL_S = 30.0
 _DISK_REARM_FACTOR = 1.1
 # Past an hour and a half, an alert reads better in hours than in minutes.
 _MINUTES_BEFORE_HOURS = 90
+# How often a level reading is pushed to the dashboard's live gain meter. Frames
+# arrive every 20 ms; pushing on every one would be both wasted bandwidth and
+# more updates than the eye needs from a bar graph.
+_LEVEL_PUSH_INTERVAL_S = 0.1
 
 
 @dataclass(slots=True)
@@ -218,6 +223,42 @@ class _DiskWatch:
         elif free < self.threshold_bytes and not self._alerted:
             self._alerted = True
             await self.on_low(free)
+
+
+@dataclass(slots=True)
+class _LevelWatch:
+    """Throttled peak/RMS publisher for the frames flowing through capture.
+
+    The dashboard's live gain meter needs the same reading the pre-session
+    mic-test meter shows (``loreline.audio.level.levels``, also behind
+    ``/ws/audio/level``), but taken from the frames already flowing through
+    this loop rather than a second device stream - some devices refuse a
+    second simultaneous reader (see the mic-resampling fix). Runs from inside
+    the capture loop for the same reason ``_DiskWatch`` does: it then lives
+    exactly as long as the recording, with no lifecycle of its own to start,
+    cancel and await.
+
+    ``peak`` is held across the interval rather than read fresh at the end of
+    it, the same way the mic-test meter holds its own reading between
+    throttled sends - a loud spike between two pushes must not be lost to
+    whatever quieter frame happens to land on the boundary.
+    """
+
+    publish: Callable[[tuple[float, float]], Awaitable[None]]
+    interval_s: float = _LEVEL_PUSH_INTERVAL_S
+    _hold_peak: float = field(default=0.0, init=False)
+    _next_push: float = field(default=0.0, init=False)  # 0 -> the first frame publishes
+
+    async def record(self, frame: bytes) -> None:
+        """Fold in one frame's level; publish at most once per interval."""
+        peak, rms = levels(frame)
+        self._hold_peak = max(self._hold_peak, peak)
+        now = time.monotonic()
+        if now < self._next_push:
+            return
+        self._next_push = now + self.interval_s
+        await self.publish((self._hold_peak, rms))
+        self._hold_peak = 0.0
 
 
 def _megabytes(byte_count: float) -> int:
@@ -300,6 +341,10 @@ class SessionManager:
         self._transcripts = transcripts
         self._secrets = secrets
         self._bus = transcript_bus
+        # Long-lived like `_bus` above, not per-session: readings only ever
+        # arrive while a capture is running, so a subscriber needs no session
+        # filter of its own to know a reading is about "the mic right now".
+        self._level_bus: EventBus[tuple[float, float]] = EventBus()
         self._audio_store = audio_store
         self._alerter = alerter
         # Free-space floor for the live check during capture; the same number
@@ -318,6 +363,15 @@ class SessionManager:
     @property
     def transcript_bus(self) -> EventBus[TranscriptEvent]:
         return self._bus
+
+    @property
+    def level_bus(self) -> EventBus[tuple[float, float]]:
+        """Throttled ``(peak, rms)`` readings from the active capture, if any.
+
+        What ``/ws/audio/live-level`` subscribes to for the dashboard's live
+        gain meter - see ``_LevelWatch``.
+        """
+        return self._level_bus
 
     def status(self) -> SessionStatus:
         return SessionStatus.CAPTURING if self._runtime is not None else SessionStatus.IDLE
@@ -754,6 +808,7 @@ class SessionManager:
                 stats,
                 queue,
                 disk_watch=self._make_disk_watch(stats.sample_rate),
+                level_watch=_LevelWatch(publish=self._level_bus.publish),
             )
         )
         utterances = _dequeue(queue)
@@ -851,13 +906,16 @@ async def _capture_utterances(
     stats: _CaptureStats,
     queue: asyncio.Queue[object],
     disk_watch: _DiskWatch | None = None,
+    level_watch: _LevelWatch | None = None,
 ) -> None:
     """Drain frames through VAD + chunking into ``queue`` (never blocks).
 
     Runs as its own task so capture keeps emptying the device buffer regardless
     of STT latency. Every frame is written to the continuous session recording
     and each completed utterance's span is indexed, so stored audio stays
-    complete (and re-VAD-able) even if the live queue drops an utterance.
+    complete (and re-VAD-able) even if the live queue drops an utterance. Each
+    frame also feeds ``level_watch``, if given, so the dashboard's gain meter
+    sees the same audio the recording does.
 
     However this ends - stopped, cancelled, or with the frame source raising
     before it ever yields - the closing sentinel is delivered. It is the only
@@ -869,6 +927,8 @@ async def _capture_utterances(
     try:
         async for frame, ts in source.frames():
             stats.record(frame)
+            if level_watch is not None:
+                await level_watch.record(frame)
             if audio_writer is not None:
                 # Disk write off the event loop: this task is already decoupled
                 # from STT latency, but a blocking write here would still stall

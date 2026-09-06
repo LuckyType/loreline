@@ -27,9 +27,11 @@ import { Input } from '$lib/components/ui/input'
 import { Label } from '$lib/components/ui/label'
 import Dropdown from '$lib/Dropdown.svelte'
 import { elapsedSince } from '$lib/elapsed.svelte'
+import LevelMeter from '$lib/LevelMeter.svelte'
 import { modelInfoFor } from '$lib/modelCatalog.svelte'
 import ModelPicker from '$lib/ModelPicker.svelte'
 import { formatTime, health } from '$lib/stores'
+import { connect } from '$lib/ws'
 import type { DiarizationModeKind, DiarizerProbe } from '$lib/wire'
 import { cn } from '$lib/utils'
 
@@ -298,6 +300,38 @@ const audioSummary = $derived.by(() => {
 	return `${formatTime(Math.floor(capturedSeconds))} recorded`
 })
 
+// --- live gain meter ---
+// The same question as above - is the mic actually alive - but as a glance
+// instead of a number, and useful *before* three seconds of silence would ever
+// flag a stall. Fed from the frames already flowing through the running
+// capture (see SessionManager's _LevelWatch) rather than a second device
+// stream: opening one while a session already has the mic open is exactly the
+// kind of thing that fails outright on some hardware (see the mic-resampling
+// fix). Reset to zero whenever there's nothing live to show, so a stalled or
+// ended capture never leaves a stale reading lit.
+let levelPeak = $state(0)
+const meterPeak = $derived(audioStalled ? 0 : levelPeak)
+
+$effect(() => {
+	if (!capturing) {
+		levelPeak = 0
+		return
+	}
+	const socket = connect('/ws/audio/live-level', (frame) => {
+		let data: { peak?: number }
+		try {
+			data = JSON.parse(frame) as { peak?: number }
+		} catch {
+			return // one malformed frame is not a reason to kill the meter
+		}
+		if (typeof data.peak === 'number') levelPeak = data.peak
+	})
+	return () => {
+		socket.close()
+		levelPeak = 0
+	}
+})
+
 // --- a session that ended badly ---
 // Stop answers with the finished session, and a capture that died answers
 // nothing at all: the health poll simply stops saying "capturing". Either way
@@ -437,6 +471,9 @@ onMount(() => {
 							· <span class={audioStalled ? 'text-destructive' : ''}>{audioSummary}</span>
 						{/if}
 					</span>
+					{#if capturing}
+						<LevelMeter peak={meterPeak} class="w-16 shrink-0" />
+					{/if}
 				</span>
 				<Button variant="destructive" onclick={stop} disabled={busy}>
 					{stopping ? 'Finalizing…' : 'Stop session'}

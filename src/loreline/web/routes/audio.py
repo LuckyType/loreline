@@ -1,10 +1,13 @@
-"""Audio routes: input-device enumeration + a live input-level meter.
+"""Audio routes: input-device enumeration + input-level meters.
 
 ``GET /api/audio/devices`` lists selectable mics. ``WS /ws/audio/level`` opens a
 short-lived capture stream for the chosen device and pushes peak/RMS levels so
 the UI can show a meter (set gain / pick the right mic) before starting a
-session. Both require the ``audio`` extra; without it the device list is empty
-and the level socket reports an error and closes.
+session - it requires the ``audio`` extra; without it the device list is empty
+and the level socket reports an error and closes. ``WS /ws/audio/live-level``
+is the same meter for a session already in progress: it opens no device of its
+own, and instead relays the throttled readings ``SessionManager`` already takes
+from the frames flowing through the active capture.
 """
 
 from __future__ import annotations
@@ -98,3 +101,32 @@ async def audio_level_ws(ws: WebSocket) -> None:
         source.stop()
         with suppress(Exception):
             await frames.aclose()
+
+
+@router.websocket("/ws/audio/live-level")
+async def audio_live_level_ws(ws: WebSocket) -> None:
+    """Stream the active session's throttled ``{peak, rms}`` (0-1) meter.
+
+    The dashboard's live gain meter while a session is capturing. Unlike
+    ``/ws/audio/level`` above this opens no device of its own - it relays
+    whatever ``SessionManager`` already computed from the frames flowing
+    through the running capture (see ``_LevelWatch`` there), because a second
+    simultaneous reader on the same device fails outright on some hardware
+    (see the mic-resampling fix). Silent while idle: nothing is published to
+    the bus outside an active capture, so the socket simply waits.
+    """
+    settings = ws.app.state.ctx.settings
+    if auth_enabled(settings):
+        token = ws.cookies.get(COOKIE_NAME)
+        if not token or not verify_token(token, settings):
+            await ws.close(code=WS_1008_POLICY_VIOLATION)
+            return
+
+    await ws.accept()
+    manager = ws.app.state.ctx.manager
+    try:
+        async with manager.level_bus.subscribe() as stream:
+            async for peak, rms in stream_until_disconnected(ws, stream):
+                await ws.send_json({"peak": peak, "rms": rms})
+    except WebSocketDisconnect:
+        return
