@@ -36,5 +36,6 @@ frontend/.svelte-kit/
 .playwright-mcp/
 
 # Local agent/editor tooling
+.idea/
 .claude/
 CLAUDE.md
