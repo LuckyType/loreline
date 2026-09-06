@@ -187,8 +187,8 @@ function wsLabel(status: ConnectionStatus, liveWord: string): string {
 					<div class="flex items-center justify-between gap-6">
 						<span class="text-muted-foreground">Transcript stream</span>
 						<span class="flex items-center gap-1.5">
-							<span class="size-2 rounded-full {wsDotClass($transcriptWs)}"
-							></span>{wsLabel($transcriptWs, 'connected')}
+							<span class="size-2 rounded-full {wsDotClass($transcriptWs)}"></span>
+							{wsLabel($transcriptWs, 'connected')}
 						</span>
 					</div>
 
