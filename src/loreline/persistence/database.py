@@ -286,6 +286,22 @@ MIGRATIONS: list[str] = [
     ALTER TABLE providers DROP COLUMN protocol;
     ALTER TABLE providers DROP COLUMN capabilities;
     """,
+    # v18 - the streaming paths replace a row instead of appending one. A
+    # vendor turn arrives as a growing interim and then as a final, all of them
+    # carrying the same TranscriptEvent.turn_id, and the transcript must hold
+    # one row per turn rather than one per revision (see docs/adr/0006).
+    #
+    # The unique index is what makes the upsert in TranscriptRepository.add
+    # possible, and it is deliberately not partial: SQLite treats NULLs as
+    # distinct, so every row the utterance path writes (turn_id NULL, one final
+    # event per utterance, nothing ever replacing it) still appends exactly as
+    # it did. Every row that predates this column has turn_id NULL for the same
+    # reason, so the index can be added over existing data without touching it.
+    """
+    ALTER TABLE transcript_segments ADD COLUMN turn_id TEXT;
+    CREATE UNIQUE INDEX idx_segments_turn
+        ON transcript_segments(session_id, source, turn_id);
+    """,
 ]
 
 

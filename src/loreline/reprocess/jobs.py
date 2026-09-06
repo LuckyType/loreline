@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING
 
 from loreline.bus import EventBus
 from loreline.diarization.merge import assign_speakers
-from loreline.export import variant_rows
+from loreline.export import final_rows, variant_rows
 from loreline.health import HealthStatus, classify_request_error
 from loreline.logging import bind_log_context, get_logger
 from loreline.models import (
@@ -389,7 +389,10 @@ class ReprocessManager:
         if not segments:
             return 0
         events = await self._transcripts.for_session(job.session_id)
-        base = variant_rows(events, job.target)
+        # Finals only: a diarize job writes a permanent copy of the version it
+        # relabels, and an interim or a gap marker from a capture still running
+        # has no business being made permanent.
+        base = final_rows(variant_rows(events, job.target))
         source = f"{DIARIZE_SOURCE_PREFIX}{job.target}"
         relabeled = [
             assign_speakers(event, segments).model_copy(update={"source": source}) for event in base

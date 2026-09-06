@@ -16,7 +16,7 @@
  */
 
 import { Input } from '$lib/components/ui/input'
-import { formatTime, sourceLabel, speakerColor } from '$lib/stores'
+import { formatTime, GAP_SOURCE, sourceLabel, speakerColor } from '$lib/stores'
 import { highlight } from '$lib/transcriptSearch'
 import { cn } from '$lib/utils'
 import type { ProviderConfig, TranscriptEvent } from '$lib/wire'
@@ -42,8 +42,8 @@ let {
 	providers?: ProviderConfig[]
 	/** What the caller filtered by, marked in the text it matched. */
 	query?: string
-	/** Dim segments still marked interim: the live feed carries those, a
-	 *  stored transcript does not. */
+	/** Dim segments still marked interim: a live streaming capture carries
+	 *  those, a stored transcript does not. */
 	dimInterim?: boolean
 	/** Shown in place of the list when there is nothing to show. */
 	emptyText?: string
@@ -122,71 +122,89 @@ function editKeydown(e: KeyboardEvent, label: string) {
 	{/each}
 {/snippet}
 
-<div bind:this={element} class={className}>
-	{#each events as ev, i (i)}
-		{@const speaker = ev.speaker}
-		{@const active = activeStart != null && ev.start_ts === activeStart}
-		<!-- The mark is padded inwards rather than bled outwards with a negative
-		     margin: this box scrolls, so a row wider than it would put a
-		     horizontal scrollbar under every transcript on the site, and the
-		     bar down its left edge would be clipped away with the overflow. -->
-		<div
-			class={cn(
-				'flex items-baseline gap-2.5 rounded-md px-2 py-1',
-				active && 'bg-primary/10 [box-shadow:inset_2px_0_0_var(--color-primary)]',
-			)}
-			data-active={active ? 'true' : undefined}
+{#snippet when(seconds: number)}
+	{#if onseek}
+		<button
+			type="button"
+			class="shrink-0 cursor-pointer text-xs tabular-nums text-muted-foreground hover:text-primary hover:underline"
+			title="Play the recording from here"
+			onclick={() => onseek?.(seconds)}
 		>
-			{#if onseek}
+			{formatTime(seconds)}
+		</button>
+	{:else}
+		<span class="shrink-0 text-xs tabular-nums text-muted-foreground">{formatTime(seconds)}</span>
+	{/if}
+{/snippet}
+
+{#snippet spoken(ev: TranscriptEvent, i: number)}
+	{@const speaker = ev.speaker}
+	{@const active = activeStart != null && ev.start_ts === activeStart}
+	<!-- The mark is padded inwards rather than bled outwards with a negative
+	     margin: this box scrolls, so a row wider than it would put a
+	     horizontal scrollbar under every transcript on the site, and the
+	     bar down its left edge would be clipped away with the overflow. -->
+	<div
+		class={cn(
+			'flex items-baseline gap-2.5 rounded-md px-2 py-1',
+			active && 'bg-primary/10 [box-shadow:inset_2px_0_0_var(--color-primary)]',
+		)}
+		data-active={active ? 'true' : undefined}
+	>
+		{@render when(ev.start_ts)}
+		{#if speaker}
+			{#if onrename && editingRow === i}
+				<Input
+					class="h-6 w-36 shrink-0 px-1.5 py-0 text-sm"
+					aria-label="Rename {speaker}"
+					placeholder={speaker}
+					autofocus
+					bind:value={draft}
+					onkeydown={(e) => editKeydown(e, speaker)}
+					onblur={() => commitEdit(speaker)}
+				/>
+			{:else if onrename}
 				<button
 					type="button"
-					class="shrink-0 cursor-pointer text-xs tabular-nums text-muted-foreground hover:text-primary hover:underline"
-					title="Play the recording from here"
-					onclick={() => onseek?.(ev.start_ts)}
+					class="shrink-0 cursor-pointer text-sm font-semibold hover:underline"
+					style="color: {speakerColor(speaker)}"
+					title="Rename this speaker everywhere in the transcript"
+					onclick={() => startEdit(i, speaker)}
 				>
-					{formatTime(ev.start_ts)}
+					{@render marked(displaySpeaker(speaker))}
 				</button>
 			{:else}
-				<span class="shrink-0 text-xs tabular-nums text-muted-foreground"
-					>{formatTime(ev.start_ts)}</span
+				<span class="shrink-0 text-sm font-semibold" style="color: {speakerColor(speaker)}"
+					>{@render marked(displaySpeaker(speaker))}</span
 				>
 			{/if}
-			{#if speaker}
-				{#if onrename && editingRow === i}
-					<Input
-						class="h-6 w-36 shrink-0 px-1.5 py-0 text-sm"
-						aria-label="Rename {speaker}"
-						placeholder={speaker}
-						autofocus
-						bind:value={draft}
-						onkeydown={(e) => editKeydown(e, speaker)}
-						onblur={() => commitEdit(speaker)}
-					/>
-				{:else if onrename}
-					<button
-						type="button"
-						class="shrink-0 cursor-pointer text-sm font-semibold hover:underline"
-						style="color: {speakerColor(speaker)}"
-						title="Rename this speaker everywhere in the transcript"
-						onclick={() => startEdit(i, speaker)}
-					>
-						{@render marked(displaySpeaker(speaker))}
-					</button>
-				{:else}
-					<span class="shrink-0 text-sm font-semibold" style="color: {speakerColor(speaker)}"
-						>{@render marked(displaySpeaker(speaker))}</span
-					>
-				{/if}
-			{/if}
-			{#if showSource}
-				<span class="shrink-0 rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground"
-					>{sourceLabel(ev.source, providers)}</span
-				>
-			{/if}
-			<span class={cn('min-w-0', dimInterim && !ev.is_final && 'opacity-60 italic')}
-				>{@render marked(ev.text)}</span
+		{/if}
+		{#if showSource}
+			<span class="shrink-0 rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground"
+				>{sourceLabel(ev.source, providers)}</span
 			>
-		</div>
+		{/if}
+		<span class={cn('min-w-0', dimInterim && !ev.is_final && 'opacity-60 italic')}
+			>{@render marked(ev.text)}</span
+		>
+	</div>
+{/snippet}
+
+<div bind:this={element} class={className}>
+	{#each events as ev, i (i)}
+		{#if ev.source === GAP_SOURCE}
+			<!-- Not a segment: the app saying it lost this span of audio while a
+			     streaming connection was down. Rendered as a rule rather than as a
+			     line of speech so it cannot be misread as something said, and still
+			     seekable, because the recording itself does have the audio. -->
+			<div class="flex items-baseline gap-2.5 px-2 py-1 text-amber-700 dark:text-amber-500">
+				{@render when(ev.start_ts)}
+				<span class="min-w-0 text-sm italic">{ev.text}</span>
+				<span class="mt-2 h-px min-w-6 flex-1 border-t border-dashed border-current"></span>
+			</div>
+		{:else}
+			{@render spoken(ev, i)}
+		{/if}
 	{/each}
 	{#if events.length === 0}
 		<p class="text-muted-foreground">{emptyText}</p>

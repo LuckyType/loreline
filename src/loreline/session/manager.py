@@ -1,10 +1,26 @@
-"""Session orchestration: capture -> router -> persistence -> transcript bus.
+"""Session orchestration: capture -> transcription -> persistence -> bus.
 
 ``SessionManager`` owns the single active capture session. It wires a frame
-source + speech detector through the ``VadChunker`` into the ``SttRouter`` and
+source + speech detector into whichever live path the chosen model needs, and
 persists every emitted ``TranscriptEvent``. Hardware-facing factories (audio
 source/detector, STT backends, diarizer) are injectable so the manager can run
 fully offline in tests.
+
+There are two live paths, and the connector's shape decides which one a session
+takes (ADR 0006). Both are fed by the one capture loop below, which is the same
+loop either way: it records the stats, meters the level, writes every frame to
+the continuous WAV, watches the disk, runs Silero and the ``VadChunker``, and
+marks each completed utterance in the WAV's index. All it does differently is
+hand what it produced to a different collaborator.
+
+* **Utterances.** ``SttRouter`` gets one ``Utterance`` at a time through a
+  bounded queue and calls a connector per utterance. Every batch model and
+  every realtime model whose connector has not been migrated yet.
+* **Frames.** ``StreamPath`` (``loreline.session.streaming``) gets every frame
+  and hands them to a connector that decides its own turns, publishing interims
+  while a turn is open. Taken when the primary connector implements the
+  streaming shape. The chunker keeps running for the WAV index; its utterances
+  simply go nowhere until the session falls back to the other path.
 """
 
 from __future__ import annotations
@@ -33,13 +49,15 @@ from loreline.models import (
 )
 from loreline.monitoring.alerts import AlertLevel
 from loreline.monitoring.health import disk_usage
+from loreline.session.streaming import FrameSink, PathEnd, StreamPath
 from loreline.stt.registry import BackendFactory, create_backend
 from loreline.stt.router import ProvidersExhaustedError, RouterConfig, SttRouter
+from loreline.stt.streaming import is_streaming
 
 if TYPE_CHECKING:
     from loreline.diarization.base import DiarizationProvider
     from loreline.diarization.provider import BuildDiarizer
-    from loreline.models import DiarizationConfig, ProviderConfig
+    from loreline.models import DiarizationConfig, Glossary, ProviderConfig
     from loreline.monitoring.alerts import AlertManager
     from loreline.persistence import (
         AudioStore,
@@ -302,13 +320,52 @@ def _disk_full_message(saved_seconds: float) -> str:
     )
 
 
+@runtime_checkable
+class _SttHealth(Protocol):
+    """What a live path answers about its own transcription, for the dashboard.
+
+    Both paths answer it, which is the point: ``/healthz`` and the dashboard
+    ask the manager, and the manager must not need to know which path is
+    running to have an answer. ``SttRouter`` has had both properties since
+    before there was a second path; ``StreamPath`` grew them to match, and
+    delegates to a router once a session has handed over to one.
+    """
+
+    @property
+    def degraded_since(self) -> float | None:
+        """Epoch time live transcription entered its current failing streak."""
+        ...
+
+    @property
+    def terminal_error(self) -> str | None:
+        """Why transcription stopped for good, or None while it still works."""
+        ...
+
+
+@dataclass(slots=True)
+class _Capture:
+    """Everything the capture loop needs, as one value the live paths share.
+
+    Both paths start the same capture task from it and both read ``queue``,
+    one to drive the router and one to hold what it might hand over, so
+    passing it as a bundle keeps the two constructions honestly identical.
+    """
+
+    source: CaptureSource
+    detector: SpeechDetector
+    chunker: VadChunker
+    audio_writer: SessionAudioWriter | None
+    stats: _CaptureStats
+    queue: asyncio.Queue[object]
+
+
 @dataclass(slots=True)
 class _Runtime:
     session: Session
     source: CaptureSource
     session_bus: EventBus[TranscriptEvent]
-    router: SttRouter
-    router_task: asyncio.Task[None]
+    stt: _SttHealth
+    live_task: asyncio.Task[None]
     persist_task: asyncio.Task[None]
     backends: list[STTBackend]
     diarizer: DiarizationProvider
@@ -382,7 +439,7 @@ class SessionManager:
     def stt_degraded_since(self) -> float | None:
         """Epoch time the active session's transcription started failing, or None."""
         runtime = self._runtime
-        return runtime.router.degraded_since if runtime is not None else None
+        return runtime.stt.degraded_since if runtime is not None else None
 
     def stt_error(self) -> str | None:
         """Why the active session stopped transcribing for good, or None.
@@ -393,7 +450,7 @@ class SessionManager:
         idle.
         """
         runtime = self._runtime
-        return runtime.router.terminal_error if runtime is not None else None
+        return runtime.stt.terminal_error if runtime is not None else None
 
     def captured_seconds(self) -> float | None:
         """Seconds of audio the active session has captured, or None while idle."""
@@ -545,31 +602,50 @@ class SessionManager:
             await self._sessions.create(session)
 
             session_bus: EventBus[TranscriptEvent] = EventBus()
-            router = SttRouter(
-                primary,
-                session_bus,
-                RouterConfig(
-                    session_id=session.id,
-                    glossary=glossary,
-                    diarization=req.diarization,
-                ),
-                fallback=fallback,
-                diarizer=diarizer,
-                on_failover=self._failover_alert,
-            )
             persist_task = asyncio.create_task(
                 self._persist(session_bus, session.started_mono, session.id)
             )
             stats = _CaptureStats(sample_rate=sample_rate)
-            router_task = asyncio.create_task(
-                self._run_router(router, source, detector, chunker, audio_writer, stats, session.id)
+            capture = _Capture(
+                source=source,
+                detector=detector,
+                chunker=chunker,
+                audio_writer=audio_writer,
+                stats=stats,
+                # Decouples capture from STT: a dedicated task drains the mic
+                # into this queue and the consumer works through it
+                # independently, so a slow round-trip cannot stall frame
+                # capture and overflow the device buffer. The streaming path
+                # leaves it empty until it hands a session over.
+                queue=asyncio.Queue(maxsize=_UTTERANCE_QUEUE_MAX),
+            )
+            build_router = partial(
+                self._build_router,
+                bus=session_bus,
+                config=RouterConfig(
+                    session_id=session.id,
+                    glossary=glossary,
+                    diarization=req.diarization,
+                ),
+                diarizer=diarizer,
+            )
+            stt, live_task = self._start_live_path(
+                primary,
+                fallback,
+                capture=capture,
+                session=session,
+                session_bus=session_bus,
+                glossary=glossary,
+                diarization=req.diarization,
+                diarizer=diarizer,
+                build_router=build_router,
             )
             self._runtime = _Runtime(
                 session=session,
                 source=source,
                 session_bus=session_bus,
-                router=router,
-                router_task=router_task,
+                stt=stt,
+                live_task=live_task,
                 persist_task=persist_task,
                 backends=backends,
                 diarizer=diarizer,
@@ -579,9 +655,75 @@ class SessionManager:
             # Nothing else awaits this task between here and stop(), so without
             # a callback a capture that dies mid-session would keep reporting
             # "capturing" until someone pressed Stop and waited out the drain.
-            router_task.add_done_callback(self._router_finished)
+            live_task.add_done_callback(self._live_finished)
             log.info("session.start", session_id=session.id, primary=req.primary_provider)
             return session
+
+    def _start_live_path(
+        self,
+        primary: STTBackend,
+        fallback: STTBackend | None,
+        *,
+        capture: _Capture,
+        session: Session,
+        session_bus: EventBus[TranscriptEvent],
+        glossary: Glossary | None,
+        diarization: DiarizationConfig,
+        diarizer: DiarizationProvider,
+        build_router: Callable[..., SttRouter],
+    ) -> tuple[_SttHealth, asyncio.Task[None]]:
+        """Pick the live path this session's primary connector needs.
+
+        The shape of the connector decides, not the model row and not a flag:
+        ``create_backend`` already returns the realtime connector for a model
+        whose ``prefer`` says so, and whether that connector can be fed raw
+        frames is a fact about its class (ADR 0006, Decision 2). A realtime
+        connector that has not been migrated yet is still call-shaped, so its
+        models keep today's path and today's 800 ms floor until it is.
+        """
+        if is_streaming(primary):
+            path = StreamPath(
+                primary,
+                session_bus,
+                session_id=session.id,
+                capture_rate=capture.stats.sample_rate,
+                glossary=glossary,
+                diarization=diarization,
+                diarizer=diarizer,
+                fallback=fallback,
+                on_failover=self._failover_alert,
+                queue_utterance=partial(_offer, capture.queue),
+            )
+            return path, asyncio.create_task(
+                self._run_stream(path, capture, build_router, session.id)
+            )
+        router = build_router(primary, fallback=fallback)
+        return router, asyncio.create_task(self._run_router(router, capture, session.id))
+
+    def _build_router(
+        self,
+        primary: STTBackend,
+        *,
+        bus: EventBus[TranscriptEvent],
+        config: RouterConfig,
+        diarizer: DiarizationProvider,
+        fallback: STTBackend | None = None,
+    ) -> SttRouter:
+        """One router, however this session came to need one.
+
+        Built here rather than at each call site because the streaming path can
+        need one mid-session, when it hands over to a call-shaped fallback, and
+        that router must be configured identically to the one the session would
+        have had if it had never streamed at all.
+        """
+        return SttRouter(
+            primary,
+            bus,
+            config,
+            fallback=fallback,
+            diarizer=diarizer,
+            on_failover=self._failover_alert,
+        )
 
     async def _preflight_capture(self, source: CaptureSource, device: int | str | None) -> None:
         """Fail the start request now if the chosen microphone cannot be opened.
@@ -616,10 +758,10 @@ class SessionManager:
         with log_context(session_id=runtime.session.id):
             return await self._finish(runtime)
 
-    def _router_finished(self, task: asyncio.Task[None]) -> None:
+    def _live_finished(self, task: asyncio.Task[None]) -> None:
         """Notice a capture that ended itself, and end the session with it.
 
-        Runs as ``router_task``'s done callback. A router that raised has taken
+        Runs as ``live_task``'s done callback. A live path that raised has taken
         the capture down with it (the frame source is gone, the recording is
         over), and nobody is waiting on that task: without this the manager
         would keep answering ``capturing`` until the GM pressed Stop, and only
@@ -633,21 +775,21 @@ class SessionManager:
         if task.cancelled() or task.exception() is None:
             return
         runtime = self._runtime
-        if runtime is None or runtime.router_task is not task:
+        if runtime is None or runtime.live_task is not task:
             return  # stop() already owns the teardown
         self._unattended_end = asyncio.create_task(self._end_unattended(task))
 
     async def _end_unattended(self, task: asyncio.Task[None]) -> None:
-        """Finalize a session nobody asked to stop (see :meth:`_router_finished`).
+        """Finalize a session nobody asked to stop (see :meth:`_live_finished`).
 
         Deliberately the same teardown ``stop()`` runs: ``_finish`` re-awaits the
-        router task, so the exception that killed it decides the stored status
+        live task, so the exception that killed it decides the stored status
         and fires the "Session error" alert, exactly as it would have done had
         the GM pressed Stop.
         """
         async with self._lock:
             runtime = self._runtime
-            if runtime is None or runtime.router_task is not task:
+            if runtime is None or runtime.live_task is not task:
                 return  # stop() got there first
             self._runtime = None
 
@@ -674,14 +816,14 @@ class SessionManager:
         status = SessionStatus.COMPLETED
         disk_full: DiskFullError | None = None
         try:
-            # Bounded drain: with STT healthy the router finishes its queue in
+            # Bounded drain: with STT healthy the live path finishes in
             # moments, but an unreachable backend leaves a deep utterance
             # backlog where every entry burns a full per-utterance timeout -
             # holding this stop request (and the shutdown path) hostage for up
             # to half an hour. The audio + index are already on disk, so cut
-            # the drain short instead: wait_for cancels the router task, and
-            # the skipped tail stays re-transcribable from stored audio.
-            await asyncio.wait_for(runtime.router_task, timeout=_STOP_DRAIN_TIMEOUT_S)
+            # the drain short instead: wait_for cancels the live task, and the
+            # skipped tail stays re-transcribable from stored audio.
+            await asyncio.wait_for(runtime.live_task, timeout=_STOP_DRAIN_TIMEOUT_S)
         except TimeoutError:
             log.warning("session.stop.drain_timeout", session_id=session_id)
         except DiskFullError as exc:
@@ -695,7 +837,7 @@ class SessionManager:
                 saved_seconds=round(exc.saved_seconds, 1),
             )
         except Exception:
-            log.exception("session.router.failed", session_id=session_id)
+            log.exception("session.live_path.failed", session_id=session_id)
             status = SessionStatus.ERROR
 
         await runtime.session_bus.aclose()
@@ -705,6 +847,14 @@ class SessionManager:
             # status update alike, and a session left at "capturing" forever is
             # the one outcome worse than a session that ended early.
             await runtime.persist_task
+        with _keep_finalizing("interims", session_id):
+            # After the last event is stored, never before: the streaming path
+            # settles its open turn on the way out, and that final has to land
+            # first or this would delete the interim it was about to replace.
+            # A stored session holds no half-typed rows (see
+            # TranscriptRepository.delete_interims); the utterance path writes
+            # none, so this is a no-op for it.
+            await self._transcripts.delete_interims(session_id)
 
         if runtime.audio_writer is not None:
             with _keep_finalizing("audio_writer", session_id):
@@ -777,66 +927,134 @@ class SessionManager:
 
         return _DiskWatch(free_bytes=free_bytes, threshold_bytes=threshold, on_low=on_low)
 
-    async def _run_router(
-        self,
-        router: SttRouter,
-        source: CaptureSource,
-        detector: SpeechDetector,
-        chunker: VadChunker,
-        audio_writer: SessionAudioWriter | None,
-        stats: _CaptureStats,
-        session_id: str,
-    ) -> None:
+    def _start_capture(
+        self, capture: _Capture, *, frames: FrameSink | None = None
+    ) -> asyncio.Task[None]:
+        """Spawn the one capture task, whichever live path consumes it."""
+        return asyncio.create_task(
+            _capture_utterances(
+                capture.source,
+                capture.detector,
+                capture.chunker,
+                capture.audio_writer,
+                capture.stats,
+                capture.queue,
+                disk_watch=self._make_disk_watch(capture.stats.sample_rate),
+                level_watch=_LevelWatch(publish=self._level_bus.publish),
+                frames=frames,
+            )
+        )
+
+    async def _run_router(self, router: SttRouter, capture: _Capture, session_id: str) -> None:
         # Everything below (the router, the STT backends, the VAD, the capture
         # task spawned here) logs without ever being told which session it is
         # serving. Bind it once for this task so those lines can be attributed
         # to the capture: the dashboard shows them, and they are what the
         # session's stored "original" log is made of.
         bind_log_context(session_id=session_id)
-        # Decouple capture from STT: a dedicated task drains the mic + VAD into a
-        # bounded queue that the router consumes independently, so a slow STT
-        # round-trip (e.g. a long sentence) cannot stall frame capture and
-        # overflow the device buffer. Under sustained overload the oldest queued
-        # utterance is dropped (logged) instead of corrupting live frames.
-        queue: asyncio.Queue[object] = asyncio.Queue(maxsize=_UTTERANCE_QUEUE_MAX)
-        capture_task = asyncio.create_task(
-            _capture_utterances(
-                source,
-                detector,
-                chunker,
-                audio_writer,
-                stats,
-                queue,
-                disk_watch=self._make_disk_watch(stats.sample_rate),
-                level_watch=_LevelWatch(publish=self._level_bus.publish),
-            )
+        capture_task = self._start_capture(capture)
+        try:
+            await self._drive_router(router, capture.queue, session_id)
+        finally:
+            await capture_task
+
+    async def _run_stream(
+        self,
+        path: StreamPath,
+        capture: _Capture,
+        build_router: Callable[..., SttRouter],
+        session_id: str,
+    ) -> None:
+        """Drive the streaming live path, including whatever it falls back to.
+
+        Same three endings the router has, reached differently (ADR 0006,
+        Decision 3): the input ran out, a call-shaped fallback takes over the
+        rest of the session, or nothing is left to transcribe with.
+        """
+        bind_log_context(session_id=session_id)  # see _run_router
+        capture_task = self._start_capture(capture, frames=path)
+        try:
+            end = await path.run()
+            if end == PathEnd.HANDOFF:
+                await self._hand_off(path, capture, build_router, session_id)
+            elif end == PathEnd.EXHAUSTED:
+                await self._stt_exhausted(path.terminal_error or "", capture.queue, session_id)
+        finally:
+            await capture_task
+
+    async def _hand_off(
+        self,
+        path: StreamPath,
+        capture: _Capture,
+        build_router: Callable[..., SttRouter],
+        session_id: str,
+    ) -> None:
+        """Finish the session on the utterance path, with the fallback provider.
+
+        The streaming primary is gone and the fallback cannot be streamed to,
+        so from the next completed utterance on this session is an ordinary
+        one. The chunker never stopped running for the WAV index, so there is
+        nothing to start: the utterances simply begin reaching the queue, and
+        the router built here drains it exactly as it would have from the
+        beginning.
+        """
+        fallback = path.call_shaped_fallback
+        if fallback is None:  # pragma: no cover - run() only returns HANDOFF with one
+            return
+        router = build_router(fallback)
+        path.router = router  # the session's health is this router's from now on
+        path.hand_off()
+        log.warning("session.stream.handoff", session_id=session_id, provider_id=fallback.config.id)
+        await path.notify_failover(
+            f"Live transcription moved to {fallback.config.name}, which transcribes "
+            "complete utterances: text now arrives after each sentence rather than "
+            "while it is spoken."
         )
+        await self._drive_router(router, capture.queue, session_id)
+
+    async def _drive_router(
+        self, router: SttRouter, queue: asyncio.Queue[object], session_id: str
+    ) -> None:
+        """Run the utterance path until capture ends or every provider is dead."""
         utterances = _dequeue(queue)
         try:
             await router.run(utterances)
         except ProvidersExhaustedError as exc:
-            # Every STT provider has failed in a way that will not change (no
-            # credits, rejected key, missing model). The capture deliberately
-            # keeps running: the audio is the one artifact that cannot be
-            # produced again, and a stopped microphone loses the rest of the
-            # evening outright, while a transcript can be re-made from the
-            # stored WAV the moment the provider works again. So the session
-            # degrades to a recorder, and the vendor's reason is pushed at the
-            # GM instead - as an alert, and on the dashboard via
-            # ``stt_error``. Draining the queue is part of keeping the
-            # recording clean: without a consumer it fills, and every further
-            # utterance logs a drop it can do nothing about.
-            log.error("session.stt.exhausted", session_id=session_id, error=str(exc))
-            await self._notify(
-                "Transcription stopped",
-                f"Live transcription stopped ({exc}). Audio keeps recording; "
-                "the session can be re-transcribed later.",
-                level=AlertLevel.ERROR,
-            )
-            async for _utterance in utterances:
-                pass
-        finally:
-            await capture_task
+            await self._stt_exhausted(str(exc), queue, session_id, drain=utterances)
+
+    async def _stt_exhausted(
+        self,
+        error: str,
+        queue: asyncio.Queue[object],
+        session_id: str,
+        drain: AsyncIterator[Utterance] | None = None,
+    ) -> None:
+        """Every provider has failed for good: keep recording, stop transcribing.
+
+        The failures that get here will not change (no credits, a rejected key,
+        a missing model). The capture deliberately keeps running: the audio is
+        the one artifact that cannot be produced again, and a stopped
+        microphone loses the rest of the evening outright, while a transcript
+        can be re-made from the stored WAV the moment the provider works again.
+        So the session degrades to a recorder, and the vendor's reason is
+        pushed at the GM instead, as an alert and on the dashboard via
+        ``stt_error``.
+
+        Draining is part of keeping the recording clean: without a consumer the
+        queue fills, and every further utterance logs a drop it can do nothing
+        about. The streaming path passes no ``drain`` because nothing was ever
+        queued while it ran, but it still has to keep draining once the chunker
+        starts filling the queue behind it.
+        """
+        log.error("session.stt.exhausted", session_id=session_id, error=error)
+        await self._notify(
+            "Transcription stopped",
+            f"Live transcription stopped ({error}). Audio keeps recording; "
+            "the session can be re-transcribed later.",
+            level=AlertLevel.ERROR,
+        )
+        async for _utterance in drain if drain is not None else _dequeue(queue):
+            pass
 
     async def _persist(
         self, session_bus: EventBus[TranscriptEvent], started_mono: float, session_id: str
@@ -889,6 +1107,19 @@ async def _store_audio(write: Callable[[], None], saved_seconds: float) -> None:
         raise DiskFullError(saved_seconds=saved_seconds) from exc
 
 
+def _dispatch(queue: asyncio.Queue[object], frames: FrameSink | None, utterance: Utterance) -> None:
+    """Give a completed utterance to whoever transcribes those, if anyone does.
+
+    Nobody does while a session streams: the vendor is deciding the turns, so
+    the utterance was only ever the WAV index's business. The sink says when
+    that changes, which is when a session hands over to the utterance path.
+    """
+    if frames is None:
+        _offer(queue, utterance)
+    elif frames.queues_utterances:
+        frames.utterance(utterance)
+
+
 def _offer(queue: asyncio.Queue[object], item: object) -> None:
     """Enqueue without blocking; drop the oldest item if the queue is full."""
     if queue.full():
@@ -907,22 +1138,27 @@ async def _capture_utterances(
     queue: asyncio.Queue[object],
     disk_watch: _DiskWatch | None = None,
     level_watch: _LevelWatch | None = None,
+    frames: FrameSink | None = None,
 ) -> None:
-    """Drain frames through VAD + chunking into ``queue`` (never blocks).
+    """Drain frames through VAD + chunking to whoever is transcribing them.
 
     Runs as its own task so capture keeps emptying the device buffer regardless
-    of STT latency. Every frame is written to the continuous session recording
-    and each completed utterance's span is indexed, so stored audio stays
-    complete (and re-VAD-able) even if the live queue drops an utterance. Each
-    frame also feeds ``level_watch``, if given, so the dashboard's gain meter
-    sees the same audio the recording does.
+    of STT latency, and never blocks on either consumer. Every frame is written
+    to the continuous session recording and each completed utterance's span is
+    indexed, so stored audio stays complete (and re-VAD-able) whatever the live
+    path does with it. Each frame also feeds ``level_watch``, if given, so the
+    dashboard's gain meter sees the same audio the recording does.
+
+    ``frames`` is the streaming path's sink (``StreamPath``). With one, every
+    frame goes to it as well, and completed utterances stop reaching ``queue``:
+    the vendor is deciding the turns, so an utterance is the WAV index's
+    business only, until the session hands over to the utterance path and the
+    sink says it wants them again. Without one this is exactly the loop it has
+    always been.
 
     However this ends - stopped, cancelled, or with the frame source raising
-    before it ever yields - the closing sentinel is delivered. It is the only
-    thing that ends ``_dequeue``, so skipping it leaves the router blocked on an
-    empty queue for as long as the process lives: the session then reports
-    ``capturing`` with a dead microphone, and even Stop only unblocks it by
-    timing out. That is the zombie recording this ``finally`` exists to prevent.
+    before it ever yields - both consumers are closed; see
+    :func:`_close_capture` for why that matters more than anything else here.
     """
     try:
         async for frame, ts in source.frames():
@@ -943,6 +1179,11 @@ async def _capture_utterances(
                 await disk_watch.check()
             # ONNX inference off the event loop for the same reason.
             is_speech = await asyncio.to_thread(detector, frame)
+            if frames is not None:
+                # After the VAD rather than before it: the streaming path needs
+                # the verdict with the frame, for its liveness watchdog. The
+                # cost is one thread hop of latency on a network round trip.
+                frames.frame(frame, ts, is_speech=is_speech)
             utterance = chunker.feed(frame, ts=ts, is_speech=is_speech)
             if utterance is not None:
                 if audio_writer is not None:
@@ -950,7 +1191,7 @@ async def _capture_utterances(
                     # the event loop like the frame writes above.
                     mark = partial(audio_writer.mark_utterance, utterance)
                     await _store_audio(mark, stats.seconds)
-                _offer(queue, utterance)
+                _dispatch(queue, frames, utterance)
     except DiskFullError:
         # Not a crash, so not a traceback: the recording stopped because there
         # was nowhere left to put it, and what reached the disk is complete.
@@ -962,12 +1203,40 @@ async def _capture_utterances(
         log.exception("capture.failed", captured_seconds=round(stats.seconds, 1))
         raise
     finally:
+        await _close_capture(chunker, audio_writer, stats, queue, frames)
+
+
+async def _close_capture(
+    chunker: VadChunker,
+    audio_writer: SessionAudioWriter | None,
+    stats: _CaptureStats,
+    queue: asyncio.Queue[object],
+    frames: FrameSink | None,
+) -> None:
+    """Flush the chunker and close both consumers, however capture ended.
+
+    Runs from ``_capture_utterances``'s ``finally``, which is the point: this
+    has to happen when the source was stopped, when the task was cancelled, and
+    when the frame source raised before it ever yielded.
+
+    The queue's sentinel is the only thing that ends ``_dequeue`` and the
+    sink's ``done`` is the only thing that ends an open stream, so skipping
+    either leaves a consumer blocked for as long as the process lives: the
+    session then reports ``capturing`` with a dead microphone, and even Stop
+    only unblocks it by timing out. That is the zombie recording this exists to
+    prevent, which is why the sentinel is delivered from inside a ``finally``
+    of its own rather than after a flush that might raise.
+    """
+    try:
+        final = chunker.flush()
+        if final is not None:
+            if audio_writer is not None:
+                await _store_audio(partial(audio_writer.mark_utterance, final), stats.seconds)
+            _dispatch(queue, frames, final)
+    finally:
         try:
-            final = chunker.flush()
-            if final is not None:
-                if audio_writer is not None:
-                    await _store_audio(partial(audio_writer.mark_utterance, final), stats.seconds)
-                _offer(queue, final)
+            if frames is not None:
+                frames.done()
         finally:
             _offer(queue, _CAPTURE_DONE)
 

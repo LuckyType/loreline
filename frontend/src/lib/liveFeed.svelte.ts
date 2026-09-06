@@ -35,6 +35,16 @@ export interface LiveFeedOptions<T> {
 	 *  argument is what a feed whose history and socket can overlap by an item
 	 *  needs to recognize the duplicate. */
 	accept?: (item: T, held: readonly T[]) => boolean
+	/** A stable identity, for a feed carrying revisions of one thing rather
+	 *  than a series of separate ones. An arriving item whose key matches one
+	 *  already held replaces it in place; everything else is appended.
+	 *
+	 *  A streaming transcript is the case this exists for: a vendor's turn
+	 *  arrives as a growing interim and then as a final, all under one
+	 *  `turn_id`, and a pane that appended them would show the same sentence
+	 *  once per word. `null` for an item means it is its own item, which is
+	 *  what every event from the utterance path is. */
+	key?: (item: T) => string | null
 	/** Whether an arriving item should scroll `element` to the tail. */
 	follow?: () => boolean
 	/** The socket's connection status, for a status indicator: connected,
@@ -107,13 +117,24 @@ export class LiveFeed<T> {
 		const item = this.#options.parse(frame)
 		if (item === null) return
 		if (this.#options.accept && !this.#options.accept(item, this.items)) return
-		this.items = this.#trim([...this.items, item])
+		this.items = this.#trim(this.#place(item))
 		if (this.#options.follow?.()) {
 			queueMicrotask(() => {
 				const el = this.element
 				el?.scrollTo(0, el.scrollHeight)
 			})
 		}
+	}
+
+	/** Where an arriving item goes: over the revision it supersedes, or last. */
+	#place(item: T): T[] {
+		const key = this.#options.key?.(item)
+		if (key == null) return [...this.items, item]
+		const at = this.items.findIndex((held) => this.#options.key?.(held) === key)
+		if (at < 0) return [...this.items, item]
+		const next = [...this.items]
+		next[at] = item
+		return next
 	}
 
 	#trim(items: T[]): T[] {

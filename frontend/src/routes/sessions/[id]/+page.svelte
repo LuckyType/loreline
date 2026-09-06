@@ -25,7 +25,7 @@ import { jsonFrame, LiveFeed } from '$lib/liveFeed.svelte'
 import SessionHeader from '$lib/SessionHeader.svelte'
 import SessionPlayer from '$lib/SessionPlayer.svelte'
 import SessionSummary from '$lib/SessionSummary.svelte'
-import { inFlight } from '$lib/stores'
+import { inFlight, turnKey } from '$lib/stores'
 import TranscriptPanel from '$lib/TranscriptPanel.svelte'
 import TranscriptVersions from '$lib/TranscriptVersions.svelte'
 import type { ReprocessJob, SessionDetail, TranscriptEvent } from '$lib/wire'
@@ -112,8 +112,12 @@ const versionFeed = new LiveFeed<TranscriptEvent>({
 	parse: jsonFrame,
 	accept: (event, held) =>
 		event.source === `reprocess:${selectedVersion}` &&
-		// selectVersion's fetch and this socket can overlap by a segment.
-		!held.some((e) => e.start_ts === event.start_ts && e.text === event.text),
+		// selectVersion's fetch and this socket can overlap by a segment. A
+		// segment carrying a turn is exempt: an arriving revision of a turn
+		// already held is the point, and `key` below puts it in place.
+		(event.turn_id != null ||
+			!held.some((e) => e.start_ts === event.start_ts && e.text === event.text)),
+	key: turnKey,
 })
 
 const shownEvents = $derived(

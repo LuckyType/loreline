@@ -147,3 +147,30 @@ async def test_capture_propagates_persistent_portaudio_failure(monkeypatch: Monk
     with pytest.raises(sd.PortAudioError):
         async for _ in source.frames():
             pass
+
+
+def test_rolling_pcm_slices_a_turn_out_of_the_window() -> None:
+    """A streaming turn arrives as two offsets, so the audio has to still be held."""
+    from loreline.audio.rolling import RollingPcm  # noqa: PLC0415
+
+    buffer = RollingPcm(16000, seconds=1.0)
+    # Ten 100 ms frames, each filled with its own byte, from t = 5.0.
+    for i in range(10):
+        buffer.append(bytes([i, 0]) * 1600, 5.0 + i * 0.1)
+
+    clip = buffer.slice(5.2, 5.4)
+    assert len(clip) == 1600 * 2 * 2  # 200 ms of s16le
+    assert set(clip[::2]) == {2, 3}  # exactly the third and fourth frames
+
+
+def test_rolling_pcm_returns_what_is_left_of_a_span_that_aged_out() -> None:
+    """A short clip diarizes worse than a long one; no clip diarizes not at all."""
+    from loreline.audio.rolling import RollingPcm  # noqa: PLC0415
+
+    buffer = RollingPcm(16000, seconds=0.2)  # holds two of the frames below
+    for i in range(5):
+        buffer.append(bytes([i, 0]) * 1600, 1.0 + i * 0.1)
+
+    assert buffer.slice(1.0, 1.5)[::2] == bytes([3]) * 1600 + bytes([4]) * 1600
+    assert buffer.slice(9.0, 9.5) == b""  # entirely outside the window
+    assert buffer.slice(1.4, 1.4) == b""  # an empty span is not an error

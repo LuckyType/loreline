@@ -1,11 +1,28 @@
 """OpenAI Realtime transcription connector (WebSocket).
 
 OpenAI's Realtime API offers a transcription-only session (``type:
-"transcription"``) that streams transcript deltas as audio arrives. We open a
-session per voiced utterance, configure it for manual commit (no server VAD),
-append the utterance's PCM as a single base64 chunk, commit the buffer, and emit
-the final ``conversation.item.input_audio_transcription.completed`` transcript as
-one ``TranscriptEvent``.
+"transcription"``) that streams transcript deltas as audio arrives. This
+connector implements both connector shapes over it, on two separate sockets,
+because the two need incompatible session configurations.
+
+**Streaming** (``StreamingConnector``, what a live capture takes) is the shape
+this session type was built for and the reason it is first to be migrated (ADR
+0006). Server VAD is on, so OpenAI decides the turns from the audio rather than
+this app cutting them: ``speech_started`` opens a turn and carries the offset
+its ``start_ts`` is derived from, ``delta`` events grow it as interim text,
+``speech_stopped`` carries the offset for its ``end_ts``, and ``completed``
+settles it. All four name the same ``item_id``, which is the handle the stream
+correlates them by, and which becomes the turn id a growing interim is replaced
+under. Audio is appended continuously and never committed by hand except once,
+at the very end, to flush whatever turn was open when the microphone stopped.
+
+**One utterance per call** (``Connector``, ADR 0005) is kept for two callers:
+the call-shaped fallback path, where a session that lost its streaming primary
+finishes on complete utterances, and the tests that predate streaming. Here
+turn detection is off, the caller's utterance is appended and committed by
+hand, and the reply is read until one ``completed`` arrives. It is one socket
+for the whole session either way; ``_ensure_ws`` has cached it since before
+streaming existed.
 
 Which OpenAI transcription models reach this connector rather than the batch
 one is decided per model in capabilities.yaml: gpt-live-transcribe and
@@ -14,6 +31,7 @@ whisper-1 post through the ``openai_compat`` backend instead.
 
 Docs:
 - https://developers.openai.com/api/docs/guides/realtime-transcription
+- https://developers.openai.com/api/docs/guides/realtime-vad
 - https://developers.openai.com/api/docs/guides/realtime-websocket
 """
 
@@ -23,6 +41,7 @@ import asyncio
 import base64
 import contextlib
 import json
+from collections.abc import AsyncIterator
 
 from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import WebSocketException
@@ -37,15 +56,39 @@ from loreline.secrets import SecretStore
 from loreline.stt.backends._ws import (
     as_dict,
     as_obj_dict,
+    get_float,
     get_str,
 )
 from loreline.stt.base import Connector, Transcription, glossary_terms, secret_for
 from loreline.stt.registry import register
+from loreline.stt.streaming import (
+    StreamingConnector,
+    TurnEnded,
+    TurnFinal,
+    TurnPartial,
+    TurnSignal,
+    TurnStarted,
+)
 
 log = get_logger(__name__)
 
 _COMPLETED = "conversation.item.input_audio_transcription.completed"
+_DELTA = "conversation.item.input_audio_transcription.delta"
 _FAILED = "conversation.item.input_audio_transcription.failed"
+_SPEECH_STARTED = "input_audio_buffer.speech_started"
+_SPEECH_STOPPED = "input_audio_buffer.speech_stopped"
+# OpenAI's own endpointing, which is the whole point of the streaming shape:
+# it decides turns from the audio it is hearing rather than from a local VAD
+# that has never heard the model. The values are OpenAI's documented defaults,
+# restated so a change here is a change with a reason rather than a silent
+# inheritance. 500 ms of silence closes a turn, against the 800 ms the local
+# chunker needs, and the padding keeps a turn's first phoneme.
+_SERVER_VAD: dict[str, object] = {
+    "type": "server_vad",
+    "threshold": 0.5,
+    "prefix_padding_ms": 300,
+    "silence_duration_ms": 500,
+}
 # OpenAI Realtime rejects input sample rates below 24 kHz, while our capture
 # pipeline is locked to 16 kHz by Silero VAD. Upsample to this rate on the way out.
 _OUTPUT_RATE = 24_000
@@ -72,12 +115,20 @@ def _capped_prompt(terms: list[str]) -> tuple[str | None, int]:
     return ", ".join(kept) or None, len(terms) - len(kept)
 
 
-class OpenAIRealtimeBackend(Connector[None]):
-    """Streaming transcription via an OpenAI Realtime transcription session.
+class OpenAIRealtimeBackend(Connector[None], StreamingConnector):
+    """Transcription over an OpenAI Realtime transcription session, both shapes.
+
+    See the module docstring for what each shape does. They hold separate
+    sockets because the session configuration differs in exactly the thing that
+    matters, ``turn_detection``, and one connection cannot be configured both
+    ways at once.
 
     Nothing is prepared per call: the glossary prompt lives on the instance
-    (``_prompt``) because the reusable socket's ``session.update`` reads it,
-    so :meth:`prepare` sets it as a side effect and returns None.
+    (``_prompt``) because every ``session.update`` reads it, so :meth:`prepare`
+    sets it as a side effect and returns None. ``_prompt_rejected`` is the one
+    thing deliberately kept across connections: a model that refuses the prompt
+    parameter will refuse it on the next socket too, and re-learning that would
+    cost a round trip and a voided session config per reconnect.
     """
 
     def __init__(
@@ -96,6 +147,7 @@ class OpenAIRealtimeBackend(Connector[None]):
         self._url = self._endpoint.url
         self._out_rate = max(config.sample_rate, _OUTPUT_RATE)
         self._ws: ClientConnection | None = None
+        self._stream_ws: ClientConnection | None = None
         self._prompt: str | None = None
         self._prompt_rejected = False  # model refused the prompt param; stop sending it
 
@@ -103,7 +155,7 @@ class OpenAIRealtimeBackend(Connector[None]):
     def _headers(self) -> dict[str, str]:
         return self._endpoint.request_headers(self._api_key)
 
-    def _session_update(self) -> str:
+    def _session_update(self, turn_detection: dict[str, object] | None = None) -> str:
         transcription: dict[str, object] = {"language": self._language}
         # A transcription session with no model named runs OpenAI's own
         # default, which is the right thing to inherit when nobody chose.
@@ -124,7 +176,7 @@ class OpenAIRealtimeBackend(Connector[None]):
                                 "rate": self._out_rate,
                             },
                             "transcription": transcription,
-                            "turn_detection": None,
+                            "turn_detection": turn_detection,
                         }
                     },
                 },
@@ -155,17 +207,23 @@ class OpenAIRealtimeBackend(Connector[None]):
         session - no fresh WebSocket handshake per utterance.
         """
         if self._ws is None:
-            ws = await connect(self._url, additional_headers=self._headers)
-            try:
-                await self._configure(ws)
-            except BaseException:
-                with contextlib.suppress(Exception):
-                    await ws.close()
-                raise
-            self._ws = ws
+            self._ws = await self._connect(None)
         return self._ws
 
-    async def _configure(self, ws: ClientConnection) -> None:
+    async def _connect(self, turn_detection: dict[str, object] | None) -> ClientConnection:
+        """Open one configured transcription session, or close it and raise."""
+        ws = await connect(self._url, additional_headers=self._headers)
+        try:
+            await self._configure(ws, turn_detection)
+        except BaseException:
+            with contextlib.suppress(Exception):
+                await ws.close()
+            raise
+        return ws
+
+    async def _configure(
+        self, ws: ClientConnection, turn_detection: dict[str, object] | None
+    ) -> None:
         """Send ``session.update`` and wait until the server settles it.
 
         Draining the config handshake here keeps a rejection out of the
@@ -175,7 +233,7 @@ class OpenAIRealtimeBackend(Connector[None]):
         session once to a promptless update, so the language/format config
         still applies instead of being voided along with the prompt.
         """
-        await ws.send(self._session_update())
+        await ws.send(self._session_update(turn_detection))
         async with asyncio.timeout(_CONFIGURE_TIMEOUT_S):
             async for raw in ws:
                 message = as_dict(raw)
@@ -192,7 +250,7 @@ class OpenAIRealtimeBackend(Connector[None]):
                         provider=self.config.id,
                         detail=detail,
                     )
-                    await ws.send(self._session_update())
+                    await ws.send(self._session_update(turn_detection))
                     continue
                 log.warning(
                     "openai.realtime.error",
@@ -242,8 +300,105 @@ class OpenAIRealtimeBackend(Connector[None]):
             raise
         return Transcription(text=transcript)
 
+    # -- the streaming shape ---------------------------------------------
+
+    @property
+    def stream_rate(self) -> int:
+        return self._out_rate
+
+    async def open_stream(self, glossary: Glossary | None) -> None:
+        """Open a server-VAD transcription session for a whole capture.
+
+        The glossary prompt is applied here rather than per turn: the session
+        carries it, and a reconnect re-applies it because this runs again.
+        """
+        self.prepare(glossary)
+        await self.close_stream()  # a reconnect must not leak the dead socket
+        self._stream_ws = await self._connect(_SERVER_VAD)
+
+    async def send_audio(self, pcm: bytes) -> None:
+        ws = self._stream_ws
+        if ws is None:
+            msg = "send_audio before open_stream"
+            raise RuntimeError(msg)
+        await ws.send(
+            json.dumps(
+                {
+                    "type": "input_audio_buffer.append",
+                    "audio": base64.b64encode(pcm).decode("ascii"),
+                }
+            )
+        )
+
+    async def signals(self) -> AsyncIterator[TurnSignal]:
+        """Translate this session's events into turn signals.
+
+        The offsets are OpenAI's own count of milliseconds into the audio it
+        has received on this connection, which is exactly what the stream's t0
+        mapping expects; nothing here converts to the session clock.
+
+        ``delta`` is an increment, not the whole interim so far, hence
+        ``append=True``. An error frame ends the iteration rather than being
+        skipped: a transcription session that rejected something is not going
+        to start working on the next frame, and ending here is what lets the
+        stream reconnect or fail over instead of streaming into silence.
+        """
+        ws = self._stream_ws
+        if ws is None:
+            return
+        async for raw in ws:
+            message = as_dict(raw)
+            kind = get_str(message, "type")
+            ref = get_str(message, "item_id")
+            if kind == _SPEECH_STARTED:
+                yield TurnStarted(at=_seconds(message, "audio_start_ms"), ref=ref)
+            elif kind == _SPEECH_STOPPED:
+                yield TurnEnded(at=_seconds(message, "audio_end_ms"), ref=ref)
+            elif kind == _DELTA:
+                yield TurnPartial(text=get_str(message, "delta"), ref=ref, append=True)
+            elif kind == _COMPLETED:
+                yield TurnFinal(text=get_str(message, "transcript"), ref=ref)
+            elif kind in {_FAILED, "error"}:
+                log.warning(
+                    "openai.realtime.error",
+                    provider=self.config.id,
+                    event_type=kind,
+                    detail=message.get("error", message),
+                )
+                return
+
+    async def flush_input(self) -> None:
+        """Commit once, so a turn still open when the mic stopped is transcribed.
+
+        Server VAD commits on its own at every turn boundary it finds, so this
+        is only ever about the last one. A commit with nothing buffered is
+        answered with an ``input_audio_buffer_commit_empty`` error, which the
+        reader logs and stops on, which is the right ending for a session that
+        was ending anyway.
+        """
+        ws = self._stream_ws
+        if ws is not None:
+            await ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
+
+    async def close_stream(self) -> None:
+        ws, self._stream_ws = self._stream_ws, None
+        if ws is not None:
+            with contextlib.suppress(Exception):
+                await ws.close()
+
     async def aclose(self) -> None:
         await self._reset_ws()
+        await self.close_stream()
+
+
+def _seconds(message: dict[str, object], key: str) -> float | None:
+    """A vendor offset in milliseconds, as seconds, or None when absent.
+
+    None matters: it is the difference between "this turn began 1.2s in" and
+    "this vendor did not say", and the stream falls back to the last frame
+    written for the second one rather than pinning the turn to zero.
+    """
+    return get_float(message, key) / 1000.0 if key in message else None
 
 
 @register(ProviderKind.OPENAI, realtime=True)

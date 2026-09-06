@@ -12,6 +12,7 @@ from collections.abc import Callable, Mapping, Sequence
 
 from loreline.models import (
     DIARIZE_SOURCE_PREFIX,
+    GAP_SOURCE,
     ORIGINAL_VERSION,
     REPROCESS_SOURCE_PREFIX,
     Session,
@@ -55,6 +56,25 @@ def variant_view(
 def canonical_transcript(events: Sequence[TranscriptEvent]) -> list[TranscriptEvent]:
     """The default transcript view for a session: the original version."""
     return variant_view(events, ORIGINAL_VERSION)
+
+
+def final_rows(events: Sequence[TranscriptEvent]) -> list[TranscriptEvent]:
+    """A version's settled text: no interims, no gap markers.
+
+    The views above answer "which version is this", which is a question about
+    ``source``. This answers a different one, "is this a thing somebody said",
+    and the two are separate because the browser wants the whole version while
+    it is being captured, and everything downstream of the capture wants only
+    what settled.
+
+    A running streaming session has both kinds of row in the table at once (see
+    ``docs/adr/0006``): an interim, which is a guess that will be replaced, and
+    a gap marker, which is the app saying it lost audio. Exporting either would
+    put text nobody said into a file, summarizing either would feed it to a
+    model, and a diarize job relabelling either would carry it into a new
+    version and make it permanent. So each of the three reads through here.
+    """
+    return [e for e in events if e.is_final and e.source != GAP_SOURCE]
 
 
 def relabel_speakers(

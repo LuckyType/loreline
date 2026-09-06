@@ -57,7 +57,9 @@ async def test_migrations_idempotent(tmp_path: Path) -> None:
         async with database.connection.execute("SELECT MAX(version) FROM schema_version;") as cur:
             row = await cur.fetchone()
         assert row is not None
-        assert row[0] == 17
+        # Read from the list rather than restated: the number changes with
+        # every migration, and this test is about re-running, not counting.
+        assert row[0] == len(MIGRATIONS)
 
 
 async def test_glossary_get_effective_merges_default_and_campaign(db: Database) -> None:
@@ -183,6 +185,112 @@ async def test_session_and_transcript(db: Database) -> None:
     finished = await sessions.get("s1")
     assert finished is not None
     assert finished.ended_at is not None
+
+
+async def test_a_turn_is_one_row_however_many_revisions_it_has(db: Database) -> None:
+    """The streaming path publishes a turn as a growing interim and then a final.
+
+    All of them carry one ``turn_id``, and the table must hold one row per turn
+    rather than one per revision: otherwise a session reloaded mid-capture, and
+    every export of it afterwards, reads the same sentence once per word.
+    """
+    sessions = SessionRepository(db)
+    transcripts = TranscriptRepository(db)
+    await sessions.create(Session(id="s1", started_at=time.time()))
+
+    for text, final in (("the", False), ("the goblin", False), ("the goblin runs", True)):
+        await transcripts.add(
+            TranscriptEvent(
+                session_id="s1",
+                source="oai",
+                text=text,
+                start_ts=1.0,
+                end_ts=2.0 if final else 1.5,
+                is_final=final,
+                turn_id="oai:1:item_001",
+            )
+        )
+
+    events = await transcripts.for_session("s1")
+    assert len(events) == 1
+    assert events[0].text == "the goblin runs"
+    assert events[0].is_final
+    assert events[0].end_ts == 2.0
+    assert events[0].turn_id == "oai:1:item_001"
+
+
+async def test_two_turns_are_two_rows_and_the_utterance_path_still_appends(
+    db: Database,
+) -> None:
+    """The upsert must not collapse anything it was not asked to.
+
+    Two turns differ by their key, and every row the utterance path writes has
+    no key at all, which SQLite counts as distinct from every other NULL. So a
+    session that failed over from streaming to utterances keeps both halves.
+    """
+    sessions = SessionRepository(db)
+    transcripts = TranscriptRepository(db)
+    await sessions.create(Session(id="s1", started_at=time.time()))
+
+    for turn in ("oai:1:item_001", "oai:1:item_002"):
+        await transcripts.add(
+            TranscriptEvent(
+                session_id="s1",
+                source="oai",
+                text=turn,
+                start_ts=1.0,
+                end_ts=2.0,
+                is_final=True,
+                turn_id=turn,
+            )
+        )
+    for _ in range(3):
+        await transcripts.add(
+            TranscriptEvent(
+                session_id="s1",
+                source="dg1",
+                text="same text, same span",
+                start_ts=5.0,
+                end_ts=6.0,
+                is_final=True,
+            )
+        )
+
+    assert len(await transcripts.for_session("s1")) == 5
+
+
+async def test_an_interim_never_survives_the_session_that_made_it(db: Database) -> None:
+    """The ending that cannot settle anything: the connector died mid-turn."""
+    sessions = SessionRepository(db)
+    transcripts = TranscriptRepository(db)
+    await sessions.create(Session(id="s1", started_at=time.time()))
+    await transcripts.add(
+        TranscriptEvent(
+            session_id="s1",
+            source="oai",
+            text="half a sen",
+            start_ts=1.0,
+            end_ts=1.5,
+            is_final=False,
+            turn_id="oai:1:item_001",
+        )
+    )
+    await transcripts.add(
+        TranscriptEvent(
+            session_id="s1",
+            source="oai",
+            text="a settled one",
+            start_ts=3.0,
+            end_ts=4.0,
+            is_final=True,
+            turn_id="oai:1:item_002",
+        )
+    )
+
+    await transcripts.delete_interims("s1")
+
+    events = await transcripts.for_session("s1")
+    assert [e.text for e in events] == ["a settled one"]
 
 
 async def test_migration_removes_rows_of_the_dropped_google_kind(tmp_path: Path) -> None:

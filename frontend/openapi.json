@@ -4821,6 +4821,17 @@
             "type": "boolean",
             "title": "Is Final",
             "default": false
+          },
+          "turn_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Turn Id"
           }
         },
         "type": "object",
@@ -4832,7 +4843,7 @@
           "end_ts"
         ],
         "title": "TranscriptEvent",
-        "description": "A transcript segment emitted by a backend.\n\nInterim events may be upgraded to ``is_final`` and gain speaker labels once\ndiarization completes."
+        "description": "One segment of one transcript version: what was said, when, by whom.\n\nTwo shapes produce these (see ``docs/adr/0006``). The utterance path emits\none final event per ``Utterance`` and nothing else. The streaming path\nemits a growing interim (``is_final=False``) while a vendor's turn is open\nand one final when it closes, all of them carrying the same ``turn_id``, so\nthe final replaces its interims rather than piling up behind them.\n\n``turn_id`` is that replace key, and it is the whole key: a reader\n(the transcript table, either live feed) replaces a held event with an\narriving one when both name the same ``turn_id``, and appends otherwise.\nNone on the utterance path, where every event is settled when it is\npublished and nothing ever replaces anything.\n\nA start timestamp would not do instead. It is stable across a turn's\ninterims for a vendor that reports server-VAD offsets, which OpenAI does,\nbut Deepgram and AssemblyAI both revise a turn's start as their endpointing\nrefines, and a key that silently stops matching appends a second row rather\nthan failing."
       },
       "UpdateResult": {
         "properties": {
