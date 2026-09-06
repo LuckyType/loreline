@@ -13,6 +13,7 @@ import hmac
 import secrets as token_gen
 import time
 from dataclasses import dataclass
+from ipaddress import ip_address, ip_network
 from typing import TYPE_CHECKING
 
 import jwt
@@ -25,6 +26,8 @@ from loreline.logging import get_logger
 from loreline.settings import DEFAULT_JWT_SECRET
 
 if TYPE_CHECKING:
+    from ipaddress import IPv4Network, IPv6Network
+
     from loreline.secrets import SecretStore
     from loreline.settings import Settings
 
@@ -58,6 +61,67 @@ def ensure_jwt_secret(settings: Settings, store: SecretStore) -> None:
 def auth_enabled(settings: Settings) -> bool:
     """Return True if a password is configured (auth active)."""
     return bool(settings.auth_password)
+
+
+def _trusted_proxy_networks(settings: Settings) -> list[IPv4Network | IPv6Network]:
+    """Parse ``trusted_proxies`` into networks, ignoring (and logging) junk."""
+    networks: list[IPv4Network | IPv6Network] = []
+    for entry in settings.trusted_proxies.split(","):
+        candidate = entry.strip()
+        if not candidate:
+            continue
+        try:
+            networks.append(ip_network(candidate, strict=False))
+        except ValueError:
+            log.warning("auth.trusted_proxy.invalid", entry=candidate)
+    return networks
+
+
+def _peer_is_trusted_proxy(request: Request, settings: Settings) -> bool:
+    """Whether this connection's own peer is allowed to speak for the client."""
+    client = request.client
+    if client is None or not settings.trusted_proxies:
+        return False
+    try:
+        peer = ip_address(client.host)
+    except ValueError:
+        return False
+    return any(peer in network for network in _trusted_proxy_networks(settings))
+
+
+def client_uses_https(request: Request, settings: Settings) -> bool:
+    """Whether the browser's own connection to this app is over TLS.
+
+    The app is reached two ways in the bundled compose stack: straight over
+    plain HTTP on the LAN (the primary supported path), and through Caddy,
+    which terminates TLS and then speaks plain HTTP to the app on the compose
+    network. The request object says ``http`` in both cases, so the login
+    cookie would end up either never ``Secure`` or always ``Secure``, and each
+    is wrong for one of the two paths.
+
+    ``X-Forwarded-Proto``, which Caddy sets on everything it proxies, is what
+    tells them apart - but the app's own port is published on the host as well
+    (see docker-compose.yml), so anything on the LAN can reach it directly and
+    send that header itself. It is therefore believed only when the connection
+    comes from a peer the operator listed in ``LORELINE_TRUSTED_PROXIES``:
+    compose sets that to the private range Caddy's container sits in, which a
+    LAN client arriving on the published port never appears from. Left empty
+    (the default, and every bare-metal install) nothing is trusted and only a
+    genuinely HTTPS connection gets a ``Secure`` cookie.
+
+    What is left over is a process on the Docker host itself, which does arrive
+    from that range: it can talk its own login response into a ``Secure``
+    cookie its browser then refuses to send back over plain HTTP. That is a
+    failure of its own login and nobody else's, in the safe direction. The
+    dangerous direction, stripping ``Secure`` off a real HTTPS session, is not
+    reachable: those requests come through Caddy, which sets the header itself.
+    """
+    if _peer_is_trusted_proxy(request, settings):
+        # Stacked proxies append to the header; the first hop faced the client.
+        forwarded = request.headers.get("x-forwarded-proto", "").split(",")[0].strip().lower()
+        if forwarded:
+            return forwarded == "https"
+    return request.url.scheme == "https"
 
 
 def _password_fingerprint(settings: Settings) -> str:
