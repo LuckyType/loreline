@@ -54,6 +54,25 @@ class Settings(BaseSettings):
             "Enables Settings > Services; blank disables it."
         ),
     )
+    # --- Ops / self-update: Watchtower trigger (Docker deployments only) ---
+    # Read only when the app is running in a container, where its own
+    # git-and-systemd update path cannot work. Both are ignored otherwise.
+    watchtower_url: str = Field(
+        default="http://watchtower:8080/v1/update",
+        description=(
+            "Watchtower's HTTP API update endpoint, reachable on the compose network. "
+            "Only consulted in a Docker deployment, and only when a token is set. "
+            "Blank disables the in-app update trigger."
+        ),
+    )
+    watchtower_token: str = Field(
+        default="",
+        description=(
+            "Shared secret for the above, sent to Watchtower on every trigger and "
+            "matching its WATCHTOWER_HTTP_API_TOKEN. Blank (the default) leaves the "
+            "in-app Update button reporting that updates run from the host."
+        ),
+    )
     disk_alert_threshold_mb: int = Field(
         default=500,
         description=(

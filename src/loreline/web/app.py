@@ -119,7 +119,13 @@ def _build_state(
     alert_manager = AlertManager(
         settings=settings_repo, secrets=secrets, client_factory=alert_client_factory
     )
-    updater = Updater(app_dir=settings.app_dir, unit=settings.systemd_unit, runner=command_runner)
+    updater = Updater(
+        app_dir=settings.app_dir,
+        unit=settings.systemd_unit,
+        runner=command_runner,
+        watchtower_url=settings.watchtower_url,
+        watchtower_token=settings.watchtower_token,
+    )
     autostart = Autostart(unit=settings.systemd_unit, runner=command_runner)
     transcript_bus: EventBus[TranscriptEvent] = EventBus()
     # One factory for both managers, so a live session and a reprocess job

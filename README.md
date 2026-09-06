@@ -134,10 +134,12 @@ The app, its dependencies and the built UI all live inside the image.
 
 #### Updating
 
-The web UI's update button is not available in a Docker deployment. Handing the
-container the Docker socket access it would need to restart itself is
+The web UI's update button cannot update a Docker deployment by itself. Handing
+the container the Docker socket access it would need to restart itself is
 effectively root on the host, and that is not a trade this project makes for you
-silently. Update from the host instead:
+silently. That still holds, and nothing below changes it; what the last of the
+options below adds is a way for the button to hand the job to something that
+already has that access. By default, update from the host:
 
 ```bash
 deploy/update.sh                                   # git pull + compose pull + up -d
@@ -205,6 +207,48 @@ Three things worth knowing before you enable it:
   label, so it is a one line change in `docker-compose.yml` if you would rather
   run that. This repo does not point at it by default because nobody here has
   audited it.
+
+**With Watchtower running, the update button works again.** Watchtower 1.7.1 can
+also answer an HTTP request that runs its update check immediately, and the app
+can reach that over the compose network. Set both of these in `.env`
+(`deploy/install.sh` writes them for you, whether or not you enabled the
+profile):
+
+```bash
+WATCHTOWER_HTTP_API_UPDATE=true
+WATCHTOWER_HTTP_API_TOKEN=<a long random string>
+```
+
+Settings > Client's "Update now" then triggers exactly the update the 04:00
+check triggers. This is a fourth way to reach one mechanism, not a fourth
+mechanism: without the Watchtower profile there is nothing for the button to
+call, and with it, asking early does what waiting until 04:00 would have done.
+
+The socket boundary is untouched. The app sends one token-carrying POST to a
+sibling container, holds no Docker access before or after, and can ask for
+nothing beyond "run your check now". What it gets back is nothing worth
+reporting, and the button says so: it reports the update as *triggered*, not
+finished. The container it recreates is the one that answered you, so that
+container is in no position to describe how it ends, and "Update complete" would
+be a guess. You see it land when the app comes back on its own a few minutes
+later, or in `sudo docker compose logs watchtower`.
+
+Three more things, these ones specific to the API:
+
+- **Both variables or neither.** Watchtower exits at startup when its API is
+  enabled with an empty token, so half-configuring this is a crash loop, not a
+  disabled feature. With neither set, the button reports what it always
+  reported: update from the host.
+- **The 04:00 check keeps running.** Worth knowing because 1.7.1 does not do
+  that on its own: enabling the API replaces the schedule rather than adding to
+  it, since the API server takes over the process and the cron scheduler is
+  never started at all, silently. `docker-compose.yml` sets
+  `WATCHTOWER_HTTP_API_PERIODIC_POLLS=true` to keep both, which is why you do
+  not have to.
+- **Port 8080 stays on the compose network.** `docker-compose.yml` does not
+  publish it, so the trigger answers the other services and nothing on your LAN.
+  In 1.7.1 that port is hardcoded and the API binds every interface inside the
+  container, so publishing it is the one thing not to do here.
 
 Watchtower's notifications are its own, not Loreline's: it does not appear under
 Settings, Alerts and this repo does not wire it in there. It speaks

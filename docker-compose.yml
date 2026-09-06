@@ -59,6 +59,16 @@ services:
       LORELINE_LOG_JSON: "true"
       # Unset this to turn Settings > Services off entirely.
       LORELINE_DOCKER_API: http://docker-proxy:2375
+      # Lets the web UI's "Update now" button trigger the optional watchtower
+      # service below, over the compose network. Note what this is not: the app
+      # still has no Docker socket and no path to one. It sends a single
+      # token-gated HTTP request to a container that already holds that access
+      # for its own reason, and learns nothing back beyond "delivered" - the
+      # boundary described at the bottom of this file is unmoved. Same secret as
+      # WATCHTOWER_HTTP_API_TOKEN down there, read from one .env entry so the
+      # two halves can't drift apart. Empty (the default) leaves the button
+      # reporting that updates run from the host, exactly as before.
+      LORELINE_WATCHTOWER_TOKEN: ${WATCHTOWER_HTTP_API_TOKEN:-}
       # Peers whose X-Forwarded-Proto this app believes when it decides whether
       # to mark the login cookie Secure. This is the private range Compose puts
       # its own network in, so it covers the caddy service below - and, what
@@ -235,6 +245,34 @@ services:
       # forwarding log lines on every poll.
       WATCHTOWER_NOTIFICATION_REPORT: "true"
       TZ: ${TZ:-UTC}
+      # HTTP API mode. Adds `POST /v1/update` on :8080, which runs the same
+      # check the schedule above runs, on demand - that is what makes the web
+      # UI's update button work in a Docker deployment (see the app service's
+      # LORELINE_WATCHTOWER_TOKEN, and the README's "Updating"). It is a second
+      # way to reach one mechanism, not a second mechanism.
+      #
+      # Set both of these or neither. 1.7.1 calls log.Fatal and exits the whole
+      # process when an API handler is registered with an empty token, so
+      # turning the first on without the second turns this container into a
+      # crash loop. deploy/install.sh writes both into .env for you.
+      WATCHTOWER_HTTP_API_UPDATE: ${WATCHTOWER_HTTP_API_UPDATE:-false}
+      WATCHTOWER_HTTP_API_TOKEN: ${WATCHTOWER_HTTP_API_TOKEN:-}
+      # Not optional once the API is on, for a reason that is invisible from
+      # the outside: in 1.7.1, `httpAPI.Start(enableUpdateAPI && !periodicPolls)`
+      # runs ListenAndServe on the main goroutine, so the runUpgradesOnSchedule
+      # call below it is never reached and WATCHTOWER_SCHEDULE above silently
+      # becomes dead config. With this set, the API server moves to its own
+      # goroutine, the cron scheduler runs as it always did, and one shared lock
+      # stops the two from updating at the same time. Harmless when the API is
+      # off (nothing registers a handler, so no server starts either way).
+      WATCHTOWER_HTTP_API_PERIODIC_POLLS: "true"
+    # Reachable at http://watchtower:8080 from the other services and from
+    # nowhere else: no `ports:` here, deliberately. `expose` publishes nothing -
+    # containers on a compose network can already reach each other's ports - it
+    # only records which port the app is expected to use. A token-gated trigger
+    # that recreates containers has no business answering the LAN.
+    expose:
+      - "8080"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     restart: unless-stopped

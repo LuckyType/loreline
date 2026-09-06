@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
+import httpx
 import pytest
 
 from loreline.updater import Autostart, Updater
@@ -82,6 +83,119 @@ async def test_rollback_refuses_in_container() -> None:
     assert not result.ok
     assert "deploy/update.sh" in result.output
     assert not any(a[:2] == ["git", "reset"] for a in runner.calls)
+
+
+# --- Docker deployment: the watchtower HTTP trigger --------------------------
+
+
+def _in_container_updater(
+    handler: Callable[[httpx.Request], httpx.Response], *, token: str = "s3cret"
+) -> tuple[Updater, FakeRunner]:
+    """An updater that believes it's containerised, wired to a fake watchtower."""
+    runner = FakeRunner(lambda argv: CommandResult(0, "sha\n", ""))
+    updater = Updater(
+        app_dir=Path("/app"),
+        runner=runner,
+        in_container=True,
+        watchtower_url="http://watchtower:8080/v1/update",
+        watchtower_token=token,
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    return updater, runner
+
+
+async def test_update_in_container_triggers_watchtower() -> None:
+    seen: list[httpx.Request] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200)
+
+    updater, runner = _in_container_updater(handle)
+    result = await updater.update()
+
+    assert result.ok
+    assert "Watchtower" in result.output
+    # "triggered", never "complete": the container answering is the one being
+    # replaced, so it cannot have watched the update finish.
+    assert "complete" not in result.output.lower()
+    # One line, so Settings > Client shows it as the message instead of burying
+    # it in the output pane.
+    assert "\n" not in result.output
+    assert len(seen) == 1
+    assert str(seen[0].url) == "http://watchtower:8080/v1/update"
+    # The header 1.7.1's RequireToken actually compares, not the bare `Token:`
+    # one its docs at that tag also describe.
+    assert seen[0].headers["authorization"] == "Bearer s3cret"
+    # And still no attempt at the source-only script from inside a container.
+    assert not any(a[0] == "bash" for a in runner.calls)
+
+
+async def test_update_in_container_treats_a_read_timeout_as_triggered() -> None:
+    """/v1/update answers only once the update it started is over - i.e. never."""
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("timed out", request=request)
+
+    updater, _ = _in_container_updater(handle)
+    result = await updater.update()
+
+    assert result.ok
+    assert "Watchtower" in result.output
+
+
+async def test_update_in_container_falls_back_when_watchtower_is_absent() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused", request=request)
+
+    updater, _ = _in_container_updater(handle)
+    result = await updater.update()
+
+    assert not result.ok
+    assert "deploy/update.sh" in result.output
+
+
+async def test_update_in_container_without_a_token_never_calls_out() -> None:
+    calls: list[httpx.Request] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(200)
+
+    updater, _ = _in_container_updater(handle, token="")
+    result = await updater.update()
+
+    assert not result.ok
+    assert "deploy/update.sh" in result.output
+    assert not calls
+
+
+async def test_update_in_container_reports_a_rejected_token() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401)
+
+    updater, _ = _in_container_updater(handle)
+    result = await updater.update()
+
+    assert not result.ok
+    assert "WATCHTOWER_HTTP_API_TOKEN" in result.output
+    assert "\n" not in result.output
+
+
+async def test_rollback_in_container_never_triggers_watchtower() -> None:
+    """Watchtower only moves forward, and cleanup already deleted the old image."""
+    calls: list[httpx.Request] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(200)
+
+    updater, _ = _in_container_updater(handle)
+    result = await updater.rollback("deadbeef")
+
+    assert not result.ok
+    assert "deploy/update.sh" in result.output
+    assert not calls
 
 
 async def test_update_failure_captured() -> None:
