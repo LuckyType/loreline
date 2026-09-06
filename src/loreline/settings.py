@@ -56,7 +56,10 @@ class Settings(BaseSettings):
     )
     disk_alert_threshold_mb: int = Field(
         default=500,
-        description="Free-space floor; below this /healthz reports 'degraded'.",
+        description=(
+            "Free-space floor; below this /healthz reports 'degraded' and a recording "
+            "session pushes a low-disk alert. 0 disables both."
+        ),
     )
     # The only outbound call this app makes without a user asking for one, so
     # it gets a switch: an air-gapped deployment, or one that would rather not
@@ -80,6 +83,16 @@ class Settings(BaseSettings):
         description="HMAC secret for session JWTs; auto-generated + persisted if left default.",
     )
     jwt_ttl_seconds: int = Field(default=60 * 60 * 12)
+    trusted_proxies: str = Field(
+        default="",
+        description=(
+            "Comma-separated IPs/CIDRs of reverse proxies allowed to speak for the "
+            "client, e.g. '172.16.0.0/12' for the bundled Caddy on the compose "
+            "network. Only from these peers is X-Forwarded-Proto believed when "
+            "deciding whether to mark the auth cookie Secure. Empty (the default) "
+            "trusts nothing and reads the scheme off the connection itself."
+        ),
+    )
 
     # --- Logging ---
     log_level: str = Field(default="INFO")
@@ -105,6 +118,11 @@ class Settings(BaseSettings):
     @property
     def secrets_path(self) -> Path:
         return self.data_dir / "secrets.json"
+
+    @property
+    def disk_alert_threshold_bytes(self) -> int:
+        """The free-space floor in bytes (health badge and live capture check)."""
+        return self.disk_alert_threshold_mb * 1024 * 1024
 
 
 @lru_cache(maxsize=1)

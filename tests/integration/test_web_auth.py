@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import pytest
@@ -62,6 +63,96 @@ async def test_logout_clears_cookie(auth_client: AsyncClient) -> None:
     await auth_client.post("/api/auth/logout")
     resp = await auth_client.get("/api/providers")
     assert resp.status_code == 401
+
+
+# The cookie's Secure flag. This deployment serves the app two ways at once:
+# plain HTTP straight onto its published port (the primary path), and HTTPS via
+# the bundled Caddy, which then speaks plain HTTP to the app. Both look like
+# "http" to the app, so the flag comes from X-Forwarded-Proto - and because that
+# published port is reachable without going through Caddy at all, the header is
+# only believed from a peer the operator listed as a proxy.
+
+
+@asynccontextmanager
+async def _login_client(
+    settings: Settings, *, base_url: str = "http://test", peer: str = "127.0.0.1"
+) -> AsyncGenerator[AsyncClient, None]:
+    """A client whose scheme and apparent source address the test chooses."""
+    app = create_app(settings)
+    async with LifespanManager(app):
+        transport = ASGITransport(app=app, client=(peer, 45678))
+        async with AsyncClient(transport=transport, base_url=base_url) as ac:
+            yield ac
+
+
+async def _login_cookie(client: AsyncClient, forwarded_proto: str | None = None) -> str:
+    """Log in, optionally claiming a forwarded scheme, and return the Set-Cookie."""
+    headers = {} if forwarded_proto is None else {"X-Forwarded-Proto": forwarded_proto}
+    resp = await client.post("/api/auth/login", json={"password": "hunter2"}, headers=headers)
+    assert resp.status_code == 200
+    return resp.headers["set-cookie"].lower()
+
+
+async def test_the_cookie_is_not_secure_over_plain_http(auth_client: AsyncClient) -> None:
+    """The LAN path is plain HTTP; a Secure cookie there is never sent back."""
+    assert "secure" not in await _login_cookie(auth_client)
+
+
+async def test_the_cookie_is_secure_over_a_direct_https_connection(
+    auth_settings: Settings,
+) -> None:
+    async with _login_client(auth_settings, base_url="https://test") as client:
+        assert "secure" in await _login_cookie(client)
+
+
+async def test_a_forwarded_https_claim_alone_does_not_mark_the_cookie_secure(
+    auth_settings: Settings,
+) -> None:
+    """Nothing is trusted by default, and the header is anyone's to send."""
+    async with _login_client(auth_settings) as client:
+        assert "secure" not in await _login_cookie(client, "https")
+
+
+async def test_a_forwarded_https_claim_from_an_untrusted_peer_is_ignored(
+    tmp_path: Path,
+) -> None:
+    """A LAN client on the published port is not the proxy, whatever it says."""
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        auth_password="hunter2",
+        jwt_secret="test-secret",
+        trusted_proxies="172.16.0.0/12",
+    )
+    async with _login_client(settings, peer="192.168.1.50") as client:
+        assert "secure" not in await _login_cookie(client, "https")
+
+
+async def test_a_forwarded_https_claim_from_the_proxy_marks_the_cookie_secure(
+    tmp_path: Path,
+) -> None:
+    """Behind the TLS front end the browser's hop was HTTPS, so the flag belongs."""
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        auth_password="hunter2",
+        jwt_secret="test-secret",
+        trusted_proxies="10.0.0.0/8, 127.0.0.0/8",
+    )
+    async with _login_client(settings) as client:  # peer 127.0.0.1, a listed proxy
+        assert "secure" in await _login_cookie(client, "https")
+
+
+async def test_the_proxy_reporting_plain_http_leaves_the_cookie_unsecured(
+    tmp_path: Path,
+) -> None:
+    """Caddy's :80 listener forwards http, and that cookie has to keep working."""
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        auth_password="hunter2",
+        jwt_secret="test-secret",
+        trusted_proxies="127.0.0.0/8",
+    )
+    async with _login_client(settings) as client:
+        assert "secure" not in await _login_cookie(client, "http")
 
 
 async def test_auth_disabled_allows_access(client: AsyncClient) -> None:

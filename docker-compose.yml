@@ -59,6 +59,14 @@ services:
       LORELINE_LOG_JSON: "true"
       # Unset this to turn Settings > Services off entirely.
       LORELINE_DOCKER_API: http://docker-proxy:2375
+      # Peers whose X-Forwarded-Proto this app believes when it decides whether
+      # to mark the login cookie Secure. This is the private range Compose puts
+      # its own network in, so it covers the caddy service below - and, what
+      # matters more, it does not cover a LAN client arriving on the port
+      # published above, which therefore cannot claim its plain-HTTP connection
+      # was TLS. Drop this line if you drop the caddy service: with it unset the
+      # app trusts no forwarded header and reads the scheme off the connection.
+      LORELINE_TRUSTED_PROXIES: 172.16.0.0/12
     volumes:
       - ./data:/app/data
     # Real microphone capture needs the host's audio device node passed

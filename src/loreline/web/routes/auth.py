@@ -6,7 +6,7 @@ from fastapi import APIRouter, Request, Response
 from fastapi.exceptions import HTTPException
 from starlette.status import HTTP_401_UNAUTHORIZED, HTTP_429_TOO_MANY_REQUESTS
 
-from loreline.web.auth import COOKIE_NAME, issue_token, verify_password
+from loreline.web.auth import COOKIE_NAME, client_uses_https, issue_token, verify_password
 from loreline.web.deps import get_state
 from loreline.web.schemas import LoginRequest, OkResponse
 
@@ -38,13 +38,26 @@ async def login(request: Request, body: LoginRequest, response: Response) -> OkR
         token,
         httponly=True,
         samesite="lax",
+        # Set only for a browser that reached us over TLS, which on this
+        # deployment means through the bundled Caddy: marking it unconditionally
+        # would stop the cookie being sent at all on the plain-HTTP LAN path
+        # this app primarily supports. See client_uses_https for why the
+        # forwarded scheme is only believed from a configured proxy.
+        secure=client_uses_https(request, settings),
         max_age=settings.jwt_ttl_seconds,
     )
     return OkResponse()
 
 
 @router.post("/logout")
-async def logout(response: Response) -> OkResponse:
+async def logout(request: Request, response: Response) -> OkResponse:
     """Clear the auth cookie."""
-    response.delete_cookie(COOKIE_NAME)
+    # Same attributes the cookie was set with, so the expiry lands on that
+    # cookie rather than alongside it.
+    response.delete_cookie(
+        COOKIE_NAME,
+        httponly=True,
+        samesite="lax",
+        secure=client_uses_https(request, get_state(request).settings),
+    )
     return OkResponse()

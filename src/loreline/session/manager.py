@@ -11,10 +11,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import time
 import uuid
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Generator
 from dataclasses import dataclass, field
+from functools import partial
 from typing import TYPE_CHECKING, Protocol, cast, runtime_checkable
 
 from loreline.audio.chunker import SpeechDetector, Utterance, VadChunker
@@ -29,6 +31,7 @@ from loreline.models import (
     rebase_transcript,
 )
 from loreline.monitoring.alerts import AlertLevel
+from loreline.monitoring.health import disk_usage
 from loreline.stt.registry import BackendFactory, create_backend
 from loreline.stt.router import ProvidersExhaustedError, RouterConfig, SttRouter
 
@@ -94,6 +97,23 @@ class ProviderDisabledError(ValueError):
     """Raised when a referenced provider exists but is disabled."""
 
 
+class DiskFullError(RuntimeError):
+    """The recording disk ran out of space; the audio written so far is intact.
+
+    Raised in place of the raw ``ENOSPC`` ``OSError`` the audio writer throws,
+    so the teardown can tell this apart from a capture that crashed. Nothing can
+    keep recording without space to record into, so the session still ends - but
+    it ends *completed*, because everything written up to that point is a
+    complete, re-transcribable WAV. Carries ``saved_seconds`` so the alert can
+    say how much audio is safe, which is exactly what a GM reading a generic
+    "session error" would have every reason to doubt.
+    """
+
+    def __init__(self, *, saved_seconds: float) -> None:
+        super().__init__(f"no space left on device after {saved_seconds:.1f}s of audio")
+        self.saved_seconds = saved_seconds
+
+
 class SessionConfigError(ValueError):
     """Raised when the start request's config can't be honored.
 
@@ -150,6 +170,97 @@ class _CaptureStats:
         return max(0.0, time.monotonic() - self.last_frame_mono)
 
 
+_BYTES_PER_SAMPLE = 2  # mono s16le, the one format capture writes
+# How often an active capture re-reads free space. A session writes about
+# 115 MB an hour, so half a minute of recording costs under a megabyte of
+# headroom: often enough to warn long before the floor is gone, rare enough to
+# be one stat() per ~1500 frames.
+_DISK_CHECK_INTERVAL_S = 30.0
+# Free space has to climb this far back above the floor before a second low-disk
+# alert can fire. Without it, a session sitting on the boundary (a byte over,
+# a byte under) would alert every half minute for the rest of the evening.
+_DISK_REARM_FACTOR = 1.1
+# Past an hour and a half, an alert reads better in hours than in minutes.
+_MINUTES_BEFORE_HOURS = 90
+
+
+@dataclass(slots=True)
+class _DiskWatch:
+    """Watches the recording disk's headroom for as long as a session records.
+
+    ``/healthz`` already grades free space, but nothing was looking at it *while
+    a session ran*: an evening of capture writes gigabytes, so a disk that was
+    comfortable at Start can cross the floor hours later with nothing but a
+    badge on a page nobody is watching to say so. This runs from inside the
+    capture loop rather than as a task of its own - it then lives exactly as
+    long as the recording does, with no second lifecycle to start, cancel and
+    await - and self-throttles to one reading per ``interval_s``.
+
+    ``on_low`` fires once per crossing, not once per check.
+    """
+
+    free_bytes: Callable[[], int]
+    threshold_bytes: int
+    on_low: Callable[[int], Awaitable[None]]
+    interval_s: float = _DISK_CHECK_INTERVAL_S
+    _next_check: float = field(default=0.0, init=False)  # 0 -> the first frame checks
+    _alerted: bool = field(default=False, init=False)
+
+    async def check(self) -> None:
+        """Read free space at most once per interval; alert on a new crossing."""
+        now = time.monotonic()
+        if now < self._next_check:
+            return
+        self._next_check = now + self.interval_s
+        free = await asyncio.to_thread(self.free_bytes)
+        if free >= self.threshold_bytes * _DISK_REARM_FACTOR:
+            self._alerted = False  # recovered, so a later crossing alerts again
+        elif free < self.threshold_bytes and not self._alerted:
+            self._alerted = True
+            await self.on_low(free)
+
+
+def _megabytes(byte_count: float) -> int:
+    return round(byte_count / (1024 * 1024))
+
+
+def _approx_duration(seconds: float) -> str:
+    """A rough spoken length ("40 minutes", "3.5 hours") for an alert."""
+    minutes = seconds / 60
+    if minutes < 1:
+        return "less than a minute"
+    if minutes < _MINUTES_BEFORE_HOURS:
+        whole = round(minutes)
+        return f"{whole} minute{'s' if whole != 1 else ''}"
+    return f"{minutes / 60:.1f} hours"
+
+
+def _low_disk_message(free: int, threshold: int, bytes_per_second: int) -> str:
+    """What the GM is told while there is still time to do something about it."""
+    left = _approx_duration(free / bytes_per_second) if bytes_per_second > 0 else "unknown"
+    return (
+        f"Free space is down to {_megabytes(free)} MB, below the "
+        f"{_megabytes(threshold)} MB floor. That is about {left} of recording left. "
+        "Free some space now: when the disk fills, the recording stops."
+    )
+
+
+def _disk_full_message(saved_seconds: float) -> str:
+    """What the GM is told once the disk is actually full.
+
+    Deliberately not a crash report. The recording did stop early, but the audio
+    already on disk is complete and re-transcribable, and "session error" on its
+    own invites exactly the opposite conclusion - the same reason ``stt_error``
+    carries the vendor's own sentence instead of "transcription stopped".
+    """
+    return (
+        "The disk is full, so recording stopped and the session was closed. The "
+        f"{_approx_duration(saved_seconds)} of audio captured before that is saved and "
+        "complete: it can still be transcribed and re-processed. Free some space before "
+        "starting the next session."
+    )
+
+
 @dataclass(slots=True)
 class _Runtime:
     session: Session
@@ -181,6 +292,7 @@ class SessionManager:
         alerter: AlertManager | None = None,
         capture_factory: CaptureFactory | None = None,
         backend_factory: BackendFactory | None = None,
+        disk_threshold_bytes: int = 0,
     ) -> None:
         self._providers = providers
         self._glossaries = glossaries
@@ -190,6 +302,9 @@ class SessionManager:
         self._bus = transcript_bus
         self._audio_store = audio_store
         self._alerter = alerter
+        # Free-space floor for the live check during capture; the same number
+        # /healthz grades the badge against. 0 turns the check off.
+        self._disk_threshold_bytes = disk_threshold_bytes
         self._capture_factory = capture_factory or _default_capture
         self._backend_factory = backend_factory or create_backend
         self._diarizer_factory = diarizer_factory
@@ -483,7 +598,10 @@ class SessionManager:
             self._runtime = None
 
         with log_context(session_id=runtime.session.id):
-            log.error("session.capture.died", session_id=runtime.session.id)
+            # A full disk is not a death: the capture stopped on purpose because
+            # there was nowhere left to write, and _finish logs it as such.
+            if not isinstance(task.exception(), DiskFullError):
+                log.error("session.capture.died", session_id=runtime.session.id)
             try:
                 await self._finish(runtime)
             except Exception:  # pragma: no cover - defensive: this task has no caller
@@ -498,7 +616,9 @@ class SessionManager:
         even though none of the code emitting them is holding its id.
         """
         runtime.source.stop()
+        session_id = runtime.session.id
         status = SessionStatus.COMPLETED
+        disk_full: DiskFullError | None = None
         try:
             # Bounded drain: with STT healthy the router finishes its queue in
             # moments, but an unreachable backend leaves a deep utterance
@@ -509,20 +629,36 @@ class SessionManager:
             # the skipped tail stays re-transcribable from stored audio.
             await asyncio.wait_for(runtime.router_task, timeout=_STOP_DRAIN_TIMEOUT_S)
         except TimeoutError:
-            log.warning("session.stop.drain_timeout", session_id=runtime.session.id)
+            log.warning("session.stop.drain_timeout", session_id=session_id)
+        except DiskFullError as exc:
+            # The recording ended because the disk did, which is not a crash:
+            # the WAV is complete up to this point, so the session finalizes as
+            # completed and the alert below explains why the evening is short.
+            disk_full = exc
+            log.error(
+                "session.capture.disk_full",
+                session_id=session_id,
+                saved_seconds=round(exc.saved_seconds, 1),
+            )
         except Exception:
-            log.exception("session.router.failed", session_id=runtime.session.id)
+            log.exception("session.router.failed", session_id=session_id)
             status = SessionStatus.ERROR
 
         await runtime.session_bus.aclose()
-        await runtime.persist_task
+        with _keep_finalizing("persist", session_id):
+            # Every step from here on is best-effort for one reason: a disk with
+            # no room left fails the transcript write, the sidecar write and the
+            # status update alike, and a session left at "capturing" forever is
+            # the one outcome worse than a session that ended early.
+            await runtime.persist_task
 
         if runtime.audio_writer is not None:
-            # Finalizing can mean flushing a long WAV header + a large index
-            # sidecar; this runs inside the stop-session request handler, so
-            # keep it off the event loop rather than stalling the response
-            # (and every other concurrent request) on disk I/O.
-            await asyncio.to_thread(runtime.audio_writer.close)
+            with _keep_finalizing("audio_writer", session_id):
+                # Finalizing can mean flushing a long WAV header + a large index
+                # sidecar; this runs inside the stop-session request handler, so
+                # keep it off the event loop rather than stalling the response
+                # (and every other concurrent request) on disk I/O.
+                await asyncio.to_thread(runtime.audio_writer.close)
 
         for backend in runtime.backends:
             with contextlib.suppress(Exception):
@@ -530,13 +666,22 @@ class SessionManager:
         with contextlib.suppress(Exception):
             await runtime.diarizer.aclose()
 
-        await self._sessions.finish(runtime.session.id, status)
+        with _keep_finalizing("sessions.finish", session_id):
+            await self._sessions.finish(session_id, status)
         runtime.session.status = status
-        log.info("session.stop", session_id=runtime.session.id, status=status.value)
-        if status is SessionStatus.ERROR:
+        log.info("session.stop", session_id=session_id, status=status.value)
+        # Sent last, and never skipped by a failed step above: when the disk is
+        # what broke, a push notification is the only channel still working.
+        if disk_full is not None:
+            await self._notify(
+                "Recording stopped: disk full",
+                _disk_full_message(disk_full.saved_seconds),
+                level=AlertLevel.ERROR,
+            )
+        elif status is SessionStatus.ERROR:
             await self._notify(
                 "Session error",
-                f"Session {runtime.session.id} ended with an error.",
+                f"Session {session_id} ended with an error.",
                 level=AlertLevel.ERROR,
             )
         return runtime.session
@@ -550,6 +695,33 @@ class SessionManager:
             return
         with contextlib.suppress(Exception):
             await self._alerter.send(title, message, level=level)
+
+    def _make_disk_watch(self, sample_rate: int) -> _DiskWatch | None:
+        """Watch headroom on the filesystem this session's audio lands on.
+
+        None when there is nothing to watch: no audio store (this session writes
+        no recording) or no configured floor. The path is the audio store's own
+        directory rather than the data dir, so the check follows the recording
+        even where audio is mounted on a separate disk.
+        """
+        if self._audio_store is None or self._disk_threshold_bytes <= 0:
+            return None
+        root = self._audio_store.root
+        threshold = self._disk_threshold_bytes
+        bytes_per_second = sample_rate * _BYTES_PER_SAMPLE
+
+        def free_bytes() -> int:
+            return disk_usage(root)[0]
+
+        async def on_low(free: int) -> None:
+            log.warning("session.disk.low", free_bytes=free, threshold_bytes=threshold)
+            await self._notify(
+                "Disk space low",
+                _low_disk_message(free, threshold, bytes_per_second),
+                level=AlertLevel.WARNING,
+            )
+
+        return _DiskWatch(free_bytes=free_bytes, threshold_bytes=threshold, on_low=on_low)
 
     async def _run_router(
         self,
@@ -574,7 +746,15 @@ class SessionManager:
         # utterance is dropped (logged) instead of corrupting live frames.
         queue: asyncio.Queue[object] = asyncio.Queue(maxsize=_UTTERANCE_QUEUE_MAX)
         capture_task = asyncio.create_task(
-            _capture_utterances(source, detector, chunker, audio_writer, stats, queue)
+            _capture_utterances(
+                source,
+                detector,
+                chunker,
+                audio_writer,
+                stats,
+                queue,
+                disk_watch=self._make_disk_watch(stats.sample_rate),
+            )
         )
         utterances = _dequeue(queue)
         try:
@@ -622,6 +802,38 @@ _CAPTURE_DONE = object()
 _STOP_DRAIN_TIMEOUT_S = 30.0
 
 
+@contextlib.contextmanager
+def _keep_finalizing(step: str, session_id: str) -> Generator[None, None, None]:
+    """Log a teardown step that failed and carry on with the next one.
+
+    Used only inside :meth:`SessionManager._finish`, where giving up halfway
+    leaves the session row at ``capturing`` for good - no code path revisits it
+    short of a restart, and the GM is told nothing at all.
+    """
+    try:
+        yield
+    except Exception:
+        log.exception("session.teardown.failed", step=step, session_id=session_id)
+
+
+async def _store_audio(write: Callable[[], None], saved_seconds: float) -> None:
+    """Run one blocking audio-store write off the loop, naming a full disk.
+
+    ``ENOSPC`` is the write failure worth telling apart: everything already
+    written is intact, so it ends the recording as a clean stop rather than as
+    the crash every other ``OSError`` here really is. Raised as
+    :class:`DiskFullError` for the teardown to recognise, and translated at this
+    call site rather than in the writer so any writer - the real one, or a fake
+    in a test - gets the same treatment.
+    """
+    try:
+        await asyncio.to_thread(write)
+    except OSError as exc:
+        if exc.errno != errno.ENOSPC:
+            raise
+        raise DiskFullError(saved_seconds=saved_seconds) from exc
+
+
 def _offer(queue: asyncio.Queue[object], item: object) -> None:
     """Enqueue without blocking; drop the oldest item if the queue is full."""
     if queue.full():
@@ -638,6 +850,7 @@ async def _capture_utterances(
     audio_writer: SessionAudioWriter | None,
     stats: _CaptureStats,
     queue: asyncio.Queue[object],
+    disk_watch: _DiskWatch | None = None,
 ) -> None:
     """Drain frames through VAD + chunking into ``queue`` (never blocks).
 
@@ -661,7 +874,13 @@ async def _capture_utterances(
                 # from STT latency, but a blocking write here would still stall
                 # every other coroutine (health polls, WS streams, HTTP requests)
                 # for its duration.
-                await asyncio.to_thread(audio_writer.append_frame, frame)  # incl. silence
+                write = partial(audio_writer.append_frame, frame)  # incl. silence
+                await _store_audio(write, stats.seconds)
+            if disk_watch is not None:
+                # Watched from in here because this loop runs for exactly as
+                # long as the recording does; the watch reads the disk once
+                # every _DISK_CHECK_INTERVAL_S, not once per frame.
+                await disk_watch.check()
             # ONNX inference off the event loop for the same reason.
             is_speech = await asyncio.to_thread(detector, frame)
             utterance = chunker.feed(frame, ts=ts, is_speech=is_speech)
@@ -669,8 +888,14 @@ async def _capture_utterances(
                 if audio_writer is not None:
                     # mark_utterance persists the index sidecar - disk I/O, so off
                     # the event loop like the frame writes above.
-                    await asyncio.to_thread(audio_writer.mark_utterance, utterance)
+                    mark = partial(audio_writer.mark_utterance, utterance)
+                    await _store_audio(mark, stats.seconds)
                 _offer(queue, utterance)
+    except DiskFullError:
+        # Not a crash, so not a traceback: the recording stopped because there
+        # was nowhere left to put it, and what reached the disk is complete.
+        log.error("capture.disk_full", saved_seconds=round(stats.seconds, 1))
+        raise
     except Exception:
         # Logged here, where the session context is still bound, rather than
         # left for whoever eventually awaits this task.
@@ -681,7 +906,7 @@ async def _capture_utterances(
             final = chunker.flush()
             if final is not None:
                 if audio_writer is not None:
-                    await asyncio.to_thread(audio_writer.mark_utterance, final)
+                    await _store_audio(partial(audio_writer.mark_utterance, final), stats.seconds)
                 _offer(queue, final)
         finally:
             _offer(queue, _CAPTURE_DONE)

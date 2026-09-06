@@ -36,6 +36,21 @@ class _Sinks:
 
 _SINKS = _Sinks()
 
+#: The one processor list structlog is ever handed, rewritten in place by every
+#: :func:`configure_logging` call rather than replaced.
+#:
+#: Same root cause as :class:`_Sinks`, one level up: a bound logger caches this
+#: exact list object on first use, so handing structlog a *new* list on a later
+#: configure leaves every logger already in use running the previous chain.
+#: Invisible in production, where configure runs once. In one process that
+#: builds a second app - which is every test that calls ``create_app`` - it
+#: splits the loggers in two, and anything reaching into the live chain then
+#: only reaches half of them: ``structlog.testing.capture_logs`` swaps
+#: processors by mutating this list precisely because bound loggers hold it by
+#: reference, so an orphaned logger's lines go on being printed instead of
+#: captured, and a test asserting on them fails depending on what ran before it.
+_PROCESSORS: list[structlog.typing.Processor] = []
+
 
 def _field(event_dict: structlog.typing.EventDict, key: str) -> str | None:
     """Read one structured field as a non-empty string, or None."""
@@ -132,8 +147,13 @@ def configure_logging(
         else structlog.dev.ConsoleRenderer(colors=sys.stderr.isatty())
     )
 
+    # In place, keeping the list identity stable across reconfigures (see
+    # _PROCESSORS): loggers cached by an earlier call share this object, so this
+    # is what makes them pick up the new renderer instead of keeping the old.
+    _PROCESSORS[:] = [*shared_processors, structlog.processors.format_exc_info, renderer]
+
     structlog.configure(
-        processors=[*shared_processors, structlog.processors.format_exc_info, renderer],
+        processors=_PROCESSORS,
         wrapper_class=structlog.make_filtering_bound_logger(log_level),
         logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
         cache_logger_on_first_use=True,

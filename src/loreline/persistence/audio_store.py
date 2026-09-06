@@ -132,6 +132,16 @@ class AudioStore:
     def __init__(self, root: Path) -> None:
         self._root = root
 
+    @property
+    def root(self) -> Path:
+        """Directory the session WAVs and index sidecars are written to.
+
+        Exposed so a live session can watch free space on the filesystem its
+        recording actually lands on, which is not necessarily the one holding
+        the rest of the data dir.
+        """
+        return self._root
+
     def wav_path(self, session_id: str) -> Path:
         return self._root / f"{session_id}.wav"
 

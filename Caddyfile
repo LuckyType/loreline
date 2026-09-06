@@ -15,6 +15,13 @@
 # :80 stays available with no redirect, so a device that hasn't trusted the
 # internal CA yet isn't locked out of the app entirely.
 #
+# `reverse_proxy` sets X-Forwarded-Proto on everything it forwards, and the
+# app reads it to decide whether the login cookie gets the Secure flag: `https`
+# here means the browser's own hop was TLS even though this one is not. The app
+# only believes that header from a peer listed in LORELINE_TRUSTED_PROXIES
+# (set in docker-compose.yml), because its port is published on the host too.
+# Keep this proxy in front of the app if you want Secure cookies.
+#
 # `tls internal` needs a hostname to mint a certificate for. There isn't a
 # fixed one here - this box is reached by whatever LAN IP it happens to have
 # - so `on_demand` tells Caddy to issue a cert for whatever name/IP a client

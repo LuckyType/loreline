@@ -137,6 +137,7 @@ def _build_state(
         capture_factory=capture_factory,
         backend_factory=backend_factory,
         diarizer_factory=diarizers,
+        disk_threshold_bytes=settings.disk_alert_threshold_bytes,
     )
     reprocess_manager = ReprocessManager(
         providers=provider_repo,
