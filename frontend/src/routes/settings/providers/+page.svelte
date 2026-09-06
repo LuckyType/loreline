@@ -535,6 +535,19 @@ async function remove(id: string) {
 onMount(load)
 </script>
 
+{#if actionSetup.error}
+	<!-- The table below reads actionSetup.providers directly and renders "No
+	     providers yet" the moment it's empty - indistinguishable from a fetch
+	     that actually failed unless the failure says so here. Mirrors the
+	     capabilities banner in +layout.svelte, including its retry. -->
+	<div
+		class="mb-4 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+	>
+		<span>{actionSetup.error}</span>
+		<button class="underline underline-offset-2" onclick={() => actionSetup.reload()}>Retry</button>
+	</div>
+{/if}
+
 {#if message}
 	<p class="mb-4 text-sm text-muted-foreground">{message}</p>
 {/if}
