@@ -90,7 +90,14 @@ function startMeter() {
 	levelWs = new WebSocket(`${proto}://${location.host}/ws/audio/level${q}`)
 	metering = true
 	levelWs.onmessage = (event) => {
-		const data = JSON.parse(event.data) as { peak?: number; error?: string }
+		let data: { peak?: number; error?: string }
+		try {
+			data = JSON.parse(event.data) as { peak?: number; error?: string }
+		} catch {
+			// One malformed frame is not a reason to kill the meter.
+			console.warn('audio level: malformed frame', event.data)
+			return
+		}
 		if (data.error) {
 			meterError = data.error
 			stopMeter()

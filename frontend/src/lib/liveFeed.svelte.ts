@@ -18,7 +18,7 @@
  */
 
 import { untrack } from 'svelte'
-import { connect, type LiveSocket } from './ws'
+import { connect, type ConnectionStatus, type LiveSocket } from './ws'
 
 export interface LiveFeedOptions<T> {
 	/** Where to listen. Read reactively: a change reconnects. */
@@ -37,9 +37,11 @@ export interface LiveFeedOptions<T> {
 	accept?: (item: T, held: readonly T[]) => boolean
 	/** Whether an arriving item should scroll `element` to the tail. */
 	follow?: () => boolean
-	/** The socket's open state, for a status indicator. Called with `false` on
-	 *  teardown, so a pane that goes away stops claiming a live socket. */
-	onstatus?: (open: boolean) => void
+	/** The socket's connection status, for a status indicator: connected,
+	 *  reconnecting while a dropped socket backs off before its next try, or
+	 *  offline. Called with 'offline' on teardown, so a pane that goes away
+	 *  stops claiming a live socket. */
+	onstatus?: (status: ConnectionStatus) => void
 }
 
 /** A JSON `parse` for feeds whose frames are objects: a malformed frame is
@@ -91,7 +93,7 @@ export class LiveFeed<T> {
 			return () => {
 				gone = true
 				socket?.close()
-				options.onstatus?.(false)
+				options.onstatus?.('offline')
 			}
 		})
 	}
