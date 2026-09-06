@@ -32,8 +32,13 @@ import re
 import wave
 from collections.abc import Sequence
 
-from fastapi import FastAPI, Request, UploadFile
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+
+# Starlette's, not FastAPI's: ``request.form()`` yields the base class, and
+# FastAPI's same-named subclass is only what its parameter validation produces,
+# so an isinstance check against that one is always false here.
+from starlette.datastructures import UploadFile
 
 # Field name out of one multipart part's Content-Disposition header. The
 # lookbehind is load bearing: the audio part reads
