@@ -31,6 +31,12 @@ function when(ts: number): string {
 	return new Date(ts * 1000).toLocaleString()
 }
 
+/** "a and b" for two names, "a, b, and c" for more. */
+function joinNames(names: string[]): string {
+	if (names.length === 2) return `${names[0]} and ${names[1]}`
+	return `${names.slice(0, -1).join(', ')}, and ${names[names.length - 1]}`
+}
+
 async function reload() {
 	try {
 		sessions = await api.listSessions()
@@ -74,10 +80,19 @@ async function deleteSelected() {
 
 async function mergeSelected() {
 	if (selectedIds.length < 2) return
+	// Oldest to newest, matching merge_sessions' own sort - so the order named
+	// here is the order the parts actually land in.
+	const parts = [...sessions]
+		.filter((s) => selected[s.id])
+		.sort((a, b) => a.started_at - b.started_at)
+	const ok = await confirm({
+		description: `Merge ${joinNames(parts.map((s) => `session ${when(s.started_at)}`))} into a new session? The originals will be kept.`,
+	})
+	if (!ok) return
 	busy = true
 	error = ''
 	try {
-		const merged = await api.mergeSessions(selectedIds)
+		const merged = await api.mergeSessions(parts.map((s) => s.id))
 		goto(`/sessions/${merged.id}`)
 	} catch (err) {
 		error = err instanceof ApiError ? err.message : 'merge failed'
