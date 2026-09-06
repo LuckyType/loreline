@@ -1,6 +1,6 @@
 <script lang="ts">
 import '../app.css'
-import { PanelLeft } from '@lucide/svelte'
+import { Menu, PanelLeft, X } from '@lucide/svelte'
 import type { Snippet } from 'svelte'
 import { onDestroy, onMount } from 'svelte'
 import { goto } from '$app/navigation'
@@ -38,6 +38,21 @@ function toggleNav() {
 	} catch {
 		/* best effort */
 	}
+}
+
+// Below the sm breakpoint the sidebar becomes a dropdown overlay instead of a
+// pushed column, so it never eats into a phone's ~390px. Session-only by
+// design - unlike navCollapsed there is nothing here worth remembering across
+// visits.
+let mobileNavOpen = $state(false)
+let headerHeight = $state(0)
+
+function closeMobileNav() {
+	mobileNavOpen = false
+}
+
+function handleWindowKeydown(e: KeyboardEvent) {
+	if (mobileNavOpen && e.key === 'Escape') closeMobileNav()
 }
 
 const nav = [
@@ -116,18 +131,38 @@ function wsLabel(status: ConnectionStatus, liveWord: string): string {
 }
 </script>
 
+<svelte:window onkeydown={handleWindowKeydown} />
+
 {#if page.url.pathname === '/login'}
 	{@render children()}
 {:else}
 	<div class="flex min-h-screen flex-col">
-		<header class="flex items-center gap-4 border-b bg-card px-5 py-3">
+		<header
+			bind:clientHeight={headerHeight}
+			class="relative z-30 flex items-center gap-4 border-b bg-card px-5 py-3"
+		>
 			<Button
 				variant="ghost"
 				size="icon-sm"
+				class="hidden sm:inline-flex"
 				onclick={toggleNav}
 				aria-label={navCollapsed ? 'Show navigation' : 'Hide navigation'}
 			>
 				<PanelLeft class="size-4" />
+			</Button>
+			<Button
+				variant="ghost"
+				size="icon-sm"
+				class="sm:hidden"
+				onclick={() => (mobileNavOpen = !mobileNavOpen)}
+				aria-label={mobileNavOpen ? 'Close navigation' : 'Open navigation'}
+				aria-expanded={mobileNavOpen}
+			>
+				{#if mobileNavOpen}
+					<X class="size-4" />
+				{:else}
+					<Menu class="size-4" />
+				{/if}
 			</Button>
 			<div class="flex items-baseline gap-2">
 				<strong>Loreline</strong>
@@ -208,9 +243,34 @@ function wsLabel(status: ConnectionStatus, liveWord: string): string {
 			</div>
 			<Button variant="outline" size="sm" onclick={logout}>Logout</Button>
 		</header>
-		<div class="grid flex-1 {navCollapsed ? 'grid-cols-1' : 'grid-cols-[200px_1fr]'}">
+		{#if mobileNavOpen}
+			<div
+				class="fixed inset-x-0 bottom-0 z-20 bg-black/50 sm:hidden"
+				style="top: {headerHeight}px"
+				aria-hidden="true"
+				onclick={closeMobileNav}
+			></div>
+			<nav
+				class="fixed inset-x-0 z-20 flex flex-col gap-1 bg-card p-3 shadow-lg sm:hidden"
+				style="top: {headerHeight}px"
+				aria-label="Navigation"
+			>
+				{#each nav as item (item.href)}
+					<a
+						href={item.href}
+						class="rounded-lg px-3 py-2 hover:bg-accent {isActiveNavItem(item.href)
+              ? 'bg-accent font-medium'
+              : ''}"
+						onclick={closeMobileNav}
+					>
+						{item.label}
+					</a>
+				{/each}
+			</nav>
+		{/if}
+		<div class="grid flex-1 grid-cols-1 {navCollapsed ? '' : 'sm:grid-cols-[200px_1fr]'}">
 			{#if !navCollapsed}
-				<nav class="flex flex-col gap-1 border-r bg-card p-3">
+				<nav class="hidden flex-col gap-1 border-r bg-card p-3 sm:flex">
 					{#each nav as item (item.href)}
 						<a
 							href={item.href}
