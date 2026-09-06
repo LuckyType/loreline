@@ -383,6 +383,12 @@ class ReprocessManager:
                 sample_rate=sample_rate,
                 min_speakers=job.diarization.min_speakers,
                 max_speakers=job.diarization.max_speakers,
+                # One call covers the whole session, so nothing here needs a
+                # memory of the last one. It is the version being relabeled,
+                # not the session: re-running this job against a different
+                # version must not inherit the voices of another pass, and
+                # ``diarizer.aclose()`` below drops the bank either way.
+                session_id=f"{job.session_id}:{job.target}",
             )
         finally:
             await _aclose(diarizer)

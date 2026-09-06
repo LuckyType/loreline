@@ -334,8 +334,9 @@ class _WholeSessionDiarizer:
         sample_rate: int = 16000,
         min_speakers: int | None = None,
         max_speakers: int | None = None,
+        session_id: str | None = None,
     ) -> list[SpeakerSegment]:
-        _ = (wav, sample_rate, min_speakers, max_speakers)
+        _ = (wav, sample_rate, min_speakers, max_speakers, session_id)
         return [SpeakerSegment(start=-1e12, end=1e12, speaker="Speaker A")]
 
     async def aclose(self) -> None:
@@ -453,8 +454,9 @@ class _FailingDiarizer:
         sample_rate: int = 16000,
         min_speakers: int | None = None,
         max_speakers: int | None = None,
+        session_id: str | None = None,
     ) -> list[SpeakerSegment]:
-        _ = (wav, sample_rate, min_speakers, max_speakers)
+        _ = (wav, sample_rate, min_speakers, max_speakers, session_id)
         raise self._exc
 
     async def aclose(self) -> None:

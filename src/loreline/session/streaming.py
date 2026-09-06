@@ -343,4 +343,5 @@ class StreamPath:
             sample_rate=self._capture_rate,
             config=self._diarization,
             diarizer=self._diarizer,
+            session_id=self._session_id,
         )

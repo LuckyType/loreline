@@ -248,6 +248,7 @@ class SttRouter:
             sample_rate=self._primary.config.sample_rate,
             config=self._config.diarization,
             diarizer=self._diarizer,
+            session_id=self._config.session_id,
         )
 
 
@@ -259,6 +260,7 @@ async def merge_diarization(
     sample_rate: int,
     config: DiarizationConfig,
     diarizer: DiarizationProvider | None,
+    session_id: str,
 ) -> TranscriptEvent:
     """Label one segment's words with speakers, from its own audio or its words.
 
@@ -275,13 +277,16 @@ async def merge_diarization(
     """
     if config.mode == DiarizationMode.REMOTE and diarizer is not None:
         wav = pcm_to_wav(pcm, sample_rate=sample_rate)
-        # TODO: pass session_id= once the remote diarizer client takes one, so
-        # a session's speaker labels stay consistent between calls.
         segments = await diarizer.diarize(
             wav,
             sample_rate=sample_rate,
             min_speakers=config.min_speakers,
             max_speakers=config.max_speakers,
+            # Passed because the labels otherwise mean nothing between calls
+            # (see ``DiarizationProvider.diarize``). It matters more here than
+            # it did per utterance: a vendor's turns are shorter and there are
+            # more of them, so more calls have to agree about who is who.
+            session_id=session_id,
         )
         shifted = [
             s.model_copy(update={"start": s.start + start, "end": s.end + start}) for s in segments
