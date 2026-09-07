@@ -158,9 +158,10 @@ def test_rolling_pcm_slices_a_turn_out_of_the_window() -> None:
     for i in range(10):
         buffer.append(bytes([i, 0]) * 1600, 5.0 + i * 0.1)
 
-    clip = buffer.slice(5.2, 5.4)
+    clip, clip_start = buffer.slice(5.2, 5.4)
     assert len(clip) == 1600 * 2 * 2  # 200 ms of s16le
     assert set(clip[::2]) == {2, 3}  # exactly the third and fourth frames
+    assert round(clip_start, 6) == 5.2  # all of it was still held
 
 
 def test_rolling_pcm_returns_what_is_left_of_a_span_that_aged_out() -> None:
@@ -171,6 +172,11 @@ def test_rolling_pcm_returns_what_is_left_of_a_span_that_aged_out() -> None:
     for i in range(5):
         buffer.append(bytes([i, 0]) * 1600, 1.0 + i * 0.1)
 
-    assert buffer.slice(1.0, 1.5)[::2] == bytes([3]) * 1600 + bytes([4]) * 1600
-    assert buffer.slice(9.0, 9.5) == b""  # entirely outside the window
-    assert buffer.slice(1.4, 1.4) == b""  # an empty span is not an error
+    clip, clip_start = buffer.slice(1.0, 1.5)
+    assert clip[::2] == bytes([3]) * 1600 + bytes([4]) * 1600
+    # What came back starts at 1.3, not at the 1.0 that was asked for: a caller
+    # shifting the diarizer's 0-based segments by 1.0 would place every label
+    # 300 ms early.
+    assert round(clip_start, 6) == 1.3
+    assert buffer.slice(9.0, 9.5) == (b"", 0.0)  # entirely outside the window
+    assert buffer.slice(1.4, 1.4) == (b"", 0.0)  # an empty span is not an error

@@ -241,15 +241,27 @@ class SttRouter:
     async def _merge_diarization(
         self, event: TranscriptEvent, utterance: Utterance
     ) -> TranscriptEvent:
-        return await merge_diarization(
-            event,
-            utterance.pcm,
-            start=utterance.start,
-            sample_rate=self._primary.config.sample_rate,
-            config=self._config.diarization,
-            diarizer=self._diarizer,
-            session_id=self._config.session_id,
-        )
+        """Label this utterance's words, or publish it unlabelled.
+
+        A diarizer that answers with an error - any non-2xx, a timeout, a
+        refused connection - used to raise straight out of :meth:`run`, which
+        ends the live path and loses the text this utterance already has.
+        Speaker labels are an improvement on a transcript; they are not worth
+        the transcript.
+        """
+        try:
+            return await merge_diarization(
+                event,
+                utterance.pcm,
+                start=utterance.start,
+                sample_rate=self._primary.config.sample_rate,
+                config=self._config.diarization,
+                diarizer=self._diarizer,
+                session_id=self._config.session_id,
+            )
+        except Exception as exc:  # resilience: any diarizer error, same answer
+            log.warning("stt.diarize.failed", session_id=self._config.session_id, error=str(exc))
+            return event
 
 
 async def merge_diarization(
