@@ -20,6 +20,8 @@ from loreline.stt.backends._ws import as_list, as_obj_dict, get_float, get_str
 from loreline.stt.base import glossary_terms_for
 
 _MS_PER_S = 1000.0
+# AssemblyAI's "this word belongs to nobody yet" marker, not a speaker name.
+_UNATTRIBUTED = "PENDING"
 
 
 def glossary_for(
@@ -42,10 +44,18 @@ def parse_words(raw_words: object, *, offset: float) -> list[Word]:
 
     Identical on both transports: a streaming Turn message and an async
     transcript both carry ``text``, ``start``, ``end``, ``confidence`` and, with
-    speaker labels on, ``speaker`` ("A", "B", …; "PENDING" while the streaming
-    model still has too little audio to attribute a word). Times are in
-    milliseconds relative to the audio submitted, so they are converted and
-    shifted onto the session clock.
+    speaker labels on, ``speaker`` ("A", "B", …). Times are in milliseconds
+    relative to the audio submitted, so they are converted and shifted onto the
+    session clock.
+
+    "PENDING" is the one label that is not a speaker: it is what AssemblyAI
+    sends for a word it cannot yet attribute (a turn under about a second, or a
+    short backchannel), and it is common enough on a streaming session's first
+    turn to matter. It becomes no speaker at all rather than a speaker named
+    PENDING, so ``segments_from_words`` skips those words and the labels around
+    them decide, instead of a phantom speaker appearing in the transcript.
+    Streaming resolves most of them later anyway, in its end-of-session
+    ``SpeakerRevision`` pass.
     """
     words: list[Word] = []
     for raw_word in as_list(raw_words):
@@ -53,7 +63,11 @@ def parse_words(raw_words: object, *, offset: float) -> list[Word]:
         if not word_map:
             continue
         speaker_raw = word_map.get("speaker")
-        speaker = f"Speaker {speaker_raw}" if speaker_raw is not None else None
+        speaker = (
+            f"Speaker {speaker_raw}"
+            if speaker_raw is not None and speaker_raw != _UNATTRIBUTED
+            else None
+        )
         words.append(
             Word(
                 text=get_str(word_map, "text"),
