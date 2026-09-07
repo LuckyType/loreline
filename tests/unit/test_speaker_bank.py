@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import math
 
-from services.diarization.app import SessionBanks, SpeakerBank
+import pytest
+
+from services.diarization.app import DEFAULT_MAX_SPEAKERS, SessionBanks, SpeakerBank
 
 _THRESHOLD = 0.5
 
@@ -24,6 +26,11 @@ def _at(degrees: float) -> list[float]:
 
 _A = _at(0)  # one voice
 _B = [0.0, 0.0, 1.0]  # another, orthogonal to every _at() vector
+
+
+def _wide(index: int, width: int) -> list[float]:
+    """A unit vector orthogonal to every other ``_wide`` of the same width."""
+    return [1.0 if position == index else 0.0 for position in range(width)]
 
 
 def _bank() -> SpeakerBank:
@@ -64,7 +71,7 @@ def test_two_clusters_of_one_call_never_share_a_speaker() -> None:
     """
     bank = _bank()
     bank.resolve([_A])
-    assert sorted(bank.resolve([_at(10), _at(40)])) == [0, 1]
+    assert set(bank.resolve([_at(10), _at(40)])) == {0, 1}
 
 
 def test_max_speakers_caps_the_bank_and_forces_the_nearest() -> None:
@@ -163,3 +170,82 @@ def test_the_session_cap_evicts_the_least_recently_used() -> None:
     assert len(banks) == 2
     assert banks.delete("s2") is False
     assert banks.delete("s1") is True
+
+
+# ---------------------------------------------------------------------------
+# What the bank refuses to do
+# ---------------------------------------------------------------------------
+# Three ways a bank could quietly acquire a speaker nobody was: from a fragment
+# too short to identify anyone by, from a second cluster of the call that just
+# opened one, and from a vector it cannot really compare at all.
+
+
+def test_an_unreliable_cluster_borrows_a_known_voice_but_opens_none() -> None:
+    """A fifth of a second of audio may recognise Alice; it may not invent Bob.
+
+    The live path sends no ``max_speakers`` - one utterance cannot say how many
+    people are at the table - so before this a vector pooled from a 0.2 s
+    fragment that landed below the threshold opened a speaker that then lived
+    for the whole session and turned up in the rename list as a person nobody
+    remembered.
+    """
+    bank = _bank()
+    bank.resolve([_A])
+    assert bank.resolve([_at(20)], reliable=[False]) == [0]  # cosine 0.94: Alice
+    assert bank.resolve([_B], reliable=[False]) == [None]  # nothing it matches: unlabelled
+    assert bank.speakers == 1
+
+
+def test_an_unreliable_observation_does_not_move_the_voice_it_borrowed() -> None:
+    """The mirror of the drift test above, which the same angles pass.
+
+    A trusted ``_at(53)`` pulls the centroid far enough that ``_at(80)`` is
+    still the same speaker. An untrusted one must not, or a run of fragments
+    too short to place would walk a voice away from the person it belongs to.
+    """
+    bank = _bank()
+    bank.resolve([_A])
+    assert bank.resolve([_at(53)], reliable=[False]) == [0]
+    assert bank.resolve([_at(80)]) == [1]  # the centroid never followed the fragment
+
+
+def test_two_new_voices_in_one_call_do_not_collapse_onto_each_other() -> None:
+    """A cluster forced by the cap must not land on one opened moments earlier.
+
+    Both are strangers to this bank and the cap leaves room for exactly one
+    more. The first opens speaker 1; the second is forced onto the nearest
+    voice still free, which has to be the one the call did not just create, or
+    two clusters the call itself told apart come back under one label.
+    """
+    bank = _bank()
+    bank.resolve([_A], max_speakers=2)
+    assert set(bank.resolve([_at(85), _at(95)], max_speakers=2)) == {0, 1}
+
+
+def test_a_session_stops_opening_voices_at_the_default_cap() -> None:
+    """Nothing else bounds the live path, which sends no speaker counts at all."""
+    width = DEFAULT_MAX_SPEAKERS + 2
+    bank = SpeakerBank(threshold=_THRESHOLD)
+    ids = [bank.resolve([_wide(index, width)])[0] for index in range(width)]
+    assert bank.speakers == DEFAULT_MAX_SPEAKERS
+    assert len(set(ids)) == DEFAULT_MAX_SPEAKERS  # the last two borrowed a label
+
+
+def test_an_embedding_of_another_width_is_refused_rather_than_truncated() -> None:
+    """Two widths mean two models, and a truncated dot product still scores.
+
+    Nothing in the numbers would say the answer was nonsense, so the call fails
+    instead of putting a plausible name on the words.
+    """
+    bank = _bank()
+    bank.resolve([_A])
+    with pytest.raises(ValueError, match="width"):
+        bank.resolve([[1.0, 0.0]])
+
+
+def test_the_cap_can_be_lifted_for_a_caller_that_polices_it_itself() -> None:
+    """``DIAR_MAX_SPEAKERS=0`` is how a deployment opts out of the default."""
+    bank = SpeakerBank(threshold=_THRESHOLD, max_voices=0)
+    width = DEFAULT_MAX_SPEAKERS + 2
+    ids = [bank.resolve([_wide(index, width)])[0] for index in range(width)]
+    assert ids == list(range(width))
