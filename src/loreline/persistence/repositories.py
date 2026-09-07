@@ -169,7 +169,7 @@ class SessionRepository:
         )
         await self._db.connection.commit()
 
-    async def mark_interrupted(self) -> None:
+    async def mark_interrupted(self, transcripts: TranscriptRepository) -> None:
         """Fail sessions left CAPTURING by a previous process (startup sweep).
 
         ``SessionManager`` only ever transitions a session out of CAPTURING
@@ -179,12 +179,24 @@ class SessionRepository:
         at CAPTURING forever with no ``ended_at``: nothing else revisits it,
         so it just sits in the history list looking like a session that's
         eternally still recording. Mirrors ``ReprocessRepository.mark_interrupted``.
+
+        A capturing session that was streaming can also leave interim rows
+        behind: the connector never got the chance to replace them with a
+        final. ``TranscriptRepository.delete_interims`` otherwise only runs
+        from ``SessionManager._finish``, which a killed process never reaches,
+        so this sweeps it for every session about to be failed here - or a
+        reloaded history would show a half-typed line as settled text forever.
         """
+        interrupted = [s.id for s in await self.list() if s.status is SessionStatus.CAPTURING]
+
         await self._db.connection.execute(
             "UPDATE sessions SET status = ?, ended_at = ? WHERE status = ?;",
             (SessionStatus.ERROR.value, time.time(), SessionStatus.CAPTURING.value),
         )
         await self._db.connection.commit()
+
+        for session_id in interrupted:
+            await transcripts.delete_interims(session_id)
 
     async def delete(self, session_id: str) -> None:
         await self._db.connection.execute("DELETE FROM sessions WHERE id = ?;", (session_id,))

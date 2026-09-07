@@ -17,7 +17,7 @@
 import { Pause, Play } from '@lucide/svelte'
 import { api } from '$lib/api'
 import { CardContent } from '$lib/components/ui/card'
-import { audioIsEmpty, EMPTY_AUDIO_NOTE, formatTime } from '$lib/stores'
+import { audioIsEmpty, EMPTY_AUDIO_NOTE, formatTime, GAP_SOURCE } from '$lib/stores'
 import { cn } from '$lib/utils'
 import type { TranscriptEvent } from '$lib/wire'
 
@@ -54,6 +54,10 @@ let {
 
 const hasAudio = $derived(!!audioPath)
 const empty = $derived(audioIsEmpty(audioDurationS))
+
+// A gap marker is audio nobody transcribed, not a segment - the timeline is a
+// map of what was said, so it gets no dot of its own.
+const dotSegments = $derived(segments.filter((seg) => seg.source !== GAP_SOURCE))
 
 let duration = $state(0)
 let paused = $state(true)
@@ -127,7 +131,7 @@ function toggle() {
 					</div>
 					<!-- One dot per segment, keyed by position rather than by start: two
 					     speakers can be given the same start and duplicate keys throw. -->
-					{#each segments as seg, i (i)}
+					{#each dotSegments as seg, i (i)}
 						<span
 							class={cn(
 								'pointer-events-none absolute top-1/2 size-[3px] -translate-x-1/2 -translate-y-1/2 rounded-full bg-primary/70',

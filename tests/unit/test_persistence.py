@@ -109,11 +109,12 @@ async def test_session_summary_roundtrip(db: Database) -> None:
 
 async def test_mark_interrupted_fails_stuck_capturing_sessions(db: Database) -> None:
     repo = SessionRepository(db)
+    transcripts = TranscriptRepository(db)
     await repo.create(Session(id="crashed", status=SessionStatus.CAPTURING, started_at=1.0))
     await repo.create(Session(id="done", status=SessionStatus.CAPTURING, started_at=2.0))
     await repo.finish("done", SessionStatus.COMPLETED)
 
-    await repo.mark_interrupted()
+    await repo.mark_interrupted(transcripts)
 
     crashed = await repo.get("crashed")
     done = await repo.get("done")
@@ -122,6 +123,42 @@ async def test_mark_interrupted_fails_stuck_capturing_sessions(db: Database) -> 
     assert crashed.ended_at is not None  # no longer looks like it's still recording
     assert done is not None
     assert done.status is SessionStatus.COMPLETED  # already-finished sessions untouched
+
+
+async def test_mark_interrupted_sweeps_leftover_interim_rows(db: Database) -> None:
+    """A process killed mid-turn can leave an unreplaced interim behind.
+
+    ``TranscriptRepository.delete_interims`` otherwise only runs from
+    ``SessionManager._finish``, which a killed process never reaches, so the
+    startup sweep has to run it for every session it is about to fail here -
+    or a reloaded history shows the half-typed line as settled text forever.
+    """
+    sessions = SessionRepository(db)
+    transcripts = TranscriptRepository(db)
+    await sessions.create(Session(id="crashed", status=SessionStatus.CAPTURING, started_at=1.0))
+    await sessions.create(Session(id="finished", status=SessionStatus.CAPTURING, started_at=2.0))
+    await sessions.finish("finished", SessionStatus.COMPLETED)
+
+    for session_id in ("crashed", "finished"):
+        await transcripts.add(
+            TranscriptEvent(
+                session_id=session_id,
+                source="oai",
+                text="half a sen",
+                start_ts=1.0,
+                end_ts=1.5,
+                is_final=False,
+                turn_id="oai:1:item_001",
+            )
+        )
+
+    await sessions.mark_interrupted(transcripts)
+
+    assert await transcripts.for_session("crashed") == []
+    # A session that had already ended cleanly keeps its own interim - the
+    # sweep only touches sessions it is actually failing right now, not every
+    # interim row in the table.
+    assert len(await transcripts.for_session("finished")) == 1
 
 
 async def test_provider_roundtrip(db: Database) -> None:

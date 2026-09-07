@@ -43,8 +43,9 @@ from loreline.stt.router import RouterConfig, SttRouter
 
 if TYPE_CHECKING:
     from loreline.audio.chunker import Utterance
+    from loreline.diarization.base import DiarizationProvider
     from loreline.diarization.provider import BuildDiarizer
-    from loreline.models import ProviderConfig
+    from loreline.models import ProviderConfig, SpeakerSegment
     from loreline.persistence import (
         AudioStore,
         GlossaryRepository,
@@ -149,6 +150,50 @@ class _LiveSegmentCount:
             return
         self._last_write = now
         await self._repo.update(self._job)
+
+
+class _JobBankDiarizer:
+    """Wrap a diarizer so every call it makes is pinned to one job-private bank id.
+
+    A transcribe job's ``RouterConfig.session_id`` has to stay the live
+    session's own id - it is also what ``Connector.transcribe`` stamps onto
+    every ``TranscriptEvent`` it produces, and changing it would misfile the
+    job's rows under a session no reader would find them under (see
+    ``SttRouter._merge_diarization``, out of scope here). But the remote
+    diarization service keys its speaker bank on that same string over the
+    wire, so a second ``RemoteDiarizer`` instance sending it - the job's own,
+    built fresh in ``_transcribe_session`` - lands on the SAME remote bank as
+    a live capture of that session, and the job's ``aclose`` then deletes it
+    out from under the live capture. Substituting a job-private id ahead of
+    every call this wrapper forwards keeps the job on its own bank without
+    the router or the persisted events ever seeing anything but the real
+    session id.
+    """
+
+    def __init__(self, inner: DiarizationProvider, *, bank_id: str) -> None:
+        self._inner = inner
+        self._bank_id = bank_id
+
+    async def diarize(
+        self,
+        wav: bytes,
+        *,
+        sample_rate: int = 16000,
+        min_speakers: int | None = None,
+        max_speakers: int | None = None,
+        session_id: str | None = None,
+    ) -> list[SpeakerSegment]:
+        _ = session_id  # the caller's id is the live session's; substitute ours
+        return await self._inner.diarize(
+            wav,
+            sample_rate=sample_rate,
+            min_speakers=min_speakers,
+            max_speakers=max_speakers,
+            session_id=self._bank_id,
+        )
+
+    async def aclose(self) -> None:
+        await self._inner.aclose()
 
 
 class ReprocessManager:
@@ -342,7 +387,18 @@ class ReprocessManager:
             msg = "transcribe requires a provider"
             raise ProviderNotFoundError(msg)
         backend = self._backend_factory(provider, self._secrets, job.model)
-        diarizer = await self._diarizer_factory(job.diarization)
+        # A job-private bank id, not job.session_id: that id is also the live
+        # session's, and the remote diarizer's bank is keyed on it over the
+        # wire, so this job's diarizer (its own instance, closed below) would
+        # otherwise delete the live capture's speaker bank at aclose (see
+        # _JobBankDiarizer). Namespaced with "job" rather than plain
+        # f"{job.session_id}:{job.id}" so it cannot collide with a diarize
+        # job's f"{job.session_id}:{job.target}" bank either, when a target
+        # names this very job's id.
+        diarizer = _JobBankDiarizer(
+            await self._diarizer_factory(job.diarization),
+            bank_id=f"{job.session_id}:job:{job.id}",
+        )
         # Not loaded at all when the job opted out, so no glossary reaches the
         # backend as keyterms or as a prompt.
         glossary = await self._glossaries.get_effective(campaign_id) if job.use_glossary else None
