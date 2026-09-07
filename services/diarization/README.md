@@ -20,8 +20,11 @@ is enforced (otherwise clustering is automatic).
 ## Session speaker memory
 
 `POST /diarize` also takes an optional `session_id` form field, and it is what
-makes the labels usable for a caller that diarizes one utterance at a time,
-which is how Loreline's live capture calls this service.
+makes the labels usable for a caller that diarizes one clip at a time rather
+than the whole session at once. That is how Loreline's live capture always
+calls this service, one VAD utterance per call on the batch path or one
+vendor turn per call on a streaming connector's path (ADR 0006): either way,
+each call still clusters only the audio it was given.
 
 Without it every call clusters on its own, so "Speaker 0" in one utterance has
 nothing to do with "Speaker 0" in the next: a session of any number of people

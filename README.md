@@ -12,11 +12,12 @@ speaker-attributed transcript of your session.
 
 </div>
 
-Loreline records a Pen & Paper session through a connected microphone, cuts the
-audio into utterances, and sends each one to a speech-to-text vendor. Speaker
-labels are optional and come either from the vendor or from a diarization
-service you host yourself. A SvelteKit web UI shows the live transcript and
-carries the configuration, the logs and the health view.
+Loreline records a Pen & Paper session through a connected microphone and gets
+a transcript from a speech-to-text vendor: streamed continuously for a model
+that streams, cut into utterances by Silero VAD for one that does not.
+Speaker labels are optional and come either from the vendor or from a
+diarization service you host yourself. A SvelteKit web UI shows the live
+transcript and carries the configuration, the logs and the health view.
 
 The box that runs it captures and orchestrates, nothing more. Every STT and
 diarization model runs on a remote endpoint, a cloud API or a service on your
@@ -26,13 +27,20 @@ side, Svelte 5 and Tailwind 4 in the browser, SQLite for storage.
 
 ## What it does
 
-**Capture.** Continuous recording, cut into utterances by Silero VAD.
+**Capture.** Continuous recording. Silero VAD cuts it into utterances for
+re-processing and for any model that does not stream; a model that streams
+gets the raw feed directly and decides its own turns, with interim text as it
+goes.
 
 **Transcription.** Deepgram, AssemblyAI, Gemini, OpenAI and any
 OpenAI-compatible endpoint you host yourself, such as Speaches or whisper.cpp.
 Deepgram, AssemblyAI, Gemini and OpenAI each have both a streaming and a batch
-connector; the model you pick decides which one runs. A router sends utterances
-to a primary provider and fails over to a fallback.
+connector; the model you pick decides which one runs. A streaming model holds
+one connection open for the whole session and posts interim text as it goes;
+if that connection dies it reconnects, then falls back to another streaming
+provider, then hands the rest of the session to the batch path rather than
+losing it. A batch model goes through a router that sends one utterance at a
+time to a primary provider and fails over to a fallback.
 
 OpenRouter transcription (Whisper, Nova, Chirp, Voxtral) is batch only. Its API
 has no streaming mode, so it cannot drive a live capture and is offered for
@@ -52,7 +60,8 @@ own naming. It is on by default.
 
 **Diarization.** Inline from the STT vendor's own speaker labels, a self-hosted
 sherpa-onnx service that ships with this repo, OpenAI's batch diarization model,
-or off.
+or off. The self-hosted service remembers a session's voices, so a speaker
+keeps one label across the whole session rather than just within one call.
 
 **Sessions.** SQLite persistence with the audio kept per session. A stored
 session can be re-transcribed or re-diarized later with a different provider or
