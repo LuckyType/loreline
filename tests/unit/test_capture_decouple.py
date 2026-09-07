@@ -134,3 +134,97 @@ async def test_dequeue_stops_at_sentinel() -> None:
 
     received = [item async for item in _dequeue(queue)]
     assert received == [first]
+
+
+class _RecordingSink:
+    """A ``FrameSink`` that remembers what the capture loop handed it."""
+
+    def __init__(self, *, queues_utterances: bool = False) -> None:
+        self.frames: list[tuple[bytes, float, bool]] = []
+        self.utterances: list[Utterance] = []
+        self.closed = False
+        self._queues = queues_utterances
+
+    def frame(self, pcm: bytes, ts: float, *, is_speech: bool) -> None:
+        self.frames.append((pcm, ts, is_speech))
+
+    def utterance(self, utterance: Utterance) -> None:
+        self.utterances.append(utterance)
+
+    @property
+    def queues_utterances(self) -> bool:
+        return self._queues
+
+    def done(self) -> None:
+        self.closed = True
+
+
+async def test_streaming_gets_the_frames_and_the_queue_gets_no_utterances() -> None:
+    """While a connector decides the turns, an utterance is the index's business.
+
+    The chunker keeps running (the WAV's utterance sidecar is what a re-process
+    reads), but queueing what it cuts would either transcribe the session twice
+    or fill a queue nobody is draining.
+    """
+    sink = _RecordingSink()
+    chunker = VadChunker(sample_rate=16000, frame_ms=20, silence_ms=20, max_utterance_s=0.1)
+    queue: asyncio.Queue[object] = asyncio.Queue(maxsize=64)
+
+    await asyncio.wait_for(
+        _capture_utterances(
+            _FakeSource(n_frames=30),
+            lambda _f: True,
+            chunker,
+            None,
+            _CaptureStats(),
+            queue,
+            frames=sink,
+        ),
+        timeout=2.0,
+    )
+
+    assert len(sink.frames) == 30  # every frame, with the VAD's verdict on it
+    assert all(is_speech for _pcm, _ts, is_speech in sink.frames)
+    assert sink.utterances == []  # nothing is asking for them yet
+    assert queue.get_nowait() is _CAPTURE_DONE  # and only the sentinel was queued
+    assert queue.empty()
+    assert sink.closed  # the stream is ended too, or it waits forever
+
+
+async def test_a_handed_off_session_sends_its_utterances_back_to_the_sink() -> None:
+    """After the handoff the router is draining again, so the chunker feeds it."""
+    sink = _RecordingSink(queues_utterances=True)
+    chunker = VadChunker(sample_rate=16000, frame_ms=20, silence_ms=20, max_utterance_s=0.1)
+    queue: asyncio.Queue[object] = asyncio.Queue(maxsize=64)
+
+    await asyncio.wait_for(
+        _capture_utterances(
+            _FakeSource(n_frames=30),
+            lambda _f: True,
+            chunker,
+            None,
+            _CaptureStats(),
+            queue,
+            frames=sink,
+        ),
+        timeout=2.0,
+    )
+
+    assert sink.utterances  # cut by the chunker, handed to the path that wants them
+    assert queue.get_nowait() is _CAPTURE_DONE  # still never the queue directly
+
+
+async def test_the_stream_is_closed_even_when_the_microphone_never_opens() -> None:
+    """The zombie recording in its second shape: nothing ends an open stream."""
+    sink = _RecordingSink()
+    chunker = VadChunker(sample_rate=16000, frame_ms=20)
+    queue: asyncio.Queue[object] = asyncio.Queue(maxsize=4)
+
+    capture = _capture_utterances(
+        _DeadSource(), lambda _f: True, chunker, None, _CaptureStats(), queue, frames=sink
+    )
+    with pytest.raises(RuntimeError):
+        await asyncio.wait_for(capture, timeout=2.0)
+
+    assert sink.closed
+    assert queue.get_nowait() is _CAPTURE_DONE
