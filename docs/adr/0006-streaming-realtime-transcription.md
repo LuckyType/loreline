@@ -191,11 +191,14 @@ vendor's protocol and yields `TranscriptEvent`s as they finalize.
    one, so silence past the end of a turn is a dead connection and silence
    during one is a long sentence.
 
-   *Hardened after review (`f21a8f1`).* A connector's `signals()` gained a
-   fifth thing to yield beside the four turn signals: `StreamAlive`, for a
-   vendor message that proves the socket is alive but names no turn
-   (Deepgram's `Metadata`, AssemblyAI's `Begin` and `Termination`, x.ai's
-   `transcript.created`). The watchdog counts messages *the stream* was told
+   *Hardened after review (`f21a8f1`, wired into every connector at
+   `fd82240`).* A connector's `signals()` gained a fifth thing to yield beside
+   the four turn signals: `StreamAlive`, for a vendor message that proves the
+   socket is alive but names no turn. All five connectors yield it now:
+   Deepgram's `Metadata` and empty lead-ins, AssemblyAI's `Begin`,
+   `SpeechStarted` and `Termination`, x.ai's `transcript.created`, OpenAI's
+   `session.updated` and `input_audio_buffer.committed`, Gemini's padding and
+   resumption frames. The watchdog counts messages *the stream* was told
    about, not messages the socket carried, so a connector that consumed one of
    these silently left it unable to tell a slow connection from a dead one.
    `StreamConfig.quiet_grace_s` now states its invariant outright rather than
@@ -429,17 +432,21 @@ over a 780s paced run:
 * Unverified: `contextWindowCompression` as a way to extend the 9-minute cap.
 
 **x.ai**, mock-verified only: no `xai-` key exists in the secret store, so
-this connector has never spoken to the real endpoint. `interim_results=true`
-plus `endpointing` is documented as the endpoint's default behaviour rather
-than an opt-in feature, so nothing here raises `StreamUnsupportedError`;
-whether that documentation holds, and which of the two documented readings of
-"cumulative" text is the real one, are both unverified.
+this connector has never spoken to the real endpoint, and no frame in the repo
+was ever recorded from api.x.ai, unlike every other vendor's mock. `TurnFinal`
+no longer states `at`, matching Deepgram: a turn's start is what its first
+partial said and does not move regardless of what a later message claims.
+`interim_results=true` plus `endpointing` is documented as the endpoint's
+default behaviour rather than an opt-in feature, so nothing here raises
+`StreamUnsupportedError`; whether that documentation holds, and which of the
+two documented readings of "cumulative" text is the real one, are both
+unverified.
 
 ## Hardening after review
 
-Four fix groups landed after the connectors above were verified, closing gaps
+Five fix groups landed after the connectors above were verified, closing gaps
 a review found without reopening the decisions themselves. The streaming-core
-ones are folded into Decisions (3), (4) and (5) above; this collects all four
+ones are folded into Decisions (3), (4) and (5) above; this collects all five
 with their merge hashes.
 
 * **Streaming core (`f21a8f1`).** Diarization moved beside the stream
@@ -500,6 +507,34 @@ with their merge hashes.
   markers are excluded from segment counts, the session player's timeline
   dots, and search, since a gap is audio nobody transcribed rather than a
   segment of speech.
+* **Connectors (`fd82240`).** Gemini invents a ref it never had: turns are
+  numbered per connection and every signal carries that number, so a late
+  `inputTranscription` arriving after `generationComplete` already settled the
+  turn from its newest interim replaces that row instead of writing a second
+  final, which is the same key-stability fix the streaming core made for a
+  revised start, applied to a vendor that names no turns at all. xAI stopped
+  restating a turn's start on its final (see "What the real vendor said"
+  above). Deepgram clears its interim buffer only when a settling segment
+  carried text, so a segment that settles empty no longer erases what was
+  already said. OpenAI logs and continues on a per-item transcription failure
+  instead of ending the connection over it, and now raises rather than
+  returning on an unrecognized `session.update` error, so that attempt spends
+  the reconnect budget instead of leaving a socket configured with no server
+  VAD running silently. `StreamUnsupportedError` is narrower: probed against
+  Deepgram's and AssemblyAI's real error bodies, a 400 or `error_code 3006` is
+  permanent only when the vendor names the model in it; a refused optional
+  parameter (a keyterm, a language code, an endpointing value) is dropped and
+  retried once instead, and the drop persists across reconnects and into the
+  utterance-path fallback, which shares the same parameter builder and used to
+  fail the same way. AssemblyAI now leaves at a turn boundary 60 seconds
+  before its own session cap, mirroring Gemini's `goAway` handling. A non-JSON
+  frame is skipped with a log line instead of ending the reader, and closing a
+  socket is bounded and survives the caller being cancelled mid-close. Each
+  vendor's mock was corrected to match what was measured rather than what was
+  guessed: OpenAI's deltas arrive only at turn close, Gemini's service has
+  never once sent a resumption handle so the mock no longer offers one by
+  default, and xAI's word offsets now move on settle since that is the
+  behaviour the fix above exists for.
 
 ## Implementation plan
 
