@@ -361,7 +361,8 @@ async def test_streaming_setup_asks_for_the_services_own_endpointing() -> None:
     realtime = cast("dict[str, object]", setup["realtimeInputConfig"])
     detection = cast("dict[str, object]", realtime["automaticActivityDetection"])
     assert detection["disabled"] is False
-    assert detection["silenceDurationMs"] == 500  # under the chunker's 800 ms floor
+    # Below Google's recommended 500-800 ms, and measured: see _AUTOMATIC_VAD.
+    assert detection["silenceDurationMs"] == 300
     assert detection["startOfSpeechSensitivity"] == "START_SENSITIVITY_HIGH"
     # The session carries the glossary, so a reconnect re-applies it for free.
     transcription = cast("dict[str, object]", setup["inputAudioTranscription"])
@@ -442,3 +443,27 @@ async def test_the_utterance_shape_is_untouched_by_the_streaming_one() -> None:
     assert event is not None
     assert event.is_final
     assert event.turn_id is None
+
+
+async def test_go_away_mid_turn_waits_for_the_turn_to_close() -> None:
+    """50 seconds of notice is many turns' worth, so none of them is spent.
+
+    Leaving on the spot would settle the open turn from its newest interim and
+    put the audio still in flight into the gap. Waiting for the service to close
+    the turn it was already closing costs nothing and keeps both.
+    """
+
+    async def going_away(ws: ServerConnection) -> None:
+        # Zero: the goAway lands on the first audio frame, one interim into a
+        # turn that has six more words to go.
+        await gemini_live_handler(ws, go_away_after_turns=0)
+
+    events = await _stream_events(going_away, [(_LOUD, 100), (_QUIET, 50)], settle=0.5)
+
+    finals = [e for e in events if e.is_final and e.source == "gem-live-1"]
+    assert [e.text for e in finals] == ["the goblin takes the chest and runs"]
+    gaps = [e for e in events if e.source == GAP_SOURCE]
+    assert len(gaps) == 1
+    # The span the reconnect swallowed is the reconnect, not the two seconds of
+    # speech that were in flight when the notice arrived.
+    assert gaps[0].end_ts - gaps[0].start_ts < 0.5

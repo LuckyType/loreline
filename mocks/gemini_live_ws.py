@@ -27,7 +27,10 @@ published on ``generationComplete`` would write every turn twice.
 
 ``go_away_after_turns`` sends the ``goAway`` the real service sends before it
 drops a session at its duration cap, which on this vendor is normal operation
-rather than a fault, so the reconnect path has something to be driven by. A
+rather than a fault, so the reconnect path has something to be driven by. Its
+``timeLeft`` is the 50 seconds the real one gave. Zero sends it on the first
+audio frame, which is *during* a turn rather than between two, and that is the
+case worth driving: a connector that left on the spot would lose that turn. A
 ``setup`` asking for ``sessionResumption`` is answered with a handle, and every
 handle a client presents is recorded, which is how a test tells a reconnect that
 resumed from one that started over.
@@ -239,7 +242,7 @@ async def gemini_live_handler(
                 await _send(websocket, vad.feed(pcm))
                 if go_away_after_turns is not None and vad.turns >= go_away_after_turns:
                     go_away_after_turns = None
-                    await _send(websocket, [json.dumps({"goAway": {"timeLeft": "5s"}})])
+                    await _send(websocket, [json.dumps({"goAway": {"timeLeft": "50s"}})])
             elif not mid_turn_sent:
                 mid_turn_sent = True
                 await _send(websocket, turn_frames("gemini live mock", trailing_empties=2))

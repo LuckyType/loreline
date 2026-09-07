@@ -15,7 +15,10 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from loreline.stt.backends.gemini_live import (
+    _duration_s,  # pyright: ignore[reportPrivateUsage]
     _StreamTurns,  # pyright: ignore[reportPrivateUsage]
     _TurnState,  # pyright: ignore[reportPrivateUsage]
 )
@@ -259,3 +262,30 @@ def test_a_session_the_server_calls_unresumable_drops_its_handle() -> None:
     _ = turns.apply(json.dumps({"sessionResumptionUpdate": {"resumable": False}}))
 
     assert turns.handle == ""
+
+
+def test_a_turn_is_open_between_its_first_interim_and_its_final() -> None:
+    """What the reader waits for before it acts on a goAway: leaving with a
+    turn open costs that turn's settled text, and there is no need to."""
+    turns = _StreamTurns()
+    assert turns.owes_final is False
+
+    _ = turns.apply(_frame({"interimInputTranscription": {"text": "Marseille"}}))
+    assert turns.owes_final is True
+
+    _ = turns.apply(_frame({"inputTranscription": {"text": _FINALS[0]}}))
+    assert turns.owes_final is False
+
+
+@pytest.mark.parametrize(
+    ("value", "seconds"),
+    [("50s", 50.0), ("49.500s", 49.5), ("0s", 0.0), ("soon", 0.0), ("", 0.0)],
+)
+def test_go_away_time_left_is_read_as_seconds(value: str, seconds: float) -> None:
+    """goAway.timeLeft is a proto Duration, which JSON spells as "50s".
+
+    An unreadable one is zero rather than a guess: the connection is ending
+    either way, and leaving at once costs a reconnect where guessing high would
+    cost the server hanging up in the middle of one.
+    """
+    assert _duration_s(value) == seconds

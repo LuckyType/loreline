@@ -50,14 +50,22 @@ finalized text, and with ``goAway`` and ``sessionResumptionUpdate`` frames for
 the session lifetime described below.
 
 **Sessions are capped in minutes and a table runs for hours.** Google documents
-10 minutes for live transcription and 15 for audio-only sessions generally, so a
-connection ending is normal operation here rather than a fault. ``goAway`` is
-the announcement, and this connector ends its signal iteration on it, which the
-stream above reads as a lost connection: it settles the open turn from its last
-interim, reconnects, and marks the second or so of audio that the reconnect
-swallowed with a gap row. ``sessionResumption`` is asked for in every setup and
-the newest handle is carried across connections, so the vendor sees one
-continuing session rather than a fresh one every ten minutes.
+10 minutes for live transcription and 15 for audio-only sessions generally, and
+one paced 13-minute run against the real service drew ``goAway`` after nine
+minutes with ``timeLeft: "50s"``. So a connection ending is ordinary operation
+here, about six times an hour, rather than a fault. This connector reads goAway
+as the end of the connection and leaves at the next turn boundary (see
+:meth:`GeminiLiveBackend.signals`), which the stream above handles as a lost
+connection: it reconnects and marks what the reconnect swallowed with a gap row.
+That run cost one gap of one second in thirteen minutes.
+
+``sessionResumption`` is asked for in every setup and the field is accepted, but
+the service never once answered with a ``sessionResumptionUpdate``, so there has
+never been a handle to present. What would carry one across a reconnect stays
+here because it costs one field in a message that is sent anyway and would start
+working the day Google fills it in. Until then every reconnect is a fresh
+session, which on a transcription-only session costs nothing but the vendor's
+own context.
 
 Server-side VAD gates the whole pipeline: synthetic speech (espeak-ng and
 friends) is never classified as speech, so a session fed it returns
@@ -89,6 +97,7 @@ import asyncio
 import base64
 import contextlib
 import json
+import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 
@@ -170,22 +179,34 @@ _INPUT_RATE = 16_000
 # naming the field path in snake_case ("Invalid value at 'setup.
 # realtime_input_config.automatic_activity_detection.start_of_speech_
 # sensitivity'"), so setupComplete over this block is evidence rather than
-# silence. That naming is also what _refusal below reads.
+# silence. That naming is also what _classify_refusal below reads.
 _AUTOMATIC_VAD: dict[str, object] = {
     "disabled": False,
     # A table has people at different distances from one microphone, and a turn
     # start the service misses is speech nobody ever sees; a false start costs
-    # an empty turn, which the stream drops because it has no text.
+    # an empty turn, which the stream drops because it has no text. Not isolated
+    # in a measurement, unlike the two below.
     "startOfSpeechSensitivity": "START_SENSITIVITY_HIGH",
-    # The other way round at the end of a turn: cutting eagerly splits one
-    # sentence across two rows, and the silence threshold below is the knob that
-    # is supposed to decide when a turn is over.
-    "endOfSpeechSensitivity": "END_SENSITIVITY_LOW",
-    # Google recommends 500-800 ms. 500 is deliberate, and it is the whole
-    # latency argument for this shape: the utterance path cannot answer before
-    # 800 ms of trailing silence has elapsed, because that is when its chunker
-    # hands the utterance over.
-    "silenceDurationMs": 500,
+    # Measured and inert: the same 60 s clip through scripts/stream_check.py
+    # produced the same five turns on LOW and on HIGH, every boundary within
+    # 0.2 s of the other run's, which is the jitter of when a partial happens to
+    # arrive rather than a difference. Stated anyway rather than left
+    # UNSPECIFIED, so a change in Google's default is one this file can be
+    # diffed against.
+    "endOfSpeechSensitivity": "END_SENSITIVITY_HIGH",
+    # This is the knob that decides a turn, and it is below Google's
+    # recommendation of 500-800 ms on purpose. Same clip, same harness, three
+    # runs: 500 ms cut five turns of 4 to 23 seconds, 300 ms cut seven, and
+    # 200 ms cut eleven and split a sentence down the middle.
+    #
+    # Shorter wins here because a turn is not only a latency: it is one
+    # transcript row, it is the clip remote diarization gets handed, and its
+    # text stays a dimmed interim until it closes. A 23-second turn at a table
+    # is several people in one row, one diarization clip covering all of them,
+    # and 23 seconds during which nothing on screen has settled. 300 ms is the
+    # longest value that still cut this clip at its sentences, and it is well
+    # inside the utterance path's floor of 800 ms of trailing silence.
+    "silenceDurationMs": 300,
     "prefixPaddingMs": 300,
 }
 # How the service names the two setup blocks in a rejection. A refused
@@ -193,6 +214,10 @@ _AUTOMATIC_VAD: dict[str, object] = {
 # retry can change; a refused sessionResumption only costs the resumption.
 _VAD_FIELDS = ("automatic_activity_detection", "realtime_input_config")
 _RESUMPTION_FIELDS = ("session_resumption", "session not found")
+# How much of goAway.timeLeft to leave unspent. A turn that runs past the whole
+# of it hands the ending back to the server, which is a worse version of the
+# same ending: the same reconnect, at a moment nobody chose.
+_GO_AWAY_MARGIN_S = 5.0
 
 
 def _vocabulary_for(caps: TranscribeCapabilities | None, terms: list[str]) -> list[str]:
@@ -300,6 +325,19 @@ class _TurnState:
         if self.interim:
             self.parts.append(self.interim)
             self.interim = ""
+
+
+def _duration_s(value: str) -> float:
+    """A proto Duration ("50s", "49.500s") as seconds, or zero if unreadable.
+
+    Zero is the safe answer for a spelling this does not know: the connection is
+    ending either way, and leaving at once costs a reconnect where guessing high
+    would cost the server hanging up in the middle of one.
+    """
+    try:
+        return float(value.removesuffix("s"))
+    except ValueError:
+        return 0.0
 
 
 def _ends_turn(content: dict[str, object]) -> bool:
@@ -708,27 +746,36 @@ class GeminiLiveBackend(Connector[list[str]], StreamingConnector):
         written. No refs either, since the protocol names no turns, which the
         stream reads as one turn open at a time.
 
-        ``goAway`` ends the iteration rather than raising. The connection really
-        is over, the stream above treats a reader that returned exactly as it
-        treats one that failed, and this way the reconnect happens at a moment
-        we chose instead of whenever the server hangs up.
+        ``goAway`` ends the iteration rather than raising, and it ends it at the
+        next turn boundary rather than at once. The stream above treats a reader
+        that returned exactly as it treats one that failed, so the cost is a
+        reconnect: measured, about a second of audio, plus the settled text of
+        whatever turn was open. Google gives 50 seconds of notice, which is many
+        turns' worth, so waiting for one to close moves that cost onto silence.
+        The deadline is the backstop for a room that has gone quiet with a turn
+        still open, and the server hanging up first is the backstop for that.
         """
         ws = self._stream_ws
         if ws is None:
             return
+        leave_by: float | None = None
         async for raw in ws:
             for signal in self._turns.apply(raw):
                 yield signal
             # Kept off the frame state and on the connector, because it is the
             # one thing about this connection that outlives it.
             self._resume_handle = self._turns.handle
-            if self._turns.go_away:
+            if self._turns.go_away and leave_by is None:
+                leave_by = time.monotonic() + _duration_s(self._turns.go_away) - _GO_AWAY_MARGIN_S
                 log.info(
                     "gemini.live.go_away",
                     provider=self.config.id,
                     time_left=self._turns.go_away,
                     resumable=bool(self._resume_handle),
                 )
+            if leave_by is not None and (
+                not self._turns.owes_final or time.monotonic() >= leave_by
+            ):
                 return
 
     async def flush_input(self) -> None:

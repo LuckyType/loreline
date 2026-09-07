@@ -1345,7 +1345,17 @@ providers:
             - [glossary, word_timestamps]
         deprecated: null
       # Live/streaming variant over the Live API BidiGenerateContent websocket.
-      # Sessions capped at 10 minutes. No diarization, no word timestamps.
+      # No diarization, no word timestamps, and no timing of any kind.
+      #
+      # The session cap is real and it is not a fault: measured over one paced
+      # 13-minute run of the streaming shape (ADR 0006), goAway arrived after
+      # nine minutes carrying timeLeft: "50s", so a live capture reconnects
+      # about six times an hour. That run cost one gap marker of one second in
+      # thirteen minutes, because the connector spends the notice waiting for
+      # the open turn to close. sessionResumption is accepted in the setup and
+      # was never once answered with a handle, so a reconnect is a fresh
+      # session. Same run: 90 turns, first interim a median 752 ms after the
+      # speaker started, settled text a median 265 ms after the last interim.
       - id: gemini-3.5-transcribe-live
         label: Gemini 3.5 Transcribe (Live)
         interactions: [transcribe]
