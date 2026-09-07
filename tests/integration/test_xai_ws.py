@@ -1,23 +1,32 @@
-"""Integration tests for the xAI streaming connector via ``mocks/xai_ws.py``.
+"""Integration tests for both xAI connector shapes via ``mocks/xai_ws.py``.
 
-The one behaviour worth a whole file: xAI's ``transcript.done`` repeats
-everything its ``transcript.partial`` events already said, so a connector that
-accumulated both would emit every word twice. The mock sends both, with the
-final text exactly equal to the partials joined, which makes the doubling
-visible rather than plausible.
+The utterance shape's one behaviour worth a whole file: xAI's
+``transcript.done`` repeats everything its ``transcript.partial`` events already
+said, so a connector that accumulated both would emit every word twice. The mock
+sends both, with the final text exactly equal to the partials joined, which
+makes the doubling visible rather than plausible.
+
+The streaming shape's is the other half of the same fact. Every event carries
+the transcript so far rather than what is new, so a turn is *replaced* on its
+way to the screen and never appended to, and a locked chunk in the middle of a
+sentence must not be mistaken for the end of one. Both are driven here through
+``TranscriptStream``, the same object a live capture drives.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
+from itertools import pairwise
 
 from websockets.asyncio.server import ServerConnection, serve
 
 from loreline.audio.chunker import Utterance
-from loreline.models import Glossary, ProviderConfig, ProviderKind
-from loreline.stt.backends._ws import as_dict
+from loreline.models import Glossary, ProviderConfig, ProviderKind, TranscriptEvent
+from loreline.stt.backends._ws import as_dict, get_str
 from loreline.stt.backends.xai import XaiBackend
 from loreline.stt.base import transcribe_capabilities
+from loreline.stt.streaming import StreamConfig, TranscriptStream
 from mocks.xai_ws import xai_handler
 
 MODEL = "grok-stt-1.0"
@@ -238,3 +247,157 @@ async def test_an_error_frame_costs_the_utterance_and_not_the_session() -> None:
         event = await backend.transcribe(_one_utterance(), session_id="s1")
 
     assert event is None
+
+
+# --- the streaming shape --------------------------------------------------
+
+_LOUD = b"\x00\x20" * 320  # 20 ms of 16 kHz mono, well above the mock's threshold
+_QUIET = b"\x01\x00" * 320
+
+
+async def _stream_events(
+    script: list[tuple[bytes, int]], *, start: float = 100.0
+) -> list[TranscriptEvent]:
+    """Run the streaming path over a script of (frame, count) against the mock."""
+    async with serve(xai_handler, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        backend = _backend(port)
+        events: list[TranscriptEvent] = []
+
+        async def publish(event: TranscriptEvent) -> None:
+            events.append(event)
+
+        stream = TranscriptStream(
+            backend,
+            publish=publish,
+            capture_rate=16000,
+            config=StreamConfig(session_id="s1", interim_interval_s=0.0, final_wait_s=1.0),
+        )
+        task = asyncio.create_task(stream.run())
+        ts = start
+        for frame, count in script:
+            for _ in range(count):
+                stream.feed(frame, ts, is_speech=frame is _LOUD)
+                ts += 0.02
+                await asyncio.sleep(0)
+        await asyncio.sleep(0.2)
+        stream.stop()
+        await asyncio.wait_for(task, 10)
+        await backend.aclose()
+    return events
+
+
+async def test_streaming_publishes_interims_then_a_final_per_vendor_turn() -> None:
+    """One socket, two turns, and text before either of them closed.
+
+    This is what ADR 0006 is about for this vendor: the turns come from xAI's
+    own `endpointing` window rather than from 800 ms of local trailing silence,
+    and `interim_results` puts words on screen while the sentence is still
+    being said.
+    """
+    events = await _stream_events([(_LOUD, 50), (_QUIET, 30), (_LOUD, 50), (_QUIET, 30)])
+
+    finals = [e for e in events if e.is_final]
+    assert len(finals) == 2
+    assert [e for e in events if not e.is_final]  # and interims before each one
+    assert all(e.text for e in events)
+
+    first, second = finals
+    # Timestamps land on the capture clock, not on the vendor's stream offsets.
+    assert first.turn_id == "xai-1:1:t100000"
+    assert second.turn_id == "xai-1:1:t101600"
+    assert first.start_ts == 100.0
+    assert 101.5 < second.start_ts < 101.7
+    assert first.end_ts > first.start_ts
+    # Inline diarization comes off the same words[] the batch transport sends.
+    assert {w.speaker for w in first.words} == {"Speaker 0", "Speaker 1"}
+    assert first.words[0].start == first.start_ts
+
+
+async def test_streaming_replaces_a_turn_rather_than_appending_to_it() -> None:
+    """xAI resends the whole text every time, so nothing may be concatenated."""
+    events = await _stream_events([(_LOUD, 50), (_QUIET, 30)])
+
+    turn = [e for e in events if e.turn_id == "xai-1:1:t100000"]
+    assert len(turn) > 1  # several interims and then the final
+    assert [e.is_final for e in turn] == [False] * (len(turn) - 1) + [True]
+    assert all(later.text.startswith(earlier.text) for earlier, later in pairwise(turn))
+
+
+async def test_a_locked_chunk_mid_turn_does_not_split_the_turn() -> None:
+    """Four seconds of speech crosses the mock's ~3 s chunk-final threshold.
+
+    `is_final=true` with `speech_final=false` means "this much text is locked",
+    not "the speaker stopped", so it must grow the open turn instead of closing
+    it: one row for the sentence, not one row per three seconds of it.
+    """
+    events = await _stream_events([(_LOUD, 200), (_QUIET, 30)])
+
+    assert len([e for e in events if e.is_final]) == 1
+    assert len({e.turn_id for e in events}) == 1
+
+
+async def test_finalize_settles_a_turn_the_microphone_stopped_in_the_middle_of() -> None:
+    """No trailing silence, so only the flush can close this turn."""
+    events = await _stream_events([(_LOUD, 50)])
+
+    finals = [e for e in events if e.is_final]
+    assert len(finals) == 1
+    assert finals[0].text
+    assert finals[0].start_ts == 100.0
+
+
+async def test_the_streaming_query_string_asks_for_interims_and_endpointing() -> None:
+    """Two parameters are the whole difference between the shapes on the wire."""
+    paths: list[str] = []
+
+    async def capturing(ws: ServerConnection) -> None:
+        request = ws.request
+        assert request is not None
+        paths.append(request.path)
+        await xai_handler(ws)
+
+    async with serve(capturing, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        backend = _backend(port)
+        await backend.open_stream(Glossary(campaign_id="c1", terms=["Drakonia"]))
+        await backend.close_stream()
+
+    query = paths[0]
+    assert "interim_results=true" in query
+    assert "endpointing=400" in query
+    # ...and everything the utterance shape sends is still there.
+    assert "encoding=pcm" in query
+    assert "sample_rate=16000" in query
+    assert "diarize=true" in query
+    assert "keyterm=Drakonia" in query
+    assert "model=" not in query
+    # The rate the resampler targets and the rate the socket is told are one
+    # number: a mismatch is audio played back at the wrong speed, not an error.
+    assert f"sample_rate={backend.stream_rate}" in query
+
+
+async def test_finalize_flushes_and_audio_done_ends_the_socket() -> None:
+    """`finalize` keeps the connection; `audio.done` is what gives it up."""
+    control: list[str] = []
+    ended = asyncio.Event()
+
+    async def inspecting(ws: ServerConnection) -> None:
+        await ws.send(json.dumps({"type": "transcript.created"}))
+        async for message in ws:
+            if isinstance(message, bytes):
+                continue
+            control.append(get_str(as_dict(message), "type"))
+            if control[-1] == "audio.done":
+                ended.set()
+
+    async with serve(inspecting, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        backend = _backend(port)
+        await backend.open_stream(None)
+        await backend.send_audio(_LOUD)  # raw binary, never counted as control
+        await backend.flush_input()
+        await backend.close_stream()
+        await asyncio.wait_for(ended.wait(), 5)
+
+    assert control == ["finalize", "audio.done"]

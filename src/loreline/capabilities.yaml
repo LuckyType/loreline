@@ -1636,7 +1636,12 @@ providers:
       # maintainer with a key should check first: that the socket's
       # transcript.done really carries the whole utterance (this file's reading
       # of "Final transcript after audio.done"), and that words[] carries
-      # `speaker` under diarize=true on both transports.
+      # `speaker` under diarize=true on both transports. The socket now also
+      # serves the streaming shape (ADR 0006), which adds two of the same kind,
+      # both places where the docs say a thing two ways: whether a partial's
+      # cumulative `text` accumulates over the utterance or over the whole
+      # stream, and whether `finalize` really answers with a speech_final
+      # partial on a socket that stays open.
       - id: grok-stt-1.0
         label: Grok STT
         interactions: [transcribe]
