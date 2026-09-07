@@ -188,6 +188,11 @@ This is the default and it stays the default. It rebuilds the image from your
 own checkout, and the only thing holding any privilege is a systemd unit on the
 host, where you can read it. What it costs you is that the box does the build,
 which on a Raspberry Pi is slow, and that it needs a git checkout and a shell.
+It rebuilds the diarization service's image too, but only while its compose
+profile is recorded in `.env`: `deploy/install.sh` writes
+`COMPOSE_PROFILES=diarization` there for you when you enable diarization at
+install time, and this script prints the manual rebuild command instead when
+a diarization container is running without that line.
 
 [`docker-publish.yml`](.github/workflows/docker-publish.yml) publishes
 `ghcr.io/luckytype/loreline` for amd64 and arm64 on every push to `main`, so
