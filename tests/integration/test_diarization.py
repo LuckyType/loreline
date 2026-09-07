@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import httpx
+import pytest
+from structlog.testing import capture_logs
 
 from loreline.audio import pcm_to_wav
 from loreline.diarization import assign_speakers
@@ -84,12 +86,20 @@ async def test_remote_diarizer_without_a_session_id_sends_none() -> None:
     assert app.state.deleted_sessions == []
 
 
-async def test_remote_diarizer_close_survives_a_service_that_cannot_forget() -> None:
-    """A service too old for the route, or simply gone, must not fail a stop."""
+@pytest.mark.parametrize("status", [404, 405, 500])
+async def test_remote_diarizer_close_survives_a_service_that_cannot_forget(status: int) -> None:
+    """A service too old for the route, or simply gone, must not fail a stop.
+
+    404 is the one a real deployment answers: the image before session memory
+    has no ``/sessions`` route at all, and a capture stopping against it must
+    still stop. 405 is what a route that exists for another method would say,
+    and 500 stands for the service breaking while being told something it will
+    forget by itself in an hour anyway.
+    """
 
     def refuse(request: httpx.Request) -> httpx.Response:
         if request.method == "DELETE":
-            return httpx.Response(405, text="method not allowed")
+            return httpx.Response(status, text="no such route")
         return httpx.Response(200, json={"segments": []})
 
     async with httpx.AsyncClient(
@@ -98,6 +108,53 @@ async def test_remote_diarizer_close_survives_a_service_that_cannot_forget() -> 
         diarizer = RemoteDiarizer("http://diar", client=client)
         await diarizer.diarize(b"", session_id="s-42")
         await diarizer.aclose()
+
+
+async def test_a_service_restart_mid_session_is_logged_once() -> None:
+    """A restart renumbers a session's speakers, and only this can show it.
+
+    The service keeps the bank in its own process memory, so the turn after a
+    restart starts at Speaker 0 again and one label ends up naming two people.
+    The labels themselves cannot say so, since "Speaker 0" is exactly what a
+    healthy service answers; a generation that changes with the process can.
+    Once per restart, not once per utterance: the second half of the session is
+    not news four hundred times.
+    """
+    generations = iter(["g1", "g1", "g2", "g2"])
+
+    def answer(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"segments": [], "generation": next(generations)})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(answer), base_url="http://diar"
+    ) as client:
+        diarizer = RemoteDiarizer("http://diar", client=client)
+        with capture_logs() as logs:
+            for _ in range(4):
+                await diarizer.diarize(b"", session_id="s-42")
+
+    restarted = [line for line in logs if line["event"] == "diarization.service_restarted"]
+    assert len(restarted) == 1
+    assert restarted[0]["session_id"] == "s-42"
+    assert restarted[0]["previous_generation"] == "g1"
+    assert restarted[0]["generation"] == "g2"
+
+
+async def test_a_service_that_stamps_no_generation_is_never_called_restarted() -> None:
+    """An older service says nothing about its process, which is not a restart."""
+
+    def answer(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"segments": []})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(answer), base_url="http://diar"
+    ) as client:
+        diarizer = RemoteDiarizer("http://diar", client=client)
+        with capture_logs() as logs:
+            await diarizer.diarize(b"", session_id="s-42")
+            await diarizer.diarize(b"", session_id="s-42")
+
+    assert [line for line in logs if line["event"] == "diarization.service_restarted"] == []
 
 
 async def test_probe_grades_the_service_like_a_provider() -> None:
@@ -117,6 +174,48 @@ async def test_probe_grades_the_service_like_a_provider() -> None:
     ) as client:
         report = await probe_diarizer("http://diar", client=client)
     assert report.status is HealthStatus.UNREACHABLE
+
+
+async def test_probe_says_when_a_service_does_not_remember_speakers() -> None:
+    """The silent failure this exists for: an app newer than its diarizer.
+
+    That older image accepts the extra ``session_id`` form field and ignores
+    it, and answers 404 to the delete this client already swallows, so the app
+    goes back to labelling every utterance "Speaker 0" with no error anywhere.
+    Both services answer 200 to a health check, so a flag in the body is the
+    only thing that separates them, and a green badge is the one verdict this
+    must not give.
+    """
+
+    def old_service(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"status": "ok"})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(old_service), base_url="http://diar"
+    ) as client:
+        report = await probe_diarizer("http://diar", client=client)
+
+    assert report.status is HealthStatus.DEGRADED
+    assert "Speaker 0" in (report.detail or "")
+
+
+async def test_probe_does_not_read_an_unreadable_health_body_as_a_missing_flag() -> None:
+    """Tolerant in the direction loreline.health insists on.
+
+    A body that is not JSON is one this cannot read, not proof of a service
+    without session memory, and calling a working diarizer broken is the worse
+    of the two errors.
+    """
+
+    def terse(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="ok")
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(terse), base_url="http://diar"
+    ) as client:
+        report = await probe_diarizer("http://diar", client=client)
+
+    assert report.status is HealthStatus.HEALTHY
 
 
 def test_create_diarizer_remote_requires_endpoint() -> None:
