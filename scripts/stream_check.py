@@ -40,7 +40,6 @@ import subprocess
 import sys
 import time
 import urllib.request
-from collections import Counter
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -83,7 +82,8 @@ class _Turn:
     first_interim_at: float | None = None
     final_at: float | None = None
     revisions: int = 0
-    speakers: list[str] = field(default_factory=list[str])
+    interims: int = 0
+    speakers: tuple[str, ...] = ()
 
 
 @dataclass
@@ -103,25 +103,49 @@ class _Recorder:
         turn.revisions += 1
         turn.text = event.text
         turn.end_ts = event.end_ts
+        if event.words:
+            # Who the vendor said was speaking, in the order it said so. The
+            # question a two-speaker clip is fed to answer is whether these
+            # stay put across a session, which is what a persistent stream is
+            # supposed to buy over one socket per utterance.
+            turn.speakers = tuple(
+                dict.fromkeys(w.speaker for w in event.words if w.speaker is not None)
+            )
         if event.is_final:
-            turn.final_at = now
-            turn.speakers = [w.speaker for w in event.words if w.speaker]
-        elif turn.first_interim_at is None:
-            turn.first_interim_at = now
+            # The first final is when the text settled. Later ones are the same
+            # turn said again - a formatted duplicate, or a vendor's end-of-
+            # session speaker pass - and timing those as "time to final" would
+            # report the length of the session rather than a latency.
+            turn.final_at = turn.final_at or now
+        else:
+            turn.interims += 1
+            if turn.first_interim_at is None:
+                turn.first_interim_at = now
 
 
-def _clip(seconds: float, cache: Path, items: list[str]) -> bytes:
+def _clip(
+    seconds: float,
+    cache: Path,
+    prepared: Path | None = None,
+    items: list[str] | None = None,
+) -> bytes:
     """The test clip as mono s16le PCM, downloading and trimming it once.
 
-    One item is one reader read straight through, which is what latency
-    numbers want. Two items are alternated in 6 to 15 second pieces, which is
-    what a speaker-label question wants: the vendor is never told there are two
-    of them, so whether its numbering holds across a session is visible in the
-    labels alone.
+    Two ways to get a multi-speaker one, because speaker labels are only worth
+    measuring against audio with more than one speaker in it and no single
+    archive.org item has that. ``prepared`` is a file somebody built already
+    and is fed exactly as it is. ``items`` names the readings to build one
+    from here: one item is read straight through, which is what latency
+    numbers want, and two are alternated in 6 to 15 second pieces, which is
+    what a speaker-label question wants, since the vendor is never told there
+    are two of them.
     """
+    if prepared is not None:
+        return prepared.read_bytes()[: int(seconds * _CAPTURE_RATE) * 2]
     if shutil.which("ffmpeg") is None:
         msg = "ffmpeg is needed to trim and convert the clip"
         raise SystemExit(msg)
+    items = items or [_ARCHIVE_ITEM]
     tag = "-".join(item[:12] for item in items)
     pcm_path = cache / f"clip-{tag}-{int(seconds)}s-{_CAPTURE_RATE}.pcm"
     if pcm_path.exists():
@@ -277,7 +301,7 @@ def _record_frames(backend: object, path: Path) -> None:
 
 
 async def _run(args: argparse.Namespace) -> int:
-    pcm = _clip(args.seconds, args.cache, args.item or [_ARCHIVE_ITEM])
+    pcm = _clip(args.seconds, args.cache, args.clip, args.item)
     config = _provider(args.db, args.kind, args.auth_ref, args.language)
     backend = create_backend(config, SecretStore(args.secrets), args.model)
     if not is_streaming(backend):
@@ -327,28 +351,26 @@ def _report(recorder: _Recorder, outcome: str, started: float) -> None:
         print(
             f"[{turn.start_ts - started:6.2f}s -> {turn.end_ts - started:6.2f}s] "
             f"interim {_ms(to_interim)}  final {_ms(to_final)}  "
-            f"({turn.revisions} revisions) {_speakers(turn)}\n    {turn.text}"
+            f"({turn.interims} interims, {turn.revisions} revisions)"
+            f"  {'/'.join(turn.speakers) or '-'}\n    {turn.text}"
         )
     for gap in recorder.gaps:
         print(f"[{gap.start_ts - started:6.2f}s] GAP: {gap.text}")
+    ordered = sorted(recorder.turns.values(), key=lambda t: t.start_ts)
+    leads = [t.final_at - t.first_interim_at for t in ordered if t.final_at and t.first_interim_at]
+    spans = [t.end_ts - t.start_ts for t in ordered if t.end_ts > t.start_ts]
     print(
         f"\nmedian time to first interim: {_ms(_median(interims))}"
         f"\nmedian time to final:         {_ms(_median(finals))}"
         "\n(the utterance path's floor is 800 ms of trailing silence plus a round trip)"
+        # How far ahead of a turn's own final its first interim arrived. A lead
+        # near zero means the vendor is not really streaming text, it is
+        # sending one interim as the turn closes; a lead near the turn's length
+        # means text really did appear while somebody was speaking.
+        f"\nmedian interim lead over the final: {_ms(_median(leads))}"
+        f"\nmedian turn length: {_ms(_median(spans))}"
+        f"\nspeakers per turn: " + " ".join("/".join(t.speakers) or "-" for t in ordered)
     )
-
-
-def _speakers(turn: _Turn) -> str:
-    """Which speakers this turn's words were labelled with, as one field.
-
-    Printed per turn rather than summarized, because the question a two-reader
-    clip asks is whether the same voice keeps the same label from one turn to
-    the next, and only the sequence answers that.
-    """
-    if not turn.speakers:
-        return ""
-    counts = Counter(turn.speakers)
-    return "[" + ", ".join(f"{name} x{n}" for name, n in counts.most_common()) + "]"
 
 
 def _median(values: list[float]) -> float | None:
@@ -387,6 +409,7 @@ def main() -> int:
         "--dump-frames", type=_path, help="write every frame the vendor sends to this file"
     )
     parser.add_argument("--cache", type=_path, default="~/.cache/loreline-stream-check")
+    parser.add_argument("--clip", type=_path, help="a prepared 16 kHz mono s16le PCM file")
     return asyncio.run(_run(parser.parse_args()))
 
 
