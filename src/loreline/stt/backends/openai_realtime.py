@@ -8,7 +8,20 @@ because the two need incompatible session configurations.
 **Streaming** (``StreamingConnector``, what a live capture takes) is the shape
 this session type was built for and the reason it is first to be migrated (ADR
 0006). Server VAD is on, so OpenAI decides the turns from the audio rather than
-this app cutting them: ``speech_started`` opens a turn and carries the offset
+this app cutting them:
+
+Not every model allows that, and the two this repo routes here are the two that
+do not: ``gpt-live-transcribe`` and ``gpt-realtime-whisper`` both answer a
+server-VAD ``session.update`` with "Turn detection is not supported for this
+transcription model", while ``gpt-4o-transcribe``, ``gpt-4o-mini-transcribe``
+and ``whisper-1`` accept it on the same socket. So :meth:`open_stream` raises
+``StreamUnsupportedError`` on that refusal and the session runs this same
+connector one utterance at a time instead, exactly as it did before streaming
+existed. It is checked against the vendor rather than declared in
+capabilities.yaml because the vendor is where the answer lives and the yaml has
+no field for it yet; see ADR 0006 for the note that it probably should.
+
+With server VAD on: ``speech_started`` opens a turn and carries the offset
 its ``start_ts`` is derived from, ``delta`` events grow it as interim text,
 ``speech_stopped`` carries the offset for its ``end_ts``, and ``completed``
 settles it. All four name the same ``item_id``, which is the handle the stream
@@ -63,6 +76,7 @@ from loreline.stt.base import Connector, Transcription, glossary_terms, secret_f
 from loreline.stt.registry import register
 from loreline.stt.streaming import (
     StreamingConnector,
+    StreamUnsupportedError,
     TurnEnded,
     TurnFinal,
     TurnPartial,
@@ -232,6 +246,12 @@ class OpenAIRealtimeBackend(Connector[None], StreamingConnector):
         A rejected prompt - a model without prompt support - downgrades the
         session once to a promptless update, so the language/format config
         still applies instead of being voided along with the prompt.
+
+        A rejected ``turn_detection`` is the other kind of no, and it is
+        final: without the server deciding the turns there is nothing for the
+        streaming shape to cut on, so this raises rather than carrying on into
+        a session that would accept audio forever and answer nothing. See
+        :class:`StreamUnsupportedError` for which models say it.
         """
         await ws.send(self._session_update(turn_detection))
         async with asyncio.timeout(_CONFIGURE_TIMEOUT_S):
@@ -243,6 +263,11 @@ class OpenAIRealtimeBackend(Connector[None], StreamingConnector):
                 if kind != "error":
                     continue  # session.created and other chatter
                 detail = as_obj_dict(message.get("error", message))
+                if "turn_detection" in get_str(detail, "param"):
+                    raise StreamUnsupportedError(
+                        f"{self._model or 'this model'} does not support server-side turn "
+                        f"detection: {get_str(detail, 'message')}"
+                    )
                 if not self._prompt_rejected and "transcription.prompt" in get_str(detail, "param"):
                     self._prompt_rejected = True
                     log.warning(

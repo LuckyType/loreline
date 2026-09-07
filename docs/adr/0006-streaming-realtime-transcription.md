@@ -172,6 +172,13 @@ vendor's protocol and yields `TranscriptEvent`s as they finalize.
    matches the capture clock. Reconnecting is what restores that mapping, with
    a fresh `t0`.
 
+   And "voiced audio sent" was still not enough, which only the real vendor
+   showed: see "What the real vendor said" below. The rule that survived
+   measurement is that the *local VAD has to go quiet first*. Every vendor
+   emits something at a turn boundary and none of them promise anything inside
+   one, so silence past the end of a turn is a dead connection and silence
+   during one is a long sentence.
+
 5. Diarization for a migrated connector keys off the vendor's turn boundary
    instead of an `Utterance`. Remote diarization has nothing to send until a
    turn closes, so it either buffers each vendor turn into a clip and ships
@@ -253,6 +260,48 @@ vendor's protocol and yields `TranscriptEvent`s as they finalize.
   record is why each piece was thought to be separable, and two of them were
   not. Phase 3, the remaining four connectors, and Phase 5, the ADR that
   supersedes this one, are still ahead.
+
+## What the real vendor said
+
+Phase 1 asked for verification against paced real audio before touching any
+other connector (`scripts/stream_check.py`, a public-domain LibriVox clip fed
+at wall clock in 20ms frames). Three things came back that no mock could have
+said, on 2026-09-07 against real OpenAI:
+
+* **The two models this repo routes to the realtime connector cannot be
+  streamed.** `gpt-live-transcribe` and `gpt-realtime-whisper` both answer a
+  server-VAD `session.update` with "Turn detection is not supported for this
+  transcription model". `gpt-4o-transcribe`, `gpt-4o-mini-transcribe` and
+  `whisper-1` accept it on the same socket, and `capabilities.yaml` sends all
+  three to batch (`prefer: batch`). So the connector migrated first is, today,
+  migrated for no model anybody can select. A session that picks one of the two
+  is handed straight back to the utterance path with the same connector
+  (`StreamUnsupportedError` to `PathEnd.HANDOFF`), so nothing regresses and
+  nothing is silently lost, but nothing streams either. Whether to flip
+  `gpt-4o-transcribe`'s `prefer` to realtime is a product decision, about cost
+  and about which endpoint an existing session moves to; it is not made here.
+  Whether "this model's realtime session supports server-side turn detection"
+  should become a `capabilities.yaml` field rather than a connect-time
+  discovery is the same question asked of Decision (2), and worth revisiting
+  once Phase 3 shows whether any other vendor has the same split.
+* **The win is a faster final, not text while speaking.** Against
+  `gpt-4o-transcribe`, median time from the end of a turn (the vendor's own
+  `audio_end_ms`) to its settled text was **758ms** over seven turns of a
+  60-second clip, comfortably under the utterance path's floor of 800ms of
+  trailing silence *before* the request goes out plus a round trip. But its
+  `delta` events do not arrive during a turn: every turn produced one interim
+  roughly half a second before its final, so median time to first interim was
+  **7.6s**, which is a turn's length, not a latency. The interim machinery is
+  right and the vendor is not using it. Phase 3 should measure this per vendor
+  before anyone promises a GM text while they speak.
+* **A watchdog that only counts voiced audio kills long turns.** Because that
+  session says nothing for a whole turn and everything at its close, the first
+  run's 15-second window fired inside a 24-second turn, dropped the
+  connection, and cost 19 seconds of speech to the gap that followed. Decision
+  (4)'s amendment above is that measurement: the watchdog now waits for the
+  local VAD to go quiet before it counts silence as death, because every
+  vendor emits *something* at a turn boundary and none of them promise
+  anything inside one.
 
 ## Implementation plan
 

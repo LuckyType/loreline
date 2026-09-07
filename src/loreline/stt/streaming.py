@@ -73,6 +73,25 @@ __all__ = [
 ]
 
 
+class StreamUnsupportedError(RuntimeError):
+    """This connector cannot stream *this model*, and it never will.
+
+    Not a connection failure, so nothing about it is worth retrying: the stream
+    stops at once rather than spending its reconnect budget on an answer that
+    cannot change. The caller's move is to run the same provider through the
+    utterance path, which is what it did before streaming existed and which
+    still works.
+
+    Real and not hypothetical: OpenAI's ``gpt-live-transcribe`` and
+    ``gpt-realtime-whisper``, the two models capabilities.yaml routes to the
+    realtime connector, both answer a server-VAD ``session.update`` with
+    "Turn detection is not supported for this transcription model", while
+    ``gpt-4o-transcribe`` and ``whisper-1``, which it routes to batch, accept
+    it. Whether a model can be streamed is a fact about the model, and until
+    the yaml carries it the vendor is the one who says so, on connect.
+    """
+
+
 # --------------------------------------------------------------------------
 # The signals a connector translates its vendor's messages into.
 # --------------------------------------------------------------------------
@@ -286,7 +305,16 @@ class StreamConfig:
     # dead connection (ADR 0006, Decision 4). Counted from voiced frames only:
     # with server VAD a silent room produces no vendor messages by design, so a
     # plain "nothing received" timer would fire on every coffee break.
-    watchdog_s: float = 15.0
+    watchdog_s: float = 20.0
+    # ...and not while somebody is still talking. Measured against OpenAI, a
+    # transcription session says nothing at all for the whole length of a turn
+    # and then everything at once when it closes, so a watchdog that only
+    # counted voiced audio killed a twelve second turn mid-sentence and cost
+    # nineteen seconds of speech to the gap that followed. Waiting for the
+    # local VAD to go quiet first is what makes "nothing came back" mean
+    # something: every vendor emits at a turn boundary, so silence past one is
+    # a dead connection and silence inside a turn is just a long sentence.
+    quiet_grace_s: float = 2.0
     # Consecutive failed attempts against the same provider before the caller
     # is told to fail over. Each one costs a gap marker, so it is small.
     max_reconnects: int = 3
@@ -320,10 +348,14 @@ class StreamOutcome:
     ``ENDED``: the microphone stopped and the stream closed cleanly.
     ``DEAD``: the provider is out of reconnects and the caller should move to
     the next one (ADR 0006, Decision 3).
+    ``UNSUPPORTED``: this provider works, but not for this model over this
+    shape, so the caller should run it through the utterance path instead. See
+    :class:`StreamUnsupportedError`.
     """
 
     ENDED = "ended"
     DEAD = "dead"
+    UNSUPPORTED = "unsupported"
 
 
 @dataclass(frozen=True, slots=True)
@@ -453,6 +485,14 @@ class TranscriptStream:
         while True:
             try:
                 await self._connector.open_stream(self._config.glossary)
+            except StreamUnsupportedError as exc:
+                log.warning(
+                    "stream.model.unsupported",
+                    provider=self._connector.config.name,
+                    provider_id=self._connector.config.id,
+                    error=str(exc),
+                )
+                return StreamOutcome.UNSUPPORTED
             except Exception as exc:
                 attempts += 1
                 log.warning(
@@ -550,15 +590,18 @@ class TranscriptStream:
             raise _ConnectionLostError("a write blocked") from exc
 
     def _check_liveness(self) -> None:
-        """Fail a connection that has been written speech and said nothing."""
+        """Fail a connection written speech that has since gone quiet and said nothing."""
         if self._stalled:
             raise _ConnectionLostError("frames dropped: the connection is not draining")
-        quiet_for = time.monotonic() - self._last_rx
+        now = time.monotonic()
+        quiet_for = now - self._last_rx
         if quiet_for < self._config.watchdog_s:
             return
         if self._voiced_at is None or self._voiced_at < self._last_rx:
             return  # nothing worth transcribing has gone out since we last heard
-        raise _ConnectionLostError(f"nothing received for {quiet_for:.0f}s of voiced audio")
+        if now - self._voiced_at < self._config.quiet_grace_s:
+            return  # still mid-turn; see StreamConfig.quiet_grace_s
+        raise _ConnectionLostError(f"nothing received for {quiet_for:.0f}s past a turn's end")
 
     async def _read(self) -> None:
         """Turn the vendor's messages into events, for this connection's life."""

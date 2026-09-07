@@ -41,6 +41,7 @@ from loreline.models import (
     Glossary,
     TranscriptEvent,
 )
+from loreline.stt.base import STTBackend
 from loreline.stt.router import merge_diarization
 from loreline.stt.streaming import StreamConfig, StreamingConnector, StreamOutcome, TranscriptStream
 
@@ -48,7 +49,6 @@ if TYPE_CHECKING:
     from loreline.audio.chunker import Utterance
     from loreline.bus import EventBus
     from loreline.diarization.base import DiarizationProvider
-    from loreline.stt.base import STTBackend
     from loreline.stt.router import SttRouter
 
 log = get_logger(__name__)
@@ -94,8 +94,11 @@ class PathEnd:
     """How :meth:`StreamPath.run` ended, and therefore what happens next.
 
     ``ENDED``: the microphone stopped, everything settled, the session is over.
-    ``HANDOFF``: no streaming provider is left, but a call-shaped fallback is,
-    so the rest of the session goes through the utterance path.
+    ``HANDOFF``: something call-shaped is left, so the rest of the session goes
+    through the utterance path. Two ways to get here, and
+    :attr:`StreamPath.handoff` says which: no streaming provider survived and a
+    call-shaped fallback is configured, or a provider that streams turned out
+    not to stream *this model* and can serve it call-shaped itself.
     ``EXHAUSTED``: nothing is left to transcribe with. Same meaning as
     ``ProvidersExhaustedError`` on the utterance path: keep recording, stop
     transcribing, say why.
@@ -154,6 +157,10 @@ class StreamPath:
         # /healthz read through the manager.
         self.router: SttRouter | None = None
         self._retired: dict[str, str] = {}
+        # A provider that connected and said it cannot stream this model. Not
+        # retired: it transcribes perfectly well one utterance at a time, which
+        # is what the session falls back to.
+        self._call_shaped: STTBackend | None = None
 
     # -- what the capture loop sees --------------------------------------
 
@@ -207,7 +214,7 @@ class StreamPath:
         return "; ".join(self._retired.values()) if self._exhausted() else None
 
     def _exhausted(self) -> bool:
-        return bool(self._retired) and not self._streamable()
+        return bool(self._retired) and not self._streamable() and self._call_shaped is None
 
     # -- the driving task -------------------------------------------------
 
@@ -220,10 +227,20 @@ class StreamPath:
         for backend in self._streamable():
             if self._stopped:
                 return PathEnd.ENDED
-            if await self._stream_with(backend) == StreamOutcome.ENDED:
+            outcome = await self._stream_with(backend)
+            if outcome == StreamOutcome.ENDED:
                 return PathEnd.ENDED
+            if outcome == StreamOutcome.UNSUPPORTED:
+                # Structural, not assumed: a connector may have only the
+                # streaming shape, and one of those refusing a model has
+                # nowhere to hand the session to, so it is simply out.
+                if isinstance(backend, STTBackend):
+                    self._call_shaped = self._call_shaped or backend
+                    break  # a model this vendor will not stream is not a race to lose
+                await self._retire(backend)
+                continue
             await self._retire(backend)
-        if self.call_shaped_fallback is not None:
+        if self.handoff is not None:
             return PathEnd.HANDOFF
         log.error(
             "session.stream.exhausted",
@@ -267,17 +284,27 @@ class StreamPath:
         ]
 
     @property
-    def call_shaped_fallback(self) -> STTBackend | None:
-        """A fallback that transcribes utterances, if this session has one.
+    def handoff(self) -> tuple[STTBackend, STTBackend | None] | None:
+        """The primary and fallback the utterance path should take over with.
 
         A fallback is any enabled provider row, so a streaming primary with a
-        batch fallback is a configuration a GM can already save; this is where
-        the two shapes hand the session over to each other.
+        batch fallback is a configuration a GM can already save; that is one
+        way here, and the pair is then just the fallback, because the streaming
+        primary is dead.
+
+        The other way is a provider that streams as a class but not for the
+        model this session picked (``StreamUnsupportedError``). Nothing is
+        wrong with it, so the pair is the session the GM configured, unchanged:
+        that provider one utterance at a time, with its own fallback behind it.
+        Anything else would drop a working provider for a reason the GM never
+        chose.
         """
+        if self._call_shaped is not None:
+            return self._call_shaped, self._fallback
         fallback = self._fallback
-        if fallback is None or isinstance(fallback, StreamingConnector):
-            return None
-        return fallback
+        if fallback is not None and not isinstance(fallback, StreamingConnector):
+            return fallback, None
+        return None
 
     async def _retire(self, backend: StreamingConnector) -> None:
         """Give up on one provider, and tell the GM it happened.

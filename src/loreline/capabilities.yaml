@@ -530,6 +530,14 @@ providers:
       # Realtime-only, lowest latency, streaming transcript deltas. Recommended default for live.
       # Model card: ONLY v1/realtime/transcription_sessions is supported.
       # https://developers.openai.com/api/docs/models/gpt-live-transcribe
+      #
+      # Measured 2026-09-07: this model REFUSES server-side turn detection
+      # ("Turn detection is not supported for this transcription model",
+      # param session.audio.input.turn_detection), so the streaming shape
+      # cannot run on it and a session picking it falls back to one utterance
+      # per call, which is what it always did. gpt-4o-transcribe, whisper-1 and
+      # gpt-4o-mini-transcribe accept server VAD on the same socket, and this
+      # file routes all three to batch. See docs/adr/0006.
       - id: gpt-live-transcribe
         label: GPT Live Transcribe
         interactions: [transcribe]
@@ -549,6 +557,7 @@ providers:
 
       # Realtime-only Whisper-lineage streaming model. Docs are thin on its parameters.
       # https://developers.openai.com/api/docs/models/gpt-realtime-whisper
+      # Refuses server-side turn detection, same as gpt-live-transcribe above.
       - id: gpt-realtime-whisper
         label: GPT Realtime Whisper
         interactions: [transcribe]
@@ -589,6 +598,14 @@ providers:
       # Legacy. Realtime here means the v1/realtime session path (input_audio_transcription),
       # NOT v1/realtime/transcription_sessions, which the model card marks "Not supported".
       # https://developers.openai.com/api/docs/models/gpt-4o-transcribe
+      #
+      # Measured 2026-09-07: this model DOES accept server-side turn detection
+      # over the realtime socket, and streams for real (median 758 ms from the
+      # end of a turn to its settled text, against the utterance path's 800 ms
+      # of trailing silence plus a round trip). `prefer: batch` below keeps a
+      # live capture off it anyway, which is the choice to revisit now that
+      # realtime buys something: it is a product decision about cost and about
+      # which endpoint an existing session moves to, not a code one.
       - id: gpt-4o-transcribe
         label: GPT-4o Transcribe
         interactions: [transcribe]

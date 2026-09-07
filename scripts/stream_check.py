@@ -132,13 +132,31 @@ def _clip(seconds: float, cache: Path) -> bytes:
     return pcm_path.read_bytes()
 
 
-def _provider(db: Path, kind: str) -> ProviderConfig:
-    """The first enabled provider row of ``kind``, read without migrating.
+def _provider(db: Path | None, kind: str, auth_ref: str | None, language: str) -> ProviderConfig:
+    """The provider row to run as: read from a database, or named directly.
 
-    Opened read-only on purpose: this is somebody's real database, copied here
-    for its provider rows, and running migrations over it would be a change
-    nobody asked for.
+    A deployment's database is the honest source, because it carries the row's
+    base URL, rate and language alongside its credential reference, and running
+    against a row nobody configured proves less. ``--auth-ref`` is the way in
+    without one, for a key that exists in a ``SecretStore`` but whose row does
+    not: everything else then takes this app's defaults, which is what a fresh
+    row would have anyway.
+
+    The database is opened read-only on purpose: it is somebody's real file,
+    copied here for its provider rows, and running migrations over it would be
+    a change nobody asked for.
     """
+    if db is None:
+        if auth_ref is None:
+            msg = "pass either --db or --auth-ref"
+            raise SystemExit(msg)
+        return ProviderConfig(
+            id=auth_ref.removeprefix("provider:"),
+            name=f"{kind} (stream-check)",
+            kind=ProviderKind(kind),
+            auth_ref=auth_ref,
+            language=language,
+        )
     with sqlite3.connect(f"file:{db}?mode=ro", uri=True) as conn:
         conn.row_factory = sqlite3.Row
         row = conn.execute(
@@ -167,7 +185,7 @@ def _is_speech(frame: bytes) -> bool:
 
 async def _run(args: argparse.Namespace) -> int:
     pcm = _clip(args.seconds, args.cache)
-    config = _provider(args.db, args.kind)
+    config = _provider(args.db, args.kind, args.auth_ref, args.language)
     backend = create_backend(config, SecretStore(args.secrets), args.model)
     if not is_streaming(backend):
         print(f"{config.kind.value}/{args.model} has no streaming shape yet")
@@ -245,7 +263,9 @@ def main() -> int:
     # Expanded here rather than inside the run: the paths are settings, and a
     # coroutine that touches the filesystem for them is a coroutine doing
     # blocking I/O on the event loop.
-    parser.add_argument("--db", required=True, type=_path, help="a loreline database with a row")
+    parser.add_argument("--db", type=_path, help="a loreline database with a provider row")
+    parser.add_argument("--auth-ref", help="a SecretStore key, instead of a database row")
+    parser.add_argument("--language", default="en", help="the language the clip is read in")
     parser.add_argument("--secrets", required=True, type=_path, help="a SecretStore JSON file")
     parser.add_argument("--kind", default="openai", help="provider kind to use")
     parser.add_argument("--model", required=True, help="the model to stream with")

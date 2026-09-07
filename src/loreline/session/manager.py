@@ -989,26 +989,27 @@ class SessionManager:
         build_router: Callable[..., SttRouter],
         session_id: str,
     ) -> None:
-        """Finish the session on the utterance path, with the fallback provider.
+        """Finish the session on the utterance path (see ``StreamPath.handoff``).
 
-        The streaming primary is gone and the fallback cannot be streamed to,
-        so from the next completed utterance on this session is an ordinary
-        one. The chunker never stopped running for the WAV index, so there is
-        nothing to start: the utterances simply begin reaching the queue, and
-        the router built here drains it exactly as it would have from the
-        beginning.
+        Either the streaming providers are gone and a call-shaped fallback is
+        left, or the primary turned out not to stream the model this session
+        picked. Either way, from the next completed utterance on this is an
+        ordinary session. The chunker never stopped running for the WAV index,
+        so there is nothing to start: the utterances simply begin reaching the
+        queue, and the router built here drains it exactly as it would have
+        from the beginning.
         """
-        fallback = path.call_shaped_fallback
-        if fallback is None:  # pragma: no cover - run() only returns HANDOFF with one
+        handoff = path.handoff
+        if handoff is None:  # pragma: no cover - run() only returns HANDOFF with one
             return
-        router = build_router(fallback)
+        primary, fallback = handoff
+        router = build_router(primary, fallback=fallback)
         path.router = router  # the session's health is this router's from now on
         path.hand_off()
-        log.warning("session.stream.handoff", session_id=session_id, provider_id=fallback.config.id)
+        log.warning("session.stream.handoff", session_id=session_id, provider_id=primary.config.id)
         await path.notify_failover(
-            f"Live transcription moved to {fallback.config.name}, which transcribes "
-            "complete utterances: text now arrives after each sentence rather than "
-            "while it is spoken."
+            f"Live transcription is running through {primary.config.name} one utterance "
+            "at a time: text arrives after each sentence rather than while it is spoken."
         )
         await self._drive_router(router, capture.queue, session_id)
 

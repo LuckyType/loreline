@@ -21,6 +21,7 @@ from loreline.stt.streaming import (
     StreamConfig,
     StreamingConnector,
     StreamOutcome,
+    StreamUnsupportedError,
     TranscriptStream,
     TurnEnded,
     TurnFinal,
@@ -53,8 +54,15 @@ class FakeStreaming(StreamingConnector):
     dies without ever saying anything.
     """
 
-    def __init__(self, config: ProviderConfig | None = None, *, open_fails: int = 0) -> None:
+    def __init__(
+        self,
+        config: ProviderConfig | None = None,
+        *,
+        open_fails: int = 0,
+        unsupported: bool = False,
+    ) -> None:
         self.config = config or _provider()
+        self._unsupported = unsupported
         self.opens = 0
         self.flushes = 0
         self.closes = 0
@@ -70,6 +78,9 @@ class FakeStreaming(StreamingConnector):
     async def open_stream(self, glossary: Glossary | None) -> None:
         self.opens += 1
         self.glossary = glossary
+        if self._unsupported:
+            msg = "this model does not support server-side turn detection"
+            raise StreamUnsupportedError(msg)
         if self.opens <= self._open_fails:
             msg = "cannot connect"
             raise ConnectionError(msg)
@@ -352,19 +363,41 @@ async def test_a_provider_that_never_connects_is_declared_dead() -> None:
     assert fake.opens == 3  # the first try plus the budget
 
 
-async def test_the_watchdog_fires_on_voiced_audio_with_no_answer() -> None:
+async def test_the_watchdog_fires_once_a_turn_has_ended_with_no_answer() -> None:
     fake = FakeStreaming()
     sink = _Collector()
-    stream = _stream(fake, sink, watchdog_s=0.01, max_reconnects=0)
+    stream = _stream(fake, sink, watchdog_s=0.01, quiet_grace_s=0.02, max_reconnects=0)
+    task = asyncio.create_task(stream.run())
+
+    ts = 300.0
+    for i in range(40):
+        # Speech, and then the pause that ends it: only past a turn boundary
+        # does "the vendor said nothing" mean the connection is gone.
+        stream.feed(_FRAME, ts, is_speech=i < 20)
+        ts += 0.02
+        await asyncio.sleep(0.003)
+    assert await asyncio.wait_for(task, 2) == StreamOutcome.DEAD
+    assert fake.opens == 1  # no budget to reconnect with
+
+
+async def test_the_watchdog_does_not_interrupt_a_long_turn() -> None:
+    """Measured against OpenAI: a transcription session says nothing at all for
+    the whole length of a turn, then everything at once when it closes. A
+    watchdog that counted only voiced audio killed a twelve second turn
+    mid-sentence and lost the nineteen seconds that followed to a gap."""
+    fake = FakeStreaming()
+    sink = _Collector()
+    stream = _stream(fake, sink, watchdog_s=0.01, quiet_grace_s=5.0)
     task = asyncio.create_task(stream.run())
 
     ts = 300.0
     for _ in range(40):
-        stream.feed(_FRAME, ts, is_speech=True)
+        stream.feed(_FRAME, ts, is_speech=True)  # nobody has paused yet
         ts += 0.02
-        await asyncio.sleep(0.002)
-    assert await asyncio.wait_for(task, 2) == StreamOutcome.DEAD
-    assert fake.opens == 1  # no budget to reconnect with
+        await asyncio.sleep(0.003)
+    stream.stop()
+    assert await asyncio.wait_for(task, 2) == StreamOutcome.ENDED
+    assert fake.opens == 1
 
 
 async def test_the_watchdog_leaves_a_silent_room_alone() -> None:
@@ -461,10 +494,27 @@ async def test_a_dead_stream_hands_a_call_shaped_fallback_the_session() -> None:
     path = _path(primary, fallback=fallback)
 
     assert await asyncio.wait_for(path.run(), 2) == PathEnd.HANDOFF
-    assert path.call_shaped_fallback is fallback
+    assert path.handoff == (fallback, None)  # the dead primary is not behind it
     assert not path.queues_utterances  # nothing drains that queue until told to
     path.hand_off()
     assert path.queues_utterances
+
+
+async def test_a_model_the_vendor_will_not_stream_keeps_the_session_it_configured() -> None:
+    """OpenAI's two realtime-routed models refuse server VAD outright.
+
+    The provider is not broken and its fallback is not needed: the session runs
+    exactly as it did before streaming existed, one utterance at a time,
+    through the very connector that just said no.
+    """
+    primary = FakeStreaming(_provider("p1"), unsupported=True)
+    fallback = CallShaped()
+    path = _path(primary, fallback=fallback)
+
+    assert await asyncio.wait_for(path.run(), 2) == PathEnd.HANDOFF
+    assert path.handoff == (primary, fallback)
+    assert path.terminal_error is None  # nothing failed, so nothing to report
+    assert primary.opens == 1  # a refusal is not retried
 
 
 async def test_no_provider_left_is_the_same_exhaustion_as_the_utterance_path() -> None:
