@@ -51,7 +51,13 @@ class FakeStreaming(StreamingConnector):
 
     ``emit`` queues a signal for the current connection; ``end`` closes the
     socket the way a vendor hanging up does. ``open_fails`` is how a connection
-    dies without ever saying anything.
+    dies without ever saying anything, and ``unsupported`` is how a vendor says
+    it will not stream this model at all.
+
+    It satisfies ``STTBackend`` as well, because the connector it stands in for
+    does: ``OpenAIRealtimeBackend`` has both shapes, which is what lets a
+    session whose model cannot be streamed keep the provider it configured.
+    ``StreamingOnly`` below is the other case.
     """
 
     def __init__(
@@ -102,11 +108,53 @@ class FakeStreaming(StreamingConnector):
     async def close_stream(self) -> None:
         self.closes += 1
 
+    async def transcribe(
+        self,
+        utterance: Utterance,
+        *,
+        session_id: str,
+        glossary: Glossary | None = None,
+    ) -> TranscriptEvent | None:
+        _ = (utterance, session_id, glossary)
+        return None
+
+    async def aclose(self) -> None:
+        return None
+
     def emit(self, signal: TurnSignal) -> None:
         self._inbox.put_nowait(signal)
 
     def end(self) -> None:
         self._inbox.put_nowait(_END)
+
+
+class StreamingOnly(StreamingConnector):
+    """A connector with the streaming shape and no other, unlike OpenAI's."""
+
+    def __init__(self, provider_id: str = "p3") -> None:
+        self.config = _provider(provider_id)
+
+    @property
+    def stream_rate(self) -> int:
+        return 16000
+
+    async def open_stream(self, glossary: Glossary | None) -> None:
+        _ = glossary
+        msg = "this model does not support server-side turn detection"
+        raise StreamUnsupportedError(msg)
+
+    async def send_audio(self, pcm: bytes) -> None:
+        _ = pcm
+
+    async def signals(self) -> AsyncIterator[TurnSignal]:
+        return
+        yield  # pragma: no cover - never reached; makes this an async generator
+
+    async def flush_input(self) -> None:
+        return
+
+    async def close_stream(self) -> None:
+        return
 
 
 class CallShaped:
@@ -515,6 +563,14 @@ async def test_a_model_the_vendor_will_not_stream_keeps_the_session_it_configure
     assert path.handoff == (primary, fallback)
     assert path.terminal_error is None  # nothing failed, so nothing to report
     assert primary.opens == 1  # a refusal is not retried
+
+
+async def test_a_streaming_only_connector_that_refuses_has_nowhere_to_hand_off() -> None:
+    """No second shape to fall back to, so the provider is simply out."""
+    path = _path(StreamingOnly())
+
+    assert await asyncio.wait_for(path.run(), 2) == PathEnd.EXHAUSTED
+    assert path.terminal_error is not None
 
 
 async def test_no_provider_left_is_the_same_exhaustion_as_the_utterance_path() -> None:
