@@ -15,6 +15,12 @@ clock, one 20 ms frame at a time with a real sleep between them, and reports:
 * **time to final**, from the moment the speaker *stopped* to the settled text.
   Compare against the utterance path's floor, which is 800 ms of trailing
   silence before the vendor is even asked, plus the round trip.
+* the same two again for a vendor that reports **no offsets at all**, where
+  both of the above are circular: the stream dates such a turn from the frame
+  in flight when the vendor first mentioned it, so "from the turn's start" is
+  zero by construction. Those two are measured from the clip's own speech
+  instead (see :class:`_Speech`) and from the turn's newest interim, which is
+  the closest thing to when the vendor thought the speaker had stopped.
 
 Never burst the audio in: a paced feed is not politeness, it is a correctness
 condition. At least one vendor's turn machinery desynchronizes when audio
@@ -40,8 +46,10 @@ import subprocess
 import sys
 import time
 import urllib.request
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TextIO, cast
 
 from loreline.models import ProviderConfig, ProviderKind, TranscriptEvent
 from loreline.secrets import SecretStore
@@ -52,6 +60,10 @@ from loreline.stt.streaming import StreamConfig, TranscriptStream, is_streaming
 # only the item id has to be right. Any clear single-speaker reading does; the
 # point is real speech with real pauses, which is what endpointing keys off.
 _ARCHIVE_ITEM = "heartofamystery_2005_librivox"
+# Pass --item twice for a two-speaker clip: the pieces below are cut from each
+# reading in turn, which is the only way to ask a vendor whether its speaker
+# labels hold across a whole session rather than inside one turn.
+_PIECE_SECONDS = (12.0, 8.0, 15.0, 6.0, 11.0, 9.0)
 _METADATA_URL = "https://archive.org/metadata/{item}"
 _DOWNLOAD_URL = "https://archive.org/download/{item}/{name}"
 # What Silero accepts, which is what a real capture runs at, so the resampler
@@ -59,10 +71,51 @@ _DOWNLOAD_URL = "https://archive.org/download/{item}/{name}"
 _CAPTURE_RATE = 16000
 _FRAME_MS = 20
 _FRAME_BYTES = _CAPTURE_RATE * _FRAME_MS // 1000 * 2
-# Mean absolute sample value above which a frame counts as speech. Only the
-# liveness watchdog reads this, so a threshold is enough and Silero is not
-# worth the model download here.
+# Mean absolute sample value above which a frame counts as speech. The liveness
+# watchdog reads it, and so does _Speech below, so a threshold is enough and
+# Silero is not worth the model download here.
 _SPEECH_LEVEL = 300
+# Quiet this long ends a span of local speech. Longer than the pauses inside a
+# sentence, shorter than the ones between two people's turns.
+_HANGOVER_S = 0.5
+
+
+@dataclass
+class _Speech:
+    """When the clip's own audio was voiced, on the capture clock.
+
+    Only needed for a vendor that reports no offsets at all: for one that does,
+    the turn's own ``start_ts`` already says when the speaker started, and "time
+    to first interim" is measured from it. Gemini Live states nothing, so the
+    stream dates a turn from the frame that was in flight when the first partial
+    arrived, and measuring against that would answer zero to the one question
+    the whole feature is about. The threshold here is not Google's endpointing
+    and is not meant to be: it is a second opinion on when somebody started
+    talking, which is what makes a latency number mean something.
+    """
+
+    spans: list[list[float]] = field(default_factory=list[list[float]])
+    _quiet_since: float | None = None
+
+    def feed(self, ts: float, *, voiced: bool) -> None:
+        if voiced:
+            self._quiet_since = None
+            if not self.spans or self.spans[-1][1] > 0:
+                self.spans.append([ts, 0.0])
+            return
+        if self.spans and self.spans[-1][1] == 0:
+            self._quiet_since = self._quiet_since or ts
+            if ts - self._quiet_since >= _HANGOVER_S:
+                self.spans[-1][1] = self._quiet_since
+
+    def around(self, ts: float) -> tuple[float, float] | None:
+        """The span of local speech a turn dated ``ts`` belongs to.
+
+        The last one that began at or before it, since a vendor's turn is always
+        reported after the speech that produced it.
+        """
+        earlier = [s for s in self.spans if s[0] <= ts]
+        return (earlier[-1][0], earlier[-1][1] or ts) if earlier else None
 
 
 @dataclass
@@ -74,6 +127,10 @@ class _Turn:
     end_ts: float = 0.0
     text: str = ""
     first_interim_at: float | None = None
+    # The newest interim, which is where the vendor had got to just before it
+    # settled: for one that reports no end offset, the distance from here to
+    # the final is the closest thing to "how long the text took to settle".
+    last_interim_at: float | None = None
     final_at: float | None = None
     revisions: int = 0
     interims: int = 0
@@ -113,47 +170,90 @@ class _Recorder:
             turn.final_at = turn.final_at or now
         else:
             turn.interims += 1
+            turn.last_interim_at = now
             if turn.first_interim_at is None:
                 turn.first_interim_at = now
 
 
-def _clip(seconds: float, cache: Path, prepared: Path | None = None) -> bytes:
+def _clip(
+    seconds: float,
+    cache: Path,
+    prepared: Path | None = None,
+    items: list[str] | None = None,
+) -> bytes:
     """The test clip as mono s16le PCM, downloading and trimming it once.
 
-    ``prepared`` skips all of that for a file somebody built already, which is
-    how a multi-speaker clip gets fed: speaker labels are only worth measuring
-    against audio with more than one speaker in it, and no single archive.org
-    item has that.
+    Two ways to get a multi-speaker one, because speaker labels are only worth
+    measuring against audio with more than one speaker in it and no single
+    archive.org item has that. ``prepared`` is a file somebody built already
+    and is fed exactly as it is. ``items`` names the readings to build one
+    from here: one item is read straight through, which is what latency
+    numbers want, and two are alternated in 6 to 15 second pieces, which is
+    what a speaker-label question wants, since the vendor is never told there
+    are two of them.
     """
     if prepared is not None:
         return prepared.read_bytes()[: int(seconds * _CAPTURE_RATE) * 2]
-    pcm_path = cache / f"clip-{int(seconds)}s-{_CAPTURE_RATE}.pcm"
-    if pcm_path.exists():
-        return pcm_path.read_bytes()
     if shutil.which("ffmpeg") is None:
         msg = "ffmpeg is needed to trim and convert the clip"
         raise SystemExit(msg)
-    source = cache / "source.mp3"
-    if not source.exists():
-        cache.mkdir(parents=True, exist_ok=True)
-        with urllib.request.urlopen(
-            _METADATA_URL.format(item=_ARCHIVE_ITEM), timeout=30
-        ) as response:
-            files = json.load(response).get("files", [])
-        name = next(f["name"] for f in files if str(f["name"]).endswith("_64kb.mp3"))
-        print(f"downloading {name} from archive.org ({_ARCHIVE_ITEM})")
-        urllib.request.urlretrieve(_DOWNLOAD_URL.format(item=_ARCHIVE_ITEM, name=name), source)
-    # -ss 30 skips the LibriVox announcement, which is not the speech we want
-    # to time: it is read at a different pace and its pauses are not a table's.
-    subprocess.run(
-        [
-            "ffmpeg", "-nostdin", "-y", "-loglevel", "error",
-            "-ss", "30", "-t", str(seconds), "-i", str(source),
-            "-ac", "1", "-ar", str(_CAPTURE_RATE), "-f", "s16le", str(pcm_path),
-        ],
-        check=True,
-    )  # fmt: skip
-    return pcm_path.read_bytes()
+    items = items or [_ARCHIVE_ITEM]
+    tag = "-".join(item[:12] for item in items)
+    pcm_path = cache / f"clip-{tag}-{int(seconds)}s-{_CAPTURE_RATE}.pcm"
+    if pcm_path.exists():
+        return pcm_path.read_bytes()
+    sources = [_source(item, cache) for item in items]
+    pcm = b"".join(_pieces(sources, seconds, cache))
+    pcm_path.write_bytes(pcm)
+    return pcm
+
+
+def _pieces(sources: list[Path], seconds: float, cache: Path) -> list[bytes]:
+    """The clip's pieces, taking each reader in turn until it is long enough."""
+    used = dict.fromkeys(range(len(sources)), 0.0)
+    out: list[bytes] = []
+    total = 0.0
+    index = 0
+    while total < seconds:
+        which = index % len(sources)
+        length = min(_PIECE_SECONDS[index % len(_PIECE_SECONDS)], seconds - total)
+        # -ss skips the LibriVox announcement first, which is not the speech we
+        # want to time: it is read at a different pace and its pauses are not a
+        # table's. After that each reader continues where it last left off.
+        out.append(_trim(sources[which], 30.0 + used[which], length, cache))
+        used[which] += length
+        total += length
+        index += 1
+    return out
+
+
+def _trim(source: Path, offset: float, length: float, cache: Path) -> bytes:
+    """One piece of one reading, as mono s16le PCM at the capture rate."""
+    out = cache / f"piece-{source.stem}-{offset:.0f}-{length:.0f}.pcm"
+    if not out.exists():
+        subprocess.run(
+            [
+                "ffmpeg", "-nostdin", "-y", "-loglevel", "error",
+                "-ss", str(offset), "-t", str(length), "-i", str(source),
+                "-ac", "1", "-ar", str(_CAPTURE_RATE), "-f", "s16le", str(out),
+            ],
+            check=True,
+        )  # fmt: skip
+    return out.read_bytes()
+
+
+def _source(item: str, cache: Path) -> Path:
+    """One archive.org item's audio, downloaded once and kept."""
+    source = cache / f"{item}.mp3"
+    if source.exists():
+        return source
+    cache.mkdir(parents=True, exist_ok=True)
+    with urllib.request.urlopen(_METADATA_URL.format(item=item), timeout=30) as response:
+        files = json.load(response).get("files", [])
+    name = next(f["name"] for f in files if str(f["name"]).endswith("_64kb.mp3"))
+    print(f"downloading {name} from archive.org ({item})")
+    urllib.request.urlretrieve(_DOWNLOAD_URL.format(item=item, name=name), source)
+    return source
 
 
 def _provider(db: Path | None, kind: str, auth_ref: str | None, language: str) -> ProviderConfig:
@@ -207,13 +307,60 @@ def _is_speech(frame: bytes) -> bool:
     return bool(samples) and sum(abs(s) for s in samples) / len(samples) >= _SPEECH_LEVEL
 
 
+class _Tee:
+    """A vendor socket that writes every frame it receives to a file.
+
+    A connector's protocol translation is unit-tested against frames the real
+    service actually sent rather than frames written from its documentation,
+    and this is where those come from. Everything but the receive path is the
+    socket itself, so the connector cannot tell it is being recorded.
+    """
+
+    def __init__(self, ws: object, handle: TextIO) -> None:
+        self._ws = ws
+        self._handle = handle
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._ws, name)
+
+    def __aiter__(self) -> AsyncIterator[str | bytes]:
+        return self._frames()
+
+    async def _frames(self) -> AsyncIterator[str | bytes]:
+        async for raw in cast("AsyncIterator[str | bytes]", self._ws):
+            text = raw if isinstance(raw, str) else raw.decode("utf-8", "replace")
+            self._handle.write(text + "\n")
+            self._handle.flush()
+            yield raw
+
+
+def _record_frames(backend: object, path: Path) -> None:
+    """Patch the ``connect`` this connector's module imported, to tee its frames."""
+    module = sys.modules[type(backend).__module__]
+    original = getattr(module, "connect", None)
+    if original is None:
+        msg = f"{module.__name__} does not open its socket through `websockets.connect`"
+        raise SystemExit(msg)
+    handle = path.open("w", encoding="utf-8")
+
+    async def connect(*args: object, **kwargs: object) -> _Tee:
+        return _Tee(await original(*args, **kwargs), handle)
+
+    # Through __dict__ rather than setattr, which is what a module attribute
+    # assignment is anyway and what both linters here will accept.
+    module.__dict__["connect"] = connect
+    print(f"recording every vendor frame to {path}")
+
+
 async def _run(args: argparse.Namespace) -> int:
-    pcm = _clip(args.seconds, args.cache, args.clip)
+    pcm = _clip(args.seconds, args.cache, args.clip, args.item)
     config = _provider(args.db, args.kind, args.auth_ref, args.language)
     backend = create_backend(config, SecretStore(args.secrets), args.model)
     if not is_streaming(backend):
         print(f"{config.kind.value}/{args.model} has no streaming shape yet")
         return 1
+    if args.dump_frames is not None:
+        _record_frames(backend, args.dump_frames)
 
     recorder = _Recorder()
     stream = TranscriptStream(
@@ -227,9 +374,12 @@ async def _run(args: argparse.Namespace) -> int:
     print(f"feeding {len(frames)} frames ({len(frames) * _FRAME_MS / 1000:.0f}s) at wall clock")
 
     started = time.monotonic()
+    speech = _Speech()
     for index, frame in enumerate(frames):
         now = time.monotonic()
-        stream.feed(frame, now, is_speech=_is_speech(frame))
+        voiced = _is_speech(frame)
+        speech.feed(now, voiced=voiced)
+        stream.feed(frame, now, is_speech=voiced)
         # Against the run's own start, not the previous frame: sleeping a fixed
         # interval per frame drifts late by whatever each iteration costs, and
         # over a minute that is a feed slower than real time.
@@ -238,25 +388,38 @@ async def _run(args: argparse.Namespace) -> int:
     outcome = await task
     await backend.aclose()
 
-    _report(recorder, outcome, started)
+    _report(recorder, outcome, started, speech)
     return 0
 
 
-def _report(recorder: _Recorder, outcome: str, started: float) -> None:
+def _report(recorder: _Recorder, outcome: str, started: float, speech: _Speech) -> None:
     print(f"\nstream ended: {outcome}; {len(recorder.turns)} turns, {len(recorder.gaps)} gaps\n")
     interims: list[float] = []
     finals: list[float] = []
+    heard: list[float] = []
+    settled: list[float] = []
     for turn in sorted(recorder.turns.values(), key=lambda t: t.start_ts):
         to_interim = turn.first_interim_at - turn.start_ts if turn.first_interim_at else None
         to_final = turn.final_at - turn.end_ts if turn.final_at else None
-        if to_interim is not None:
-            interims.append(to_interim)
-        if to_final is not None:
-            finals.append(to_final)
+        # ...and the same two against the clip's own speech, for a vendor whose
+        # turns carry no offsets and are therefore dated from our own frames.
+        span = speech.around(turn.start_ts)
+        after_onset = turn.first_interim_at - span[0] if span and turn.first_interim_at else None
+        last, final = turn.last_interim_at, turn.final_at
+        after_last = final - last if final and last else None
+        for value, bucket in (
+            (to_interim, interims),
+            (to_final, finals),
+            (after_onset, heard),
+            (after_last, settled),
+        ):
+            if value is not None:
+                bucket.append(value)
         print(
             f"[{turn.start_ts - started:6.2f}s -> {turn.end_ts - started:6.2f}s] "
             f"interim {_ms(to_interim)}  final {_ms(to_final)}  "
-            f"({turn.interims} interims, {turn.revisions} revisions)"
+            f"({turn.interims} interims, {turn.revisions} revisions, "
+            f"after onset {_ms(after_onset)}, settled {_ms(after_last)})"
             f"  {'/'.join(turn.speakers) or '-'}\n    {turn.text}"
         )
     for gap in recorder.gaps:
@@ -274,6 +437,11 @@ def _report(recorder: _Recorder, outcome: str, started: float) -> None:
         # means text really did appear while somebody was speaking.
         f"\nmedian interim lead over the final: {_ms(_median(leads))}"
         f"\nmedian turn length: {_ms(_median(spans))}"
+        # The same two again for a vendor that states no offsets, where the two
+        # medians above are circular: measured from the clip's own speech and
+        # from the turn's newest interim instead.
+        f"\nmedian first interim after speech onset: {_ms(_median(heard))}"
+        f"\nmedian final after last interim:         {_ms(_median(settled))}"
         f"\nspeakers per turn: " + " ".join("/".join(t.speakers) or "-" for t in ordered)
     )
 
@@ -305,6 +473,14 @@ def main() -> int:
     parser.add_argument("--kind", default="openai", help="provider kind to use")
     parser.add_argument("--model", required=True, help="the model to stream with")
     parser.add_argument("--seconds", type=float, default=60.0, help="how much speech to feed")
+    parser.add_argument(
+        "--item",
+        action="append",
+        help="an archive.org item to read from; pass it twice for two speakers",
+    )
+    parser.add_argument(
+        "--dump-frames", type=_path, help="write every frame the vendor sends to this file"
+    )
     parser.add_argument("--cache", type=_path, default="~/.cache/loreline-stream-check")
     parser.add_argument("--clip", type=_path, help="a prepared 16 kHz mono s16le PCM file")
     return asyncio.run(_run(parser.parse_args()))
