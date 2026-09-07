@@ -118,6 +118,14 @@ _TERMINATE_TIMEOUT_S = 3.0
 # Naming a model it does not stream is one (verified: universal-2 answers
 # "Invalid 'speech_model'"), which is the refusal StreamUnsupportedError is for.
 _VALIDATION_ERROR_CODE = 3006
+# The only streaming model the vendor documents `language_codes` for. It is
+# also the endpoint's own default speech_model, so a config naming no model
+# still gets it; universal-streaming-english (English only) and
+# universal-streaming-multilingual (auto code-switches its own six languages)
+# document no language parameter at all, so nothing is sent for them rather
+# than risking a validation error for a key that model does not accept.
+# https://www.assemblyai.com/docs/api-reference/streaming-api/streaming-api
+_LANGUAGE_CODES_MODEL = "universal-3-5-pro"
 
 
 class AssemblyAIBackend(Connector[str], StreamingConnector):
@@ -161,8 +169,15 @@ class AssemblyAIBackend(Connector[str], StreamingConnector):
             ("sample_rate", str(self.config.sample_rate)),
             ("encoding", "pcm_s16le"),
             ("format_turns", "true"),
-            ("language", self._language),
         ]
+        # `language_codes` is a JSON array in the query string (for example
+        # ?language_codes=["de"]), not the plain `language=de` this connector
+        # used to send: v3 has no `language` parameter, so that value was
+        # silently dropped and the vendor picked up nothing. An empty
+        # `self._language` means no language configured, which gets the same
+        # native code-switching as omitting the field outright.
+        if self._language and self._model in (None, _LANGUAGE_CODES_MODEL):
+            params.append(("language_codes", json.dumps([self._language])))
         # Sent only when the GM picked one: omitted, the endpoint applies its
         # own current default (universal-3-5-pro), which is a better thing to
         # inherit than a value pinned here. Until this was wired the model

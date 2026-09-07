@@ -58,9 +58,27 @@ async def assemblyai_handler(websocket: ServerConnection) -> None:
     query = parse_qs(urlparse(getattr(request, "path", "") or "").query)
     rate = int(next(iter(query.get("sample_rate", [])), _SAMPLE_RATE))
     if query.get("continuous_partials") == ["true"]:
-        await _stream_session(websocket, rate, speakers=query.get("speaker_labels") == ["true"])
+        await _stream_session(
+            websocket,
+            rate,
+            speakers=query.get("speaker_labels") == ["true"],
+            languages=_languages(query),
+        )
         return
     await _utterance_session(websocket, rate)
+
+
+def _languages(query: dict[str, list[str]]) -> list[str]:
+    """``language_codes``, decoded from its JSON-array query encoding.
+
+    Real ``language_codes=["de"]`` in the query string; absent, or any value
+    that does not decode to a list, means no language was requested.
+    """
+    raw = next(iter(query.get("language_codes", [])), None)
+    if not raw:
+        return []
+    decoded: object = json.loads(raw)
+    return cast("list[str]", decoded) if isinstance(decoded, list) else []
 
 
 async def _utterance_session(websocket: ServerConnection, rate: int) -> None:
@@ -83,15 +101,20 @@ async def _utterance_session(websocket: ServerConnection, rate: int) -> None:
             return
 
 
-async def _stream_session(websocket: ServerConnection, rate: int, *, speakers: bool) -> None:
+async def _stream_session(
+    websocket: ServerConnection, rate: int, *, speakers: bool, languages: list[str]
+) -> None:
     """The persistent mode: one session, the server's own endpointing."""
+    configuration: dict[str, object] = {"model": "universal-3-5-pro", "speaker_labels": speakers}
+    if languages:
+        configuration["language_codes"] = languages
     await websocket.send(
         json.dumps(
             {
                 "type": "Begin",
                 "id": "mock-session",
                 "expires_at": 0,
-                "configuration": {"model": "universal-3-5-pro", "speaker_labels": speakers},
+                "configuration": configuration,
             }
         )
     )

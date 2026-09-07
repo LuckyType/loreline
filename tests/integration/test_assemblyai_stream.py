@@ -175,6 +175,27 @@ async def test_the_streaming_session_asks_for_partials_speakers_and_the_glossary
     assert json.loads(query["keyterms_prompt"][0]) == ["Drakonia", "Mistwood"]
 
 
+async def test_the_streaming_session_asks_the_vendor_for_a_language() -> None:
+    """`language_codes`, a JSON array, is what tells the vendor which language
+    to expect - replacing the plain `language=` this connector used to send,
+    which Universal-Streaming v3 has no parameter for and silently dropped."""
+    seen: list[str] = []
+
+    async def handler(ws: ServerConnection) -> None:
+        seen.append(getattr(ws.request, "path", ""))
+        await assemblyai_handler(ws)
+
+    async with serve(handler, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        backend = AssemblyAIBackend(_config(port), api_key="secret")  # config.language: "de"
+        await backend.open_stream(None)
+        await backend.close_stream()
+
+    query = parse_qs(urlparse(seen[0]).query)
+    assert json.loads(query["language_codes"][0]) == ["de"]
+    assert "language" not in query
+
+
 async def test_a_model_the_endpoint_will_not_stream_is_not_a_retry() -> None:
     """v3 accepts the upgrade and refuses the query string, as a frame.
 
