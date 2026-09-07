@@ -27,14 +27,24 @@ def _overlap(start: float, end: float, segment: SpeakerSegment) -> float:
 
 
 def _speaker_for(start: float, end: float, segments: list[SpeakerSegment]) -> str | None:
-    best: str | None = None
-    best_overlap = 0.0
+    """The speaker whose segments cover the most of ``[start, end)`` in total.
+
+    Sums every segment's overlap per speaker, the same aggregation
+    ``_dominant_speaker`` applies to words, rather than taking whichever single
+    segment overlaps most: a speaker heard across three short segments can hold
+    more of the span than one heard in a single longer segment, and comparing
+    segments one at a time instead of by speaker used to hand the turn to
+    whichever segment happened to be longest.
+    """
+    totals: dict[str, float] = {}
     for segment in segments:
         overlap = _overlap(start, end, segment)
-        if overlap > best_overlap:
-            best_overlap = overlap
-            best = segment.speaker
-    return best
+        if overlap <= 0.0:
+            continue
+        totals[segment.speaker] = totals.get(segment.speaker, 0.0) + overlap
+    if not totals:
+        return None
+    return max(totals, key=lambda spk: totals[spk])
 
 
 def assign_speakers(event: TranscriptEvent, segments: list[SpeakerSegment]) -> TranscriptEvent:
