@@ -23,10 +23,13 @@ router is a policy decision the router has nowhere to put:
   so the frames are kept in a :class:`RollingPcm` window and sliced when the
   turn closes. Past the slice it is the same call the router makes, through the
   same function, deliberately: see ``loreline.stt.router.merge_diarization``.
+  It runs beside the stream rather than in front of it, though, in a task of
+  its own: see :meth:`StreamPath._publish`.
 """
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
@@ -43,7 +46,14 @@ from loreline.models import (
 )
 from loreline.stt.base import STTBackend
 from loreline.stt.router import merge_diarization
-from loreline.stt.streaming import StreamConfig, StreamingConnector, StreamOutcome, TranscriptStream
+from loreline.stt.streaming import (
+    PendingGap,
+    StreamConfig,
+    StreamingConnector,
+    StreamOutcome,
+    TranscriptStream,
+    gap_event,
+)
 
 if TYPE_CHECKING:
     from loreline.audio.chunker import Utterance
@@ -57,6 +67,21 @@ log = get_logger(__name__)
 # than any turn a vendor's endpointing produces (OpenAI's server VAD closes on
 # half a second of silence), with room for a turn that ran on and on.
 _TURN_AUDIO_WINDOW_S = 90.0
+
+# How long one turn's diarization may take before its text keeps the row it
+# already has. Well under the stream's own watchdog (``StreamConfig.
+# watchdog_s``, 20s) and far under the diarizer's HTTP client timeout (120s,
+# sized for a re-process job rather than for a live turn): a label that lands
+# later than this is a label for a row the GM read minutes ago, and the turns
+# behind it are still arriving.
+_DIARIZE_TIMEOUT_S = 10.0
+
+# How long the end of a session waits for the labels still in flight. Shorter
+# than one call's own timeout on purpose: this runs inside the stop drain
+# (``SessionManager._STOP_DRAIN_TIMEOUT_S``, 30s), and what is at stake is a
+# speaker label on a row that already has its text, at the very end of an
+# evening. Holding Stop open for it is the worse trade.
+_DIARIZE_DRAIN_S = 5.0
 
 
 class FrameSink(Protocol):
@@ -145,6 +170,16 @@ class StreamPath:
         self._stream: TranscriptStream | None = None
         self._stopped = False
         self._handed_off = False
+        # Diarization runs beside the bus rather than in front of it, so the
+        # tasks are held here: asyncio keeps only a weak reference to a task,
+        # and a stopping session has to wait for the labels still in flight.
+        self._labelling: set[asyncio.Task[None]] = set()
+        # A span no provider transcribed, handed from one stream to the next
+        # so that whichever one transcribes again is the one that ends it.
+        self._gap: PendingGap | None = None
+        # Where the capture is now, which is where a gap ends when nothing
+        # streams again (a handoff, or nothing left to hand off to).
+        self._last_frame_ts = 0.0
         # Only remote diarization needs the audio back; inline reads the words
         # the vendor already attached, and the other modes read nothing.
         self._audio = (
@@ -165,6 +200,7 @@ class StreamPath:
     # -- what the capture loop sees --------------------------------------
 
     def frame(self, pcm: bytes, ts: float, *, is_speech: bool) -> None:
+        self._last_frame_ts = ts
         if self._audio is not None:
             self._audio.append(pcm, ts)
         stream = self._stream
@@ -224,10 +260,20 @@ class StreamPath:
         Returns a :class:`PathEnd`. Never raises for a provider failure: what
         to do about a dead provider is the point of the return value.
         """
+        try:
+            return await self._run()
+        finally:
+            # Both endings, for every way out of the loop: the span nothing
+            # transcribed is marked, and the labels still in flight are given
+            # a bounded moment to land before the session bus closes.
+            await self._close_gap()
+            await self._drain_labelling()
+
+    async def _run(self) -> str:
         for backend in self._streamable():
             if self._stopped:
                 return PathEnd.ENDED
-            outcome = await self._stream_with(backend)
+            outcome = await self._guarded_stream(backend)
             if outcome == StreamOutcome.ENDED:
                 return PathEnd.ENDED
             if outcome == StreamOutcome.UNSUPPORTED:
@@ -249,6 +295,27 @@ class StreamPath:
         )
         return PathEnd.EXHAUSTED
 
+    async def _guarded_stream(self, backend: StreamingConnector) -> str:
+        """One provider's stream, with :meth:`run`'s promise made structural.
+
+        ``TranscriptStream.run`` classifies its own failures and returns rather
+        than raising, and the caller above relies on that: an exception escaping
+        here would skip the failover and the handoff, leaving a session that
+        keeps recording with nothing transcribing it and healthz green until
+        Stop turned it into an ERROR. That is too quiet a failure to leave
+        resting on every future edit staying careful, so a provider that
+        breaks the contract is treated as the dead provider it is.
+        """
+        try:
+            return await self._stream_with(backend)
+        except Exception:
+            log.exception(
+                "stream.provider.crashed",
+                provider_id=backend.config.id,
+                session_id=self._session_id,
+            )
+            return StreamOutcome.DEAD
+
     async def _stream_with(self, backend: StreamingConnector) -> str:
         """Run one provider's stream to its end, feeding it from now on."""
         stream = TranscriptStream(
@@ -256,6 +323,10 @@ class StreamPath:
             publish=self._publish,
             capture_rate=self._capture_rate,
             config=self._config,
+            # A span the previous provider stopped transcribing is this one's
+            # to close: its first written frame is the moment transcription
+            # resumed, which is the only thing that ends a gap.
+            gap=self._gap,
         )
         self._stream = stream
         if self._stopped:
@@ -263,7 +334,22 @@ class StreamPath:
         try:
             return await stream.run()
         finally:
+            self._gap = stream.pending_gap
             self._stream = None
+
+    async def _close_gap(self) -> None:
+        """Mark a span that no successor ever closed, at the end of the path.
+
+        Inside one provider's stream a gap is closed by the first frame of its
+        next connection. The ones that reach here are the endings that have no
+        next connection: every streaming provider retired, a handoff to the
+        utterance path (which starts at the next *completed* utterance, not
+        where the stream stopped), or a session that ended on a dead socket.
+        """
+        gap, self._gap = self._gap, None
+        event = gap_event(self._session_id, gap, self._last_frame_ts)
+        if event is not None:
+            await self._bus.publish(event)
 
     def hand_off(self) -> None:
         """Send the rest of the session's utterances to the router instead.
@@ -337,38 +423,121 @@ class StreamPath:
     # -- events out -------------------------------------------------------
 
     async def _publish(self, event: TranscriptEvent) -> None:
-        """Diarize a settled turn and put it on the session bus.
+        """Put a turn on the session bus, and label it afterwards.
 
         Interims skip diarization: they are replaced within the second, and a
         speaker label on text that is about to change says nothing. Gap markers
         skip it because there is nothing there to label.
 
-        The diarizer is awaited here rather than in a task of its own, so the
-        connector's reader stalls for the length of the call. That is the same
-        trade the utterance path makes, and it keeps the events on the bus in
-        the order the vendor closed them.
+        Everything else is published twice, and the order is the whole point.
+        The text goes out unlabelled the moment the turn closes, and the
+        diarizer runs beside the stream in a task of its own; when it answers,
+        the same turn is published again with its speakers, under the same
+        ``turn_id``, which the repository upserts on and both live feeds key on,
+        so the second publication replaces the first rather than following it.
+
+        Awaiting the diarizer here instead, which is what this did, put a
+        remote HTTP call on the connector's reader task: a diarizer that
+        answered slowly held the reader past the stream's own watchdog and got
+        a healthy socket dropped and a gap marker written, and a diarizer that
+        answered with an error - any non-2xx, a timeout, a refused connection -
+        raised through the reader, dropped the turn's text entirely, and had the
+        send loop declare the vendor dead. The utterance path makes that trade
+        because a call there is bounded by one utterance and has nothing else
+        waiting; a stream has the rest of the session waiting.
         """
         if not event.is_final or event.source == GAP_SOURCE:
             await self._bus.publish(event)
             return
-        await self._bus.publish(await self._diarize(event))
+        if self._audio is None:
+            # Inline or off: no network and no clip, so nothing to defer. The
+            # speakers are already on the words the vendor sent.
+            await self._bus.publish(await self._label_inline(event))
+            return
+        # Sliced before publishing, not inside the task: the window holds 90
+        # seconds, and a turn that waits its turn behind a slow diarizer would
+        # be sliced after its audio had aged out of it.
+        clip, clip_start = self._audio.slice(event.start_ts, event.end_ts)
+        await self._bus.publish(event)
+        if not clip:
+            # The turn ran longer than the window, or closed with an end before
+            # its start: nothing to send, so the text keeps the unlabelled row
+            # it already has.
+            log.warning("stream.diarize.no_audio", session_id=self._session_id)
+            return
+        task = asyncio.create_task(self._label(event, clip, clip_start))
+        self._labelling.add(task)
+        task.add_done_callback(self._labelling.discard)
 
-    async def _diarize(self, event: TranscriptEvent) -> TranscriptEvent:
-        pcm = b""
-        if self._audio is not None:
-            pcm = self._audio.slice(event.start_ts, event.end_ts)
-            if not pcm:
-                # The turn ran longer than the window, or closed with an end
-                # before its start: nothing to send, so the text ships
-                # unlabelled rather than not at all.
-                log.warning("stream.diarize.no_audio", session_id=self._session_id)
-                return event
-        return await merge_diarization(
-            event,
-            pcm,
-            start=event.start_ts,
-            sample_rate=self._capture_rate,
-            config=self._diarization,
-            diarizer=self._diarizer,
-            session_id=self._session_id,
-        )
+    async def _label_inline(self, event: TranscriptEvent) -> TranscriptEvent:
+        """Speakers from the words the vendor already labelled, or nothing."""
+        try:
+            return await merge_diarization(
+                event,
+                b"",
+                start=event.start_ts,
+                sample_rate=self._capture_rate,
+                config=self._diarization,
+                diarizer=self._diarizer,
+                session_id=self._session_id,
+            )
+        except Exception as exc:  # resilience: a label is never worth the text
+            log.warning("stream.diarize.failed", session_id=self._session_id, error=str(exc))
+            return event
+
+    async def _label(self, event: TranscriptEvent, clip: bytes, clip_start: float) -> None:
+        """Diarize one closed turn and re-publish it with its speakers.
+
+        Bounded by :data:`_DIARIZE_TIMEOUT_S` and silent about every failure
+        past a warning, because the row this would improve is already on
+        screen and in the table: there is nothing here worth losing text for.
+
+        ``clip_start`` is where the audio actually starts rather than where the
+        turn does. They differ when the turn's opening aged out of the rolling
+        window, and shifting the diarizer's 0-based segments by the wrong one
+        of the two puts every label seconds early.
+        """
+        try:
+            async with asyncio.timeout(_DIARIZE_TIMEOUT_S):
+                labelled = await merge_diarization(
+                    event,
+                    clip,
+                    start=clip_start,
+                    sample_rate=self._capture_rate,
+                    config=self._diarization,
+                    diarizer=self._diarizer,
+                    session_id=self._session_id,
+                )
+        except TimeoutError:
+            log.warning(
+                "stream.diarize.timeout", session_id=self._session_id, seconds=_DIARIZE_TIMEOUT_S
+            )
+            return
+        except Exception as exc:  # resilience: any diarizer error, same answer
+            log.warning("stream.diarize.failed", session_id=self._session_id, error=str(exc))
+            return
+        if labelled == event:
+            return  # nothing to say that the row already on screen does not
+        await self._bus.publish(labelled)
+
+    async def _drain_labelling(self) -> None:
+        """Give the labels still in flight a bounded moment, then drop them.
+
+        Bounded because this runs inside the session's stop drain, and dropped
+        rather than awaited because a label that lands after the session bus
+        closes reaches nobody anyway; the text it would have improved is
+        already stored.
+        """
+        tasks, self._labelling = list(self._labelling), set()
+        if not tasks:
+            return
+        try:
+            async with asyncio.timeout(_DIARIZE_DRAIN_S):
+                await asyncio.gather(*tasks, return_exceptions=True)
+        except TimeoutError:
+            log.warning(
+                "stream.diarize.drain_timeout", session_id=self._session_id, pending=len(tasks)
+            )
+        finally:
+            for task in tasks:
+                task.cancel()

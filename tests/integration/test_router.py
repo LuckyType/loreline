@@ -118,6 +118,31 @@ class FakeDiarizer:
         return None
 
 
+class FailingDiarizer(FakeDiarizer):
+    """Every way a real one refuses: a non-2xx, a timeout, a refused connection.
+
+    ``RemoteDiarizer.diarize`` raises for all of them, through
+    ``raise_for_vendor_status``.
+    """
+
+    def __init__(self) -> None:
+        super().__init__([])
+
+    async def diarize(
+        self,
+        wav: bytes,
+        *,
+        sample_rate: int = 16000,
+        min_speakers: int | None = None,
+        max_speakers: int | None = None,
+        session_id: str | None = None,
+    ) -> list[SpeakerSegment]:
+        _ = (wav, sample_rate, min_speakers, max_speakers, session_id)
+        self.calls += 1
+        msg = "the diarization service answered 503"
+        raise RuntimeError(msg)
+
+
 async def _utterances() -> AsyncIterator[Utterance]:
     yield Utterance(pcm=b"\x01\x00" * 1600, start=0.0, end=1.0)
 
@@ -206,6 +231,34 @@ async def test_router_remote_diarization_merge() -> None:
     assert diarizer.calls == 1
     assert events[0].words[0].speaker == "Speaker 0"
     assert events[0].words[1].speaker == "Speaker 1"
+
+
+async def test_router_publishes_text_a_failing_diarizer_could_not_label() -> None:
+    """A diarizer that refuses costs the speaker labels, never the transcript.
+
+    Awaited unguarded, its exception left ``SttRouter.run`` entirely: this
+    utterance's text was dropped and so was every utterance behind it, for the
+    rest of the session, because the live path was over.
+    """
+    bus: EventBus[TranscriptEvent] = EventBus()
+    diarizer = FailingDiarizer()
+    router = SttRouter(
+        FakeBackend("p1", words=[Word(text="hallo", start=0.1, end=0.4)]),
+        bus,
+        RouterConfig(
+            session_id="s1",
+            diarization=DiarizationConfig(mode=DiarizationMode.REMOTE, endpoint="http://x"),
+        ),
+        diarizer=diarizer,
+    )
+    collector = asyncio.create_task(_collect(bus, 1))
+    await asyncio.sleep(0.01)
+    await router.run(_utterances())
+    events = await collector
+
+    assert diarizer.calls == 1
+    assert events[0].text == "ok"
+    assert events[0].words[0].speaker is None
 
 
 async def test_router_remote_diarization_merge_mid_session() -> None:

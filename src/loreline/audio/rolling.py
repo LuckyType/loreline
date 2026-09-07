@@ -23,7 +23,8 @@ class RollingPcm:
     Frames go in with the timestamp the capture loop gave them; a slice comes
     out for any span still inside the window. A span that has partly aged out
     returns the part that is left rather than nothing, because a short clip is
-    a worse diarization than a long one and no clip at all is none.
+    a worse diarization than a long one and no clip at all is none - together
+    with where that part really begins, which is not where it was asked for.
     """
 
     def __init__(self, sample_rate: int, *, seconds: float) -> None:
@@ -44,14 +45,28 @@ class RollingPcm:
             del self._buffer[:excess]
             self._start += excess / _BYTES_PER_SAMPLE / self.sample_rate
 
-    def slice(self, start: float, end: float) -> bytes:
-        """The audio between two capture-clock instants, as far as it is held."""
+    def slice(self, start: float, end: float) -> tuple[bytes, float]:
+        """The audio between two capture-clock instants, and where it begins.
+
+        The second value is where the returned audio really sits on the capture
+        clock, which is later than ``start`` for a span whose beginning has
+        aged out of the window. A caller that ships this to the diarizer gets
+        0-based segments back and has to shift them by what it actually sent:
+        shifting by what it asked for instead puts every label of a long turn
+        early by however much of it was lost.
+
+        ``(b"", 0.0)`` where nothing of the span is left, or where the span is
+        empty or inverted.
+        """
         origin = self._start
         if origin is None or end <= start:
-            return b""
+            return b"", 0.0
         first = max(0, self._at(start, origin))
         last = min(len(self._buffer), self._at(end, origin))
-        return bytes(self._buffer[first:last]) if last > first else b""
+        if last <= first:
+            return b"", 0.0
+        held_from = origin + first / _BYTES_PER_SAMPLE / self.sample_rate
+        return bytes(self._buffer[first:last]), held_from
 
     def _at(self, ts: float, origin: float) -> int:
         """Where a capture-clock instant sits in the buffer, sample-aligned."""

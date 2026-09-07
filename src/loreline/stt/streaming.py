@@ -12,9 +12,10 @@ Two things live here, and the split between them is the point:
 
 ``StreamingConnector`` is the vendor half, and it is meant to be *only* protocol
 translation. A connector opens a socket, writes PCM to it, and turns each
-message the vendor sends into one of four signals (:class:`TurnStarted`,
-:class:`TurnPartial`, :class:`TurnEnded`, :class:`TurnFinal`). It keeps no
-timing state, no turn bookkeeping and no reconnect logic, because the half
+message the vendor sends into one of four turn signals (:class:`TurnStarted`,
+:class:`TurnPartial`, :class:`TurnEnded`, :class:`TurnFinal`) or into
+:class:`StreamAlive`, which says only that the socket is still there. It keeps
+no timing state, no turn bookkeeping and no reconnect logic, because the half
 below already has all three, and five connectors reimplementing them is five
 chances to get the clock wrong.
 
@@ -51,7 +52,7 @@ import contextlib
 import time
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from loreline.audio.resample import Pcm16Stream
 from loreline.logging import get_logger
@@ -60,8 +61,11 @@ from loreline.models import GAP_SOURCE, Glossary, ProviderConfig, TranscriptEven
 log = get_logger(__name__)
 
 __all__ = [
+    "PendingGap",
+    "StreamAlive",
     "StreamConfig",
     "StreamOutcome",
+    "StreamSignal",
     "StreamingConnector",
     "TranscriptStream",
     "TurnEnded",
@@ -69,6 +73,7 @@ __all__ = [
     "TurnPartial",
     "TurnSignal",
     "TurnStarted",
+    "gap_event",
     "is_streaming",
 ]
 
@@ -173,7 +178,29 @@ class TurnFinal:
     to: float | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class StreamAlive:
+    """This connection is alive and had nothing to say about a turn.
+
+    Yield this for any vendor message that proves the socket is alive but
+    carries no turn: Deepgram's ``Metadata``, AssemblyAI's ``Begin``,
+    ``SpeechStarted`` and ``Termination``, x.ai's ``transcript.created``. The
+    stream refreshes its liveness watchdog on it and does nothing else.
+
+    It exists because the watchdog counts messages *the stream* was told about,
+    not messages the socket carried. A connector that consumes an ack silently
+    leaves the stream unable to tell a slow connection from a dead one, and
+    kills a live session ``watchdog_s`` after the local VAD goes quiet.
+    """
+
+
+# What a signal about a turn is, and what a connector may yield. The two are
+# separate because :class:`StreamAlive` is deliberately not a turn signal: a
+# connector that never has anything to say beyond turns keeps returning
+# ``AsyncIterator[TurnSignal]`` and stays correct, while the contract below
+# accepts either.
 TurnSignal = TurnStarted | TurnPartial | TurnEnded | TurnFinal
+StreamSignal = TurnSignal | StreamAlive
 
 
 # --------------------------------------------------------------------------
@@ -243,7 +270,7 @@ class StreamingConnector(ABC):
         """
 
     @abstractmethod
-    def signals(self) -> AsyncIterator[TurnSignal]:
+    def signals(self) -> AsyncIterator[StreamSignal]:
         """Translate the vendor's messages into signals, until the socket ends.
 
         One message in, zero or more signals out, with no state kept between
@@ -252,9 +279,11 @@ class StreamingConnector(ABC):
         decides whether that is a reconnect, a failover or the end of it.
 
         Anything the vendor sends that is not a turn signal (acks, session
-        confirmations, keepalives) should still be consumed here, because the
-        liveness watchdog counts *messages received*, and a connection that
-        only acks is a connection that is still alive.
+        confirmations, keepalives) should still be consumed here *and yielded
+        as* :class:`StreamAlive`. The liveness watchdog counts messages it was
+        told about, and a connection that only acks is a connection that is
+        still alive - but consuming an ack silently says nothing, and the
+        watchdog then kills the socket once the local VAD goes quiet.
         """
 
     @abstractmethod
@@ -321,6 +350,16 @@ class StreamConfig:
     # local VAD to go quiet first is what makes "nothing came back" mean
     # something: every vendor emits at a turn boundary, so silence past one is
     # a dead connection and silence inside a turn is just a long sentence.
+    #
+    # Invariant: this must be longer than the vendor's own endpointing silence.
+    # The vendor closes a turn, and says so, after N seconds of quiet; the
+    # watchdog starts counting a pause as suspicious after this long. With this
+    # the shorter of the two, an ordinary pause beginning more than watchdog_s
+    # after the vendor's last message would be read as a dead socket and would
+    # kill a live turn. All five vendors sit comfortably under 2s today: OpenAI
+    # server VAD 500ms, AssemblyAI its default, Deepgram endpointing 500ms,
+    # x.ai 400ms, Gemini 300ms. A vendor configured slower than this needs this
+    # raised with it.
     quiet_grace_s: float = 2.0
     # Consecutive failed attempts against the same provider before the caller
     # is told to fail over. Each one costs a gap marker, so it is small.
@@ -366,6 +405,50 @@ class StreamOutcome:
 
 
 @dataclass(frozen=True, slots=True)
+class PendingGap:
+    """A span a dead connection swallowed, waiting for something to end it.
+
+    Held rather than published because a gap is only a gap once something
+    *else* transcribes again: the marker runs from where audio stopped being
+    transcribed to where it started again, and the second half is not known
+    until the next connection writes its first frame, or until the whole path
+    gives up (see :meth:`TranscriptStream.pending_gap`).
+
+    ``provider`` is whoever lost the audio, kept because the successor that
+    ends the span is usually somebody else, and blaming the vendor that is
+    working for the outage of the one that is not helps nobody read a log.
+    """
+
+    start: float
+    provider: str
+
+
+def gap_event(session_id: str, gap: PendingGap | None, until: float) -> TranscriptEvent | None:
+    """The marker for a span nothing transcribed, or None if there is no span.
+
+    A streaming loss is aligned to nothing: no utterance names it, so no
+    re-process recovers exactly it, which is why it is a row in the transcript
+    rather than a line in the log (ADR 0006, Decision 3). Built here rather
+    than at either call site because both halves need it: the stream closes a
+    gap with the first frame of its next connection, and the path above it
+    closes the ones no next connection ever comes for.
+    """
+    if gap is None or until <= gap.start:
+        return None
+    return TranscriptEvent(
+        session_id=session_id,
+        source=GAP_SOURCE,
+        text=(
+            f"{until - gap.start:.0f}s of audio was not transcribed: "
+            f"the connection to {gap.provider} dropped."
+        ),
+        start_ts=gap.start,
+        end_ts=until,
+        is_final=True,
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class _Frame:
     """One captured frame on its way to the vendor."""
 
@@ -376,6 +459,13 @@ class _Frame:
 
 _STOP = object()  # queued by stop() to end the send loop after the last frame
 
+# Longest one connection's teardown step may take. Closing a socket and
+# publishing a handful of settled turns is instant when anything works at all,
+# so this is only ever reached by something that has stopped answering, and it
+# is short because a stop is already waiting on it (see
+# ``SessionManager._STOP_DRAIN_TIMEOUT_S``).
+_TEARDOWN_TIMEOUT_S = 5.0
+
 
 class _ConnectionLostError(RuntimeError):
     """Internal: this connection is over, for a reason worth one log line."""
@@ -383,14 +473,44 @@ class _ConnectionLostError(RuntimeError):
 
 @dataclass(slots=True)
 class _OpenTurn:
-    """A turn the vendor opened and has not settled, on the capture clock."""
+    """A turn the vendor opened and has not settled, on the capture clock.
+
+    ``handle`` is fixed for the turn's life and ``start`` is not: a vendor may
+    revise where a turn began as its endpointing refines (x.ai does; Deepgram's
+    own docs warn it may), and the key every revision of the turn is written
+    under must not move with it. See :func:`_handle`.
+    """
 
     ref: str
+    handle: str
     start: float
     end: float | None = None
     text: str = ""
     published: bool = False
     next_interim: float = 0.0  # monotonic; 0 -> the first partial publishes
+
+
+def _handle(ref: str, start: float) -> str:
+    """The vendor's handle for a turn, or the millisecond the turn began.
+
+    Millisecond-resolution start on the capture clock for a vendor that names
+    no turn, which is unique within a connection because two turns cannot begin
+    in the same millisecond. Derived when the turn opens and never again, so a
+    final that states a different start moves the event's timestamps and not
+    its key - deriving it a second time from a revised start would write the
+    final as a new row beside the interims it was meant to replace.
+    """
+    return ref or f"t{round(start * 1000)}"
+
+
+# Per connection, and only reached by a vendor that is misbehaving: a turn the
+# stream is never told the end of, an end for a turn that never arrives, a
+# stale handle repeated forever. Each cap is far above any real session's
+# working set, and is here so that a connection that runs all evening cannot
+# grow one of these dicts without bound (only reconnecting clears them).
+_MAX_OPEN_TURNS = 32
+_MAX_PENDING_ENDS = 64
+_MAX_CLOSED_REFS = 128
 
 
 class TranscriptStream:
@@ -410,6 +530,7 @@ class TranscriptStream:
         publish: Callable[[TranscriptEvent], Awaitable[None]],
         capture_rate: int,
         config: StreamConfig,
+        gap: PendingGap | None = None,
     ) -> None:
         self._connector = connector
         self._publish = publish
@@ -433,13 +554,34 @@ class TranscriptStream:
         self._turns: dict[str, _OpenTurn] = {}
         self._order: list[str] = []  # open turns, oldest first: "the open turn"
         self._pending_end: dict[str, float] = {}  # ref -> capture-clock end
+        # Turns this connection has settled, oldest first, used as a bounded
+        # ordered set. A vendor whose late partial names one of these would
+        # otherwise reopen a settled turn under its own key, replacing the
+        # final with an interim that the end of the session then deletes.
+        self._closed: dict[str, None] = {}
         self._resampler: Pcm16Stream | None = None
         self._settled = asyncio.Event()
         self._settled.set()
         self._generation = 0  # connections opened so far; part of every turn id
         # The span a dead connection swallowed, published as a gap marker once
-        # the next connection's t0 is known (or when the provider gives up).
-        self._gap_from: float | None = None
+        # the next connection's t0 is known. Seeded by the caller where a
+        # previous provider died still owing one: the marker belongs to the
+        # span, not to the object that was streaming when it opened.
+        self._gap = gap
+
+    @property
+    def pending_gap(self) -> PendingGap | None:
+        """The span this stream stopped transcribing and never closed, if any.
+
+        None in the ordinary case, where the next connection's first frame
+        closed the gap. Not None when this provider ran out of reconnects with
+        one open, which is exactly when the caller is about to build the next
+        provider's stream: it hands this back in, and that stream's first
+        written frame ends the span (see :meth:`_write`). Nothing else can,
+        because a marker needs a moment where transcription resumed, and this
+        object has none left.
+        """
+        return self._gap
 
     # -- input ------------------------------------------------------------
 
@@ -487,9 +629,16 @@ class TranscriptStream:
         Returns a :class:`StreamOutcome`. It does not raise for a vendor-side
         failure: a dead provider is an answer the caller acts on (fail over),
         not an exception it would have to classify.
+
+        A stop is checked for before every attempt, not only after a connection
+        served: Stop arriving while a provider is failing to connect would
+        otherwise spend the whole reconnect budget and its backoff on audio
+        that is not coming, and end a normal shutdown at ``DEAD`` - which,
+        with no fallback behind it, fires the ERROR-level "Transcription
+        stopped" alert on the way out of an evening that went fine.
         """
         attempts = 0
-        while True:
+        while not self._stopped:
             try:
                 await self._connector.open_stream(self._config.glossary)
             except StreamUnsupportedError as exc:
@@ -515,15 +664,18 @@ class TranscriptStream:
                     return StreamOutcome.ENDED
                 attempts = 0 if self._was_healthy() else attempts + 1
             if attempts > self._config.max_reconnects:
-                await self._publish_gap(self._last_ts)
                 log.error(
                     "stream.provider.dead",
                     provider=self._connector.config.name,
                     provider_id=self._connector.config.id,
                     attempts=attempts,
                 )
+                # The gap this provider opened stays open: it ends where
+                # transcription resumes, which is the next provider's first
+                # frame or nowhere. See :attr:`pending_gap`.
                 return StreamOutcome.DEAD
             await asyncio.sleep(self._config.reconnect_backoff_s * max(1, attempts))
+        return StreamOutcome.ENDED
 
     def _was_healthy(self) -> bool:
         """Whether the connection just closed had earned a fresh budget."""
@@ -559,9 +711,39 @@ class TranscriptStream:
             reader.cancel()
             with contextlib.suppress(BaseException):
                 await reader
-            with contextlib.suppress(Exception):
-                await self._connector.close_stream()
-            await self._settle_open()
+            await self._teardown()
+
+    async def _teardown(self) -> None:
+        """Close the socket and settle what was open, bounded and never raising.
+
+        Every step here is best-effort, and for two reasons that both end the
+        session badly if they are not. An exception escaping this escapes
+        :meth:`run`, whose whole contract is that a provider failure is a
+        return value; the caller would then skip its failover and handoff
+        handling and the recording would carry on with nothing transcribing it,
+        healthz green, until Stop turned the session into an ERROR.
+
+        And it is bounded because the cancellation that arrives when a stop's
+        drain times out is swallowed above (awaiting a cancelled reader
+        consumes it), so without a deadline a hung vendor call here would hold
+        the whole shutdown for as long as its own client timeout allows.
+        """
+        steps = (("close", self._connector.close_stream), ("settle", self._settle_open))
+        for step, run_step in steps:
+            # Bounded one at a time, so a socket that will not close still
+            # costs only its own deadline and the open turns are settled after
+            # it either way.
+            try:
+                async with asyncio.timeout(_TEARDOWN_TIMEOUT_S):
+                    await run_step()
+            except Exception as exc:
+                log.warning(
+                    "stream.teardown.failed",
+                    step=step,
+                    provider=self._connector.config.name,
+                    provider_id=self._connector.config.id,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
 
     async def _send_loop(self, reader: asyncio.Task[None]) -> None:
         """Drain the frame queue into the connection until input or it ends."""
@@ -611,19 +793,36 @@ class TranscriptStream:
         raise _ConnectionLostError(f"nothing received for {quiet_for:.0f}s past a turn's end")
 
     async def _read(self) -> None:
-        """Turn the vendor's messages into events, for this connection's life."""
+        """Turn the vendor's messages into events, for this connection's life.
+
+        Every signal refreshes the liveness watchdog, :class:`StreamAlive`
+        included: what the watchdog asks is whether the socket is answering at
+        all, and a connector that has nothing to report about a turn but was
+        just spoken to answers exactly that.
+        """
         async for signal in self._connector.signals():
             self._last_rx = time.monotonic()
             await self._apply(signal)
 
     # -- turn bookkeeping -------------------------------------------------
 
-    async def _apply(self, signal: TurnSignal) -> None:
+    async def _apply(self, signal: StreamSignal) -> None:
         match signal:
+            case StreamAlive():
+                # The whole signal: :meth:`_read` has already refreshed the
+                # watchdog for it, and there is no turn to say anything about.
+                pass
             case TurnStarted(at=at, ref=ref):
-                self._open(ref, self._clock(at))
+                await self._open(ref, self._clock(at))
             case TurnPartial(text=text, ref=ref, append=append):
-                turn = self._open(ref, self._clock(None))
+                if self._is_closed(ref):
+                    # A partial for a turn already settled on this connection.
+                    # Opening one under that key would replace the final that
+                    # is on screen with an interim, which the end of the
+                    # session would then delete as a half-typed row.
+                    log.debug("stream.partial.late", ref=ref)
+                    return
+                turn = await self._open(ref, self._clock(None))
                 turn.text = turn.text + text if append else text
                 await self._publish_interim(turn)
             case TurnEnded(at=at, ref=ref):
@@ -631,22 +830,62 @@ class TranscriptStream:
                 turn = self._turns.get(self._resolve(ref))
                 if turn is None:
                     self._pending_end[ref] = end
+                    _trim(self._pending_end, _MAX_PENDING_ENDS)
                 else:
                     turn.end = end
             case TurnFinal(text=text, ref=ref, words=words, at=at, to=to):
                 await self._close(ref, text, words, at, to)
 
-    def _open(self, ref: str, start: float) -> _OpenTurn:
+    async def _open(self, ref: str, start: float) -> _OpenTurn:
         """The turn ``ref`` names, opening one at ``start`` when none is open."""
         key = self._resolve(ref)
         turn = self._turns.get(key)
         if turn is not None:
             return turn
-        turn = _OpenTurn(ref=key, start=start, end=self._pending_end.pop(key, None))
+        turn = _OpenTurn(
+            ref=key,
+            handle=_handle(key, start),
+            start=start,
+            end=self._pending_end.pop(key, None),
+        )
         self._turns[key] = turn
         self._order.append(key)
         self._settled.clear()
+        while len(self._order) > _MAX_OPEN_TURNS:
+            await self._evict_oldest()
         return turn
+
+    def _is_closed(self, ref: str) -> bool:
+        """Whether ``ref`` names a turn this connection has already settled.
+
+        Only ever true for a vendor that names its turns. One that does not has
+        exactly one turn open at a time and no way to name an old one, so an
+        unnamed partial after a final is the next turn beginning, not a late
+        word about the last.
+        """
+        return bool(ref) and ref in self._closed
+
+    async def _evict_oldest(self) -> None:
+        """Settle the oldest open turn to keep the connection's books bounded.
+
+        Reached only by a vendor that opens turns and never ends them. Settling
+        rather than dropping, for the same reason :meth:`_settle_open` settles:
+        a turn that published an interim and is then forgotten leaves a dimmed
+        row that nothing will ever replace.
+        """
+        key = self._order.pop(0)
+        turn = self._turns.pop(key)
+        self._note_closed(key)
+        log.warning("stream.turns.overflow", ref=key, open_turns=len(self._order) + 1)
+        if turn.published:
+            await self._emit(turn.handle, turn.text, start=turn.start, end=turn.end, final=True)
+
+    def _note_closed(self, key: str) -> None:
+        """Remember a settled turn's handle, for the late partial that names it."""
+        if not key:
+            return
+        self._closed[key] = None
+        _trim(self._closed, _MAX_CLOSED_REFS)
 
     def _resolve(self, ref: str) -> str:
         """Which turn a signal belongs to when the vendor named none.
@@ -672,6 +911,7 @@ class TranscriptStream:
         turn = self._turns.pop(key, None)
         if turn is not None:
             self._order.remove(key)
+        self._note_closed(key)
         # A turn can close without ever having been opened here: a vendor that
         # announces the end of a turn it never announced the start of, or one
         # whose two messages arrive out of order. Whatever end offset was
@@ -680,22 +920,41 @@ class TranscriptStream:
         known_end = turn.end if turn is not None and turn.end is not None else pending
         start = self._clock(at) if at is not None else (turn.start if turn else self._clock(None))
         end = self._clock(to) if to is not None else known_end
-        await self._emit(key, text, start=start, end=end, words=words, final=True)
+        if not text and turn is not None and turn.published:
+            # A vendor that comes back empty for a turn it has been sending
+            # interims for. Dropping this settles nothing, and the interim row
+            # stays dimmed until the end of the session deletes it, taking the
+            # only text there ever was with it. An empty final is routine
+            # rather than exceptional - Deepgram's endpointing emits one per
+            # near-silent lead-in - so the last interim is the answer here,
+            # not silence.
+            text = turn.text
+            log.debug("stream.final.empty", ref=key)
+        # The handle, not the key: ``at`` above may have moved this turn's
+        # start, and the row every interim was written under must not move
+        # with it (see :func:`_handle`).
+        handle = turn.handle if turn is not None else _handle(key, start)
+        await self._emit(handle, text, start=start, end=end, words=words, final=True)
         if not self._turns:
             self._settled.set()
 
     async def _publish_interim(self, turn: _OpenTurn) -> None:
-        """Publish an open turn's text, at most once per configured interval."""
+        """Publish an open turn's text, at most once per configured interval.
+
+        ``published`` is set only where a row was really written, because it is
+        what :meth:`_close` and :meth:`_settle_open` read as "there is a dimmed
+        row on screen that has to be replaced by something".
+        """
         now = time.monotonic()
-        if now < turn.next_interim:
+        if not turn.text or now < turn.next_interim:
             return
         turn.next_interim = now + self._config.interim_interval_s
         turn.published = True
-        await self._emit(turn.ref, turn.text, start=turn.start, end=None, final=False)
+        await self._emit(turn.handle, turn.text, start=turn.start, end=None, final=False)
 
     async def _emit(
         self,
-        ref: str,
+        handle: str,
         text: str,
         *,
         start: float,
@@ -721,16 +980,16 @@ class TranscriptStream:
                 # Stable for a turn's whole life, interims included: it is what
                 # a growing interim is replaced *by* rather than appended to,
                 # in the transcript table and in both live feeds.
-                turn_id=self._turn_id(ref, start),
+                turn_id=self._turn_id(handle),
             )
         )
 
-    def _turn_id(self, ref: str, start: float) -> str:
-        """This turn's id on the wire: the vendor's handle, or its start.
+    def _turn_id(self, handle: str) -> str:
+        """This turn's id on the wire: where it is in this session's stream.
 
-        Millisecond-resolution start on the capture clock for a vendor that
-        names no turn, which is unique within a connection because two turns
-        cannot begin in the same millisecond.
+        The handle comes from :func:`_handle`, fixed when the turn opened, so
+        nothing a later signal says about the turn can move the key it is
+        written under.
 
         Both halves of the prefix earn their place. The provider id keeps two
         vendors' handles apart in a session that failed over. The connection
@@ -739,7 +998,6 @@ class TranscriptStream:
         is ``msg_001`` again, and without the counter it would replace the
         first turn of the evening rather than follow it.
         """
-        handle = ref or f"t{round(start * 1000)}"
         return f"{self._connector.config.id}:{self._generation}:{handle}"
 
     def _clock(self, offset: float | None) -> float:
@@ -780,8 +1038,21 @@ class TranscriptStream:
         otherwise. The marker itself waits for the next connection's ``t0``, so
         that it spans exactly what was lost.
         """
+        if self._t0 is None:
+            # This connection never wrote a frame, so it lost nothing this
+            # object can name an instant for. Any span the previous connection
+            # opened is still open (only a write closes one) and already starts
+            # in the right place; on a stream that never wrote at all,
+            # ``_last_ts`` is zero, which is no instant on the capture clock.
+            return
         oldest = self._turns[self._order[0]].start if self._order else self._last_ts
-        self._gap_from = min(self._gap_from, oldest) if self._gap_from is not None else oldest
+        if self._gap is None:
+            self._gap = PendingGap(start=oldest, provider=self._connector.config.name)
+        elif oldest < self._gap.start:
+            # An older span is already open (this provider's previous
+            # connection, or the one before this provider). It keeps its name:
+            # the marker says who stopped transcribing where it starts.
+            self._gap = replace(self._gap, start=oldest)
 
     async def _settle_open(self) -> None:
         """Publish what every open turn has so far as its final, and forget it.
@@ -795,32 +1066,21 @@ class TranscriptStream:
         turns, self._turns, self._order = list(self._turns.values()), {}, []
         self._settled.set()
         for turn in turns:
+            self._note_closed(turn.ref)
             if turn.published:
-                await self._emit(turn.ref, turn.text, start=turn.start, end=turn.end, final=True)
+                await self._emit(turn.handle, turn.text, start=turn.start, end=turn.end, final=True)
 
     async def _publish_gap(self, until: float) -> None:
         """Mark the span a dead connection swallowed, if there was one.
 
-        A streaming loss is aligned to nothing: no utterance names it, so no
-        re-process recovers exactly it, which is why it is a row in the
-        transcript rather than a line in the log (ADR 0006, Decision 3).
+        Called with the first frame of a working connection, which is the
+        moment the span is known to have ended. A gap still open when this
+        provider gives up outlives the object (see :attr:`pending_gap`).
         """
-        start, self._gap_from = self._gap_from, None
-        if start is None or until <= start:
-            return
-        await self._publish(
-            TranscriptEvent(
-                session_id=self._config.session_id,
-                source=GAP_SOURCE,
-                text=(
-                    f"{until - start:.0f}s of audio was not transcribed: "
-                    f"the connection to {self._connector.config.name} dropped."
-                ),
-                start_ts=start,
-                end_ts=until,
-                is_final=True,
-            )
-        )
+        gap, self._gap = self._gap, None
+        event = gap_event(self._config.session_id, gap, until)
+        if event is not None:
+            await self._publish(event)
 
     def _reset_connection(self) -> None:
         """Forget everything that belonged to the connection just closed."""
@@ -833,6 +1093,7 @@ class TranscriptStream:
         self._turns = {}
         self._order = []
         self._pending_end = {}
+        self._closed = {}
         self._resampler = None
         self._stalled = False
         self._settled = asyncio.Event()
@@ -855,6 +1116,17 @@ class TranscriptStream:
             if item is _STOP:
                 self._queue.put_nowait(_STOP)
                 return
+
+
+def _trim[V](book: dict[str, V], limit: int) -> None:
+    """Drop the oldest entries of an insertion-ordered book down to ``limit``.
+
+    The books are small and only a misbehaving vendor ever fills one, so the
+    oldest entry is both the least likely to still matter and the cheapest to
+    identify.
+    """
+    while len(book) > limit:
+        del book[next(iter(book))]
 
 
 def _reader_reason(reader: asyncio.Task[None]) -> str:
