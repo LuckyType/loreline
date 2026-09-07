@@ -15,11 +15,12 @@ import asyncio
 import functools
 import json
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from itertools import pairwise
 from typing import cast
 
 import pytest
+from websockets.asyncio.client import ClientConnection
 from websockets.asyncio.server import ServerConnection, serve
 
 from loreline.audio.chunker import Utterance
@@ -314,10 +315,11 @@ async def test_streaming_publishes_interims_then_a_final_per_service_turn() -> N
 
     first, second = finals
     assert first.turn_id != second.turn_id
-    # No vendor turn handle exists, so the id is the turn's start in
-    # milliseconds, behind the provider id and this connection's number.
-    assert first.turn_id is not None
-    assert first.turn_id.startswith("gem-live-1:1:t")
+    # The vendor names no turns, so the connector numbers them itself, behind
+    # the provider id and this connection's number. Its own numbering rather
+    # than the turn's start, because this service can settle one turn twice
+    # and only a ref makes the second one replace the first.
+    assert (first.turn_id, second.turn_id) == ("gem-live-1:1:1", "gem-live-1:1:2")
     # Timestamps land on the capture clock, from the last frame written when
     # each signal arrived: this service states no offsets at all.
     assert 100.0 <= first.start_ts < second.start_ts
@@ -399,13 +401,18 @@ async def test_a_model_that_refuses_activity_detection_cannot_stream() -> None:
         await backend.aclose()
 
 
-async def test_go_away_ends_the_connection_and_the_next_one_resumes() -> None:
+async def test_go_away_ends_the_connection_and_the_next_one_starts_clean() -> None:
     """A session cap of minutes against an evening at a table.
 
     goAway is ordinary operation for this vendor, so it has to cost the open
-    turn and a gap marker rather than the session: the stream reconnects, and
-    the handle the dying connection left is presented to the new one so Google
-    sees one session continuing rather than a fresh one every ten minutes.
+    turn and a gap marker rather than the session. What the second connection
+    must not inherit is any of the first one's bookkeeping: its turn numbering
+    starts at one again, behind a connection counter that does not, so the
+    evening's fifth turn follows the fourth instead of replacing the first.
+
+    No resumption handle here, because the real service has never sent one:
+    the default mock answers as it does, and the handle path has its own test
+    below.
     """
     connections = 0
     handles: list[str | None] = []
@@ -422,13 +429,82 @@ async def test_go_away_ends_the_connection_and_the_next_one_resumes() -> None:
     events = await _stream_events(counting, [(_LOUD, 50), (_QUIET, 50)] * 2, settle=0.5)
 
     assert connections == 2
-    # None on the first session (there was nothing to resume), then the handle
-    # the first session was given.
-    assert handles == [None, "h+1"]
-    assert [e.text for e in events if e.is_final and e.source == "gem-live-1"]
+    # Both sessions presented nothing, since neither was ever offered a handle.
+    assert handles == [None, None]
+    finals = [e for e in events if e.is_final and e.source == "gem-live-1"]
+    assert finals
+    # Generation 2 numbers its turns from scratch, and the connection counter
+    # in front of them is what keeps that from replacing generation 1's rows.
+    assert {e.turn_id for e in finals} <= {f"gem-live-1:{gen}:1" for gen in (1, 2)} | {
+        f"gem-live-1:{gen}:2" for gen in (1, 2)
+    }
+    assert any(str(e.turn_id).startswith("gem-live-1:2:1") for e in finals)
     # What the reconnect swallowed is a span aligned to nothing, so it is a row
     # in the transcript rather than a line in the log (ADR 0006, Decision 3).
     assert [e.source for e in events if e.source == GAP_SOURCE] == [GAP_SOURCE]
+
+
+async def test_a_resumption_handle_is_presented_to_the_connection_after_it() -> None:
+    """The path that would work the day Google starts issuing handles.
+
+    It never has, in any verification run, which is why the mock only offers
+    one when asked. The code stays because it costs one field in a message
+    that is sent anyway; this is what says the code is still wired up.
+    """
+    connections = 0
+    handles: list[str | None] = []
+
+    async def counting(ws: ServerConnection) -> None:
+        nonlocal connections
+        connections += 1
+        await gemini_live_handler(
+            ws,
+            handles=handles,
+            offer_handles=True,
+            go_away_after_turns=1 if connections == 1 else None,
+        )
+
+    _ = await _stream_events(counting, [(_LOUD, 50), (_QUIET, 50)] * 2, settle=0.5)
+
+    assert connections == 2
+    # None on the first session (there was nothing to resume), then the handle
+    # the first session was given.
+    assert handles == [None, "h+1"]
+
+
+async def test_a_quiet_room_still_leaves_before_the_deadline_passes() -> None:
+    """The deadline is raced against the read rather than checked per frame.
+
+    A table that has gone quiet with a turn still open sends nothing at all,
+    and a goAway acted on only when the next frame arrives is a goAway the
+    server beats: it hangs up at its own moment, which is mid-turn. Two
+    frames here and then a socket that says nothing ever again.
+    """
+
+    class _GoesQuiet:
+        """One interim, a goAway inside that turn, then silence for as long as anyone waits."""
+
+        def __aiter__(self) -> AsyncIterator[str]:
+            return self._frames()
+
+        async def _frames(self) -> AsyncIterator[str]:
+            # In that order: a goAway with no turn open is left on at once,
+            # which is already a turn boundary. The case that needs a deadline
+            # is a turn the room then stops feeding.
+            yield json.dumps({"serverContent": {"interimInputTranscription": {"text": "hallo"}}})
+            yield json.dumps({"goAway": {"timeLeft": "5.2s"}})  # 0.2 s past the margin
+            await asyncio.sleep(30)
+
+    backend = GeminiLiveBackend(_config(0), model=MODEL, api_key="secret")
+    quiet = cast("ClientConnection", _GoesQuiet())
+    backend._stream_ws = quiet  # pyright: ignore[reportPrivateUsage]
+
+    started = time.perf_counter()
+    signals = [signal async for signal in backend.signals()]
+    elapsed = time.perf_counter() - started
+
+    assert elapsed < 3.0  # the deadline, not the next frame that never came
+    assert [type(s).__name__ for s in signals] == ["TurnPartial", "StreamAlive"]
 
 
 async def test_the_utterance_shape_is_untouched_by_the_streaming_one() -> None:

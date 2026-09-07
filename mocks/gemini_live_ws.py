@@ -30,10 +30,15 @@ drops a session at its duration cap, which on this vendor is normal operation
 rather than a fault, so the reconnect path has something to be driven by. Its
 ``timeLeft`` is the 50 seconds the real one gave. Zero sends it on the first
 audio frame, which is *during* a turn rather than between two, and that is the
-case worth driving: a connector that left on the spot would lose that turn. A
-``setup`` asking for ``sessionResumption`` is answered with a handle, and every
-handle a client presents is recorded, which is how a test tells a reconnect that
-resumed from one that started over.
+case worth driving: a connector that left on the spot would lose that turn.
+
+``sessionResumption`` is asked for in every setup this connector sends, and the
+real service has never once answered with a ``sessionResumptionUpdate``, so by
+default neither does this: a mock that always handed one back was the only
+place resumption ever worked. ``offer_handles=True`` turns it on for the one
+test that covers the code which would use one the day Google fills it in. The
+handle a client presents is recorded either way, which is how a test tells a
+reconnect that resumed from one that started over.
 
 The real service never sends ``turnComplete`` and never closes the socket
 itself, and neither does this. Deterministic, so tests can assert wiring; what
@@ -183,12 +188,18 @@ def _decoded(realtime: dict[str, object]) -> bytes | None:
     return base64.b64decode(encoded) if isinstance(encoded, str) else None
 
 
-def _resumption(setup: dict[str, object], handles: list[str | None] | None) -> list[str]:
-    """Answer a setup that asked to be resumable, and record what it presented.
+def _resumption(
+    setup: dict[str, object], handles: list[str | None] | None, *, offer: bool
+) -> list[str]:
+    """Record the handle a setup presented, and answer only if asked to.
 
-    The handle offered back is derived from the one presented rather than fixed,
-    so a test can tell the second connection's handle from the first's and see
-    that a reconnect continued a session rather than starting one.
+    ``offer`` is off by default because the real service never sent a
+    ``sessionResumptionUpdate`` once, in any verification run: a mock that
+    always answered with one made the resumption path look exercised when
+    nothing in production ever reaches it. The handle offered when it is on is
+    derived from the one presented rather than fixed, so a test can tell the
+    second connection's handle from the first's and see that a reconnect
+    continued a session rather than starting one.
     """
     config = setup.get("sessionResumption")
     if not isinstance(config, dict):
@@ -197,6 +208,8 @@ def _resumption(setup: dict[str, object], handles: list[str | None] | None) -> l
     handle = presented if isinstance(presented, str) else None
     if handles is not None:
         handles.append(handle)
+    if not offer:
+        return []
     return [json.dumps({"sessionResumptionUpdate": {"newHandle": f"{handle or 'h'}+1"}})]
 
 
@@ -205,7 +218,9 @@ async def gemini_live_handler(
     *,
     setups: list[dict[str, object]] | None = None,
     go_away_after_turns: int | None = None,
+    go_away_time_left: str = "50s",
     handles: list[str | None] | None = None,
+    offer_handles: bool = False,
 ) -> None:
     """Handle one mock Live session, in whichever mode its setup asked for.
 
@@ -213,7 +228,11 @@ async def gemini_live_handler(
     the connector's only chance to configure a session and both the custom
     vocabulary and the activity detection ride in it. ``handles`` collects the
     resumption handle each session presented, None for one that presented none.
-    Bind any of them with ``functools.partial``.
+    ``offer_handles`` answers with a resumption handle, which the real service
+    does not; see the module docstring. ``go_away_time_left`` is the notice the
+    ``goAway`` gives, 50 seconds like the real one unless a test needs to reach
+    the deadline rather than the turn boundary. Bind any of them with
+    ``functools.partial``.
     """
     samples = 0
     mid_turn_sent = False
@@ -229,7 +248,7 @@ async def gemini_live_handler(
                 setups.append(setup)
             streaming = _streams(setup)
             await _send(websocket, [json.dumps({"setupComplete": {}}), _content({})])
-            await _send(websocket, _resumption(setup, handles))
+            await _send(websocket, _resumption(setup, handles, offer=offer_handles))
             continue
         realtime = data.get("realtimeInput")
         if not isinstance(realtime, dict):
@@ -242,7 +261,9 @@ async def gemini_live_handler(
                 await _send(websocket, vad.feed(pcm))
                 if go_away_after_turns is not None and vad.turns >= go_away_after_turns:
                     go_away_after_turns = None
-                    await _send(websocket, [json.dumps({"goAway": {"timeLeft": "50s"}})])
+                    await _send(
+                        websocket, [json.dumps({"goAway": {"timeLeft": go_away_time_left}})]
+                    )
             elif not mid_turn_sent:
                 mid_turn_sent = True
                 await _send(websocket, turn_frames("gemini live mock", trailing_empties=2))

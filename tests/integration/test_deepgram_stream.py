@@ -13,15 +13,26 @@ behind them.
 from __future__ import annotations
 
 import asyncio
+import json
+from collections.abc import AsyncIterator
 from http import HTTPStatus
 from itertools import pairwise
+from typing import cast
 from urllib.parse import parse_qs, urlparse
 
 import pytest
 from websockets.asyncio.server import Server, ServerConnection, serve
+from websockets.exceptions import InvalidStatus
 from websockets.http11 import Request, Response
 
-from loreline.models import Glossary, ProviderConfig, ProviderKind, TranscriptEvent
+from loreline.models import (
+    GAP_SOURCE,
+    Glossary,
+    ProviderConfig,
+    ProviderKind,
+    TranscriptEvent,
+)
+from loreline.stt.backends import deepgram as deepgram_module
 from loreline.stt.backends.deepgram import DeepgramBackend
 from loreline.stt.streaming import StreamConfig, StreamUnsupportedError, TranscriptStream
 from mocks.deepgram_ws import deepgram_handler
@@ -50,8 +61,14 @@ async def _drive(
     script: list[tuple[bytes, int]],
     *,
     start: float = 100.0,
+    settle: float = 0.0,
 ) -> list[TranscriptEvent]:
-    """Feed a script of (frame, count) through the streaming path."""
+    """Feed a script of (frame, count) through the streaming path.
+
+    ``settle`` pauses between the script's blocks, which is where a reconnect
+    fits: a feed that never yields long enough for one would be testing the
+    queue's drop policy instead.
+    """
     events: list[TranscriptEvent] = []
 
     async def publish(event: TranscriptEvent) -> None:
@@ -61,7 +78,12 @@ async def _drive(
         backend,
         publish=publish,
         capture_rate=_CAPTURE_RATE,
-        config=StreamConfig(session_id="s1", interim_interval_s=0.0, final_wait_s=1.0),
+        config=StreamConfig(
+            session_id="s1",
+            interim_interval_s=0.0,
+            final_wait_s=1.0,
+            reconnect_backoff_s=0.0,
+        ),
     )
     task = asyncio.create_task(stream.run())
     ts = start
@@ -70,11 +92,40 @@ async def _drive(
             stream.feed(frame, ts, is_speech=frame is _LOUD)
             ts += 0.02
             await asyncio.sleep(0)
+        if settle:
+            await asyncio.sleep(settle)
     await asyncio.sleep(0.2)
     stream.stop()
     await asyncio.wait_for(task, 10)
     await backend.aclose()
     return events
+
+
+class _Hangup:
+    """A server socket that stops feeding its handler after ``limit`` messages.
+
+    The handler then returns, ``serve`` closes the connection, and the client
+    sees a socket that died mid-session - which is the only way to drive a
+    reconnect against a mock that would otherwise serve forever.
+    """
+
+    def __init__(self, ws: ServerConnection, limit: int) -> None:
+        self._ws = ws
+        self._limit = limit
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._ws, name)
+
+    def __aiter__(self) -> AsyncIterator[str | bytes]:
+        return self._limited()
+
+    async def _limited(self) -> AsyncIterator[str | bytes]:
+        seen = 0
+        async for message in self._ws:
+            yield message
+            seen += 1
+            if seen >= self._limit:
+                return
 
 
 async def _stream_events(script: list[tuple[bytes, int]]) -> list[TranscriptEvent]:
@@ -197,3 +248,144 @@ async def test_a_refused_request_is_not_retried() -> None:
         backend = DeepgramBackend(_config(_port(server)), model="flux-general-en", api_key="x")
         with pytest.raises(StreamUnsupportedError, match="model not found"):
             await backend.open_stream(None)
+
+
+async def test_a_rejected_optional_parameter_is_dropped_and_the_socket_retried() -> None:
+    """A 400 over one parameter must not cost the whole session.
+
+    Read off the live endpoint: ``keyterm`` on a nova-2 request answers 400
+    ``INVALID_QUERY_PARAMETER``, "`keyterm` is only supported for Nova-3 and
+    Flux. Please use `keywords` instead." Grading every 400 as permanent took
+    the session off the streaming path over a glossary field - and off the
+    utterance path with it, because both shapes build one query string.
+    """
+    attempts: list[str] = []
+
+    def gate(connection: ServerConnection, request: Request) -> Response | None:
+        attempts.append(request.path)
+        if "keyterm=" not in request.path:
+            return None
+        return connection.respond(
+            HTTPStatus.BAD_REQUEST,
+            json.dumps(
+                {
+                    "err_code": "INVALID_QUERY_PARAMETER",
+                    "err_msg": "`keyterm` is only supported for Nova-3 and Flux. "
+                    "Please use `keywords` instead.",
+                    "request_id": "01a07d2c",
+                }
+            ),
+        )
+
+    async with serve(deepgram_handler, "127.0.0.1", 0, process_request=gate) as server:
+        backend = DeepgramBackend(_config(_port(server)), model="nova-2", api_key="x")
+        await backend.open_stream(Glossary(campaign_id="c", terms=["Drakonia"]))
+        # ...and the utterance shape stops sending it too, which is the half
+        # that used to fail for exactly the same reason.
+        prepared = backend.prepare(Glossary(campaign_id="c", terms=["Drakonia"]))
+        await backend.aclose()
+
+    assert len(attempts) == 2
+    assert "keyterm=Drakonia" in attempts[0]
+    assert "keyterm=" not in attempts[1]
+    assert "keyterm=" not in prepared
+    assert "model=nova-2" in attempts[1]  # only the one parameter was given up
+
+
+async def test_an_unreadable_four_hundred_is_a_retry_rather_than_a_refusal() -> None:
+    """ "Invalid query string." names neither a model nor a parameter.
+
+    Deepgram answers that to a malformed value, and it is the answer that must
+    stay an ordinary failed attempt: nothing about it says this model cannot be
+    streamed, so the reconnect budget is the right thing to spend on it.
+    """
+
+    def reject(connection: ServerConnection, request: Request) -> Response:
+        _ = request
+        return connection.respond(
+            HTTPStatus.BAD_REQUEST,
+            json.dumps({"err_code": "Bad Request", "err_msg": "Invalid query string."}),
+        )
+
+    async with serve(deepgram_handler, "127.0.0.1", 0, process_request=reject) as server:
+        backend = DeepgramBackend(_config(_port(server)), model="nova-3", api_key="x")
+        # The websockets exception itself, re-raised untouched, which is what
+        # "stays the exception it was" means: the stream counts it as one
+        # failed attempt like any other and tries again.
+        with pytest.raises(InvalidStatus) as caught:
+            await backend.open_stream(None)
+        assert not isinstance(caught.value, StreamUnsupportedError)
+        await backend.aclose()
+
+
+async def test_an_idle_socket_is_kept_alive_and_a_busy_one_is_not(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Deepgram drops a live socket that has heard nothing for ten seconds.
+
+    Audio counts, so the rule is only ever reached in the windows where no
+    frame is in flight: the wait for the last finals, and a capture device that
+    stalls. A KeepAlive sent while audio is still going out would be noise, so
+    the idle test is what this pins, not the timer.
+    """
+    monkeypatch.setattr(deepgram_module, "_KEEPALIVE_IDLE_S", 0.2)
+    control: list[str] = []
+    kept = asyncio.Event()
+
+    async def watching(ws: ServerConnection) -> None:
+        async for message in ws:
+            if isinstance(message, bytes):
+                continue
+            control.append(str(json.loads(message).get("type")))
+            if control[-1] == "KeepAlive":
+                kept.set()
+
+    async with serve(watching, "127.0.0.1", 0) as server:
+        backend = DeepgramBackend(_config(_port(server)), model="nova-3", api_key="x")
+        await backend.open_stream(None)
+        for _ in range(10):  # half a second of audio, well past the idle window
+            await backend.send_audio(_LOUD)
+            await asyncio.sleep(0.05)
+        assert control == []  # nothing idle about a socket being written to
+        await asyncio.wait_for(kept.wait(), 5)
+        await backend.aclose()
+
+    assert "KeepAlive" in control
+
+
+async def test_a_reconnect_starts_a_connection_whose_books_are_empty() -> None:
+    """Nothing of the dead connection may reach the one that replaces it.
+
+    Deepgram counts its offsets from the first byte of each connection and
+    restarts its speaker numbering with it, so the turn state, the settled
+    segments and the keepalive task are all per connection. The connection
+    counter in the turn id is what keeps generation 2's first turn from
+    replacing generation 1's rather than following it.
+    """
+    connections = 0
+
+    async def dropping(ws: ServerConnection) -> None:
+        nonlocal connections
+        connections += 1
+        if connections == 1:
+            await deepgram_handler(cast("ServerConnection", _Hangup(ws, 40)))
+            return
+        await deepgram_handler(ws)
+
+    async with serve(dropping, "127.0.0.1", 0) as server:
+        backend = DeepgramBackend(_config(_port(server)), model="nova-3", api_key="secret")
+        events = await _drive(
+            backend, [(_LOUD, 60), (_QUIET, 40), (_LOUD, 60), (_QUIET, 40)], settle=0.2
+        )
+
+    assert connections == 2
+    finals = [e for e in events if e.is_final and e.source == "dg"]
+    assert finals
+    assert any(str(e.turn_id).startswith("dg:2:") for e in finals)
+    # A turn that opened on generation 2 is dated from generation 2's own t0,
+    # so its offsets start over with the connection rather than continuing.
+    second = next(e for e in finals if str(e.turn_id).startswith("dg:2:"))
+    assert second.words
+    assert second.start_ts <= second.words[0].start
+    # The gap the reconnect left is a row in the transcript, not a log line.
+    assert [e.source for e in events if e.source == GAP_SOURCE] == [GAP_SOURCE]

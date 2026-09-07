@@ -24,11 +24,20 @@ Two of them are the reason this file exists, and neither is in the docs:
 from __future__ import annotations
 
 import json
+from collections.abc import AsyncIterator
 
+from loreline.models import ProviderConfig, ProviderKind
 from loreline.stt.backends.deepgram import (
+    DeepgramBackend,
     _TurnState,  # pyright: ignore[reportPrivateUsage]
 )
-from loreline.stt.streaming import TurnFinal, TurnPartial, TurnSignal, TurnStarted
+from loreline.stt.streaming import (
+    StreamSignal,
+    TurnFinal,
+    TurnPartial,
+    TurnSignal,
+    TurnStarted,
+)
 
 _PARIS_INTERIM = '{"type":"Results","channel_index":[0,1],"duration":1.0,"start":0.0,"is_final":false,"speech_final":false,"channel":{"alternatives":[{"transcript":"Paris at a moment","confidence":0.97998047,"words":[{"word":"paris","start":0.0,"end":0.39999998,"confidence":0.97265625,"speaker":0,"punctuated_word":"Paris"},{"word":"at","start":0.39999998,"end":0.64,"confidence":0.89990234,"speaker":0,"punctuated_word":"at"},{"word":"a","start":0.64,"end":0.79999995,"confidence":0.9941406,"speaker":0,"punctuated_word":"a"},{"word":"moment","start":0.79999995,"end":0.96,"confidence":0.97998047,"speaker":0,"punctuated_word":"moment"}]}]},"metadata":{"request_id":"01a07aad-cb1e-78c3-80ef-181d08b56576","model_info":{"name":"general-nova-3","version":"2025-04-17.21547","arch":"nova-3"},"model_uuid":"40bd3654-e622-47c4-a111-63a61b23bfe8","diarize_info":{"model_uuid":"6ff6f59c-c349-443b-aba1-352de7d75943","arch":"v1"}},"from_finalize":false}'
 _PARIS_SPEECH_FINAL = '{"type":"Results","channel_index":[0,1],"duration":2.3,"start":0.0,"is_final":true,"speech_final":true,"channel":{"alternatives":[{"transcript":"Paris at a moment\'s notice.","confidence":0.9902344,"words":[{"word":"paris","start":0.0,"end":0.39999998,"confidence":0.9223633,"speaker":0,"punctuated_word":"Paris"},{"word":"at","start":0.39999998,"end":0.71999997,"confidence":0.9902344,"speaker":0,"punctuated_word":"at"},{"word":"a","start":0.71999997,"end":0.79999995,"confidence":0.99902344,"speaker":0,"punctuated_word":"a"},{"word":"moment\'s","start":0.79999995,"end":1.1999999,"confidence":0.9536133,"speaker":0,"punctuated_word":"moment\'s"},{"word":"notice","start":1.1999999,"end":1.5999999,"confidence":0.9921875,"speaker":0,"punctuated_word":"notice."}]}]},"metadata":{"request_id":"01a07aad-cb1e-78c3-80ef-181d08b56576","model_info":{"name":"general-nova-3","version":"2025-04-17.21547","arch":"nova-3"},"model_uuid":"40bd3654-e622-47c4-a111-63a61b23bfe8","diarize_info":{"model_uuid":"6ff6f59c-c349-443b-aba1-352de7d75943","arch":"v1"}},"from_finalize":false}'
@@ -42,6 +51,20 @@ _NEEDS_INTERIM = '{"type":"Results","channel_index":[0,1],"duration":1.0,"start"
 _NEEDS_SPEECH_FINAL = '{"type":"Results","channel_index":[0,1],"duration":2.6800013,"start":14.36,"is_final":true,"speech_final":true,"channel":{"alternatives":[{"transcript":"and had plenty of money for my needs.","confidence":1.0,"words":[{"word":"and","start":14.36,"end":14.599999,"confidence":0.9819336,"speaker":0,"punctuated_word":"and"},{"word":"had","start":14.599999,"end":14.839999,"confidence":1.0,"speaker":0,"punctuated_word":"had"},{"word":"plenty","start":14.839999,"end":15.24,"confidence":1.0,"speaker":0,"punctuated_word":"plenty"},{"word":"of","start":15.24,"end":15.4,"confidence":1.0,"speaker":0,"punctuated_word":"of"},{"word":"money","start":15.4,"end":15.639999,"confidence":1.0,"speaker":0,"punctuated_word":"money"},{"word":"for","start":15.639999,"end":15.879999,"confidence":0.99902344,"speaker":0,"punctuated_word":"for"},{"word":"my","start":15.879999,"end":16.039999,"confidence":1.0,"speaker":0,"punctuated_word":"my"},{"word":"needs","start":16.039999,"end":16.279999,"confidence":0.9904785,"speaker":0,"punctuated_word":"needs."}]}]},"metadata":{"request_id":"01a07aad-cb1e-78c3-80ef-181d08b56576","model_info":{"name":"general-nova-3","version":"2025-04-17.21547","arch":"nova-3"},"model_uuid":"40bd3654-e622-47c4-a111-63a61b23bfe8","diarize_info":{"model_uuid":"6ff6f59c-c349-443b-aba1-352de7d75943","arch":"v1"}},"from_finalize":false}'
 _DYING_INTERIM = '{"type":"Results","channel_index":[0,1],"duration":1.0,"start":57.52,"is_final":false,"speech_final":false,"channel":{"alternatives":[{"transcript":"Dying,","confidence":0.8671875,"words":[{"word":"dying","start":57.920002,"end":58.4,"confidence":0.8671875,"speaker":0,"punctuated_word":"Dying,"}]}]},"metadata":{"request_id":"01a07aad-cb1e-78c3-80ef-181d08b56576","model_info":{"name":"general-nova-3","version":"2025-04-17.21547","arch":"nova-3"},"model_uuid":"40bd3654-e622-47c4-a111-63a61b23bfe8","diarize_info":{"model_uuid":"6ff6f59c-c349-443b-aba1-352de7d75943","arch":"v1"}},"from_finalize":false}'
 _DYING_FROM_FINALIZE = '{"type":"Results","channel_index":[0,1],"duration":2.459999,"start":57.52,"is_final":true,"speech_final":true,"channel":{"alternatives":[{"transcript":"Dying, come at once, s","confidence":0.8691406,"words":[{"word":"dying","start":58.08,"end":58.72,"confidence":0.8466797,"speaker":0,"punctuated_word":"Dying,"},{"word":"come","start":58.72,"end":58.96,"confidence":0.99121094,"speaker":0,"punctuated_word":"come"},{"word":"at","start":58.96,"end":59.12,"confidence":0.99902344,"speaker":0,"punctuated_word":"at"},{"word":"once","start":59.12,"end":59.6,"confidence":0.8691406,"speaker":0,"punctuated_word":"once,"},{"word":"s","start":59.6,"end":59.84,"confidence":0.36938477,"speaker":0,"punctuated_word":"s"}]}]},"metadata":{"request_id":"01a07aad-cb1e-78c3-80ef-181d08b56576","model_info":{"name":"general-nova-3","version":"2025-04-17.21547","arch":"nova-3"},"model_uuid":"40bd3654-e622-47c4-a111-63a61b23bfe8","diarize_info":{"model_uuid":"6ff6f59c-c349-443b-aba1-352de7d75943","arch":"v1"}},"from_finalize":true}'
+
+
+class _Recorded:
+    """The socket ``signals()`` reads, replaying frames with no network."""
+
+    def __init__(self, frames: list[str]) -> None:
+        self._frames = frames
+
+    def __aiter__(self) -> AsyncIterator[str]:
+        return self._iter()
+
+    async def _iter(self) -> AsyncIterator[str]:
+        for frame in self._frames:
+            yield frame
 
 
 def _apply(frames: list[str]) -> list[TurnSignal]:
@@ -211,15 +234,82 @@ def test_an_error_frame_stops_the_connection() -> None:
     assert state.error == "DATA-0000"
 
 
+def _emptied(frame: str, *, is_final: bool, speech_final: bool = False) -> str:
+    """One recorded frame with its transcript and words taken out.
+
+    Which is a real frame: Deepgram settles a near-silent segment with an empty
+    transcript, one per turn, and the run above produced them alongside every
+    one of the frames quoted here.
+    """
+    return json.dumps(
+        json.loads(frame)
+        | {
+            "is_final": is_final,
+            "speech_final": speech_final,
+            "channel": {"alternatives": [{"transcript": "", "words": []}]},
+        }
+    )
+
+
 def test_an_empty_lead_in_settles_nothing_and_opens_no_turn() -> None:
     """A settled segment with no transcript is the near-silent lead-in.
 
     It carries an offset and no words, and it must not open a turn: one opened
     there would have to be closed by something, and nothing would.
     """
-    lead_in = json.dumps(
-        json.loads(_PARIS_INTERIM)
-        | {"is_final": True, "channel": {"alternatives": [{"transcript": "", "words": []}]}}
-    )
+    assert _apply([_emptied(_PARIS_INTERIM, is_final=True)]) == []
 
-    assert _apply([lead_in]) == []
+
+def test_an_empty_settle_inside_a_turn_does_not_erase_what_was_said() -> None:
+    """The same empty segment, with a turn already open, is the dangerous one.
+
+    An ``is_final`` settles the segment it names, and one with no transcript
+    settles nothing at all - so the interim in hand is still the newest thing
+    this turn has said. Spending it there published ``TurnFinal(text="")`` over
+    a turn that had words on screen, which is the opposite of Deepgram's own
+    advice for a turn that ends without a settled segment ("process the last
+    received transcript").
+    """
+    signals = _apply(
+        [
+            _NAME_INTERIM,
+            _emptied(_NAME_INTERIM, is_final=True),
+            _emptied(_NAME_INTERIM, is_final=True, speech_final=True),
+        ]
+    )
+    finals = _finals(signals)
+
+    assert len(finals) == 1
+    assert finals[0].text == "My name,"
+
+
+def test_a_frame_that_is_not_json_is_skipped_rather_than_raised() -> None:
+    """One malformed frame used to end a live connection out of the read loop."""
+    assert _apply(["<html>502 Bad Gateway</html>", _PARIS_INTERIM, _PARIS_SPEECH_FINAL]) != []
+
+
+async def test_a_frame_with_no_turn_in_it_still_says_the_socket_is_alive() -> None:
+    """``Metadata`` and the lead-in are what a connection between turns sends.
+
+    The stream's liveness watchdog counts signals it was told about, so a
+    connector that consumed those silently left a merely quiet connection
+    looking dead once the local VAD went quiet.
+    """
+    backend = DeepgramBackend(
+        ProviderConfig(id="dg", name="Deepgram", kind=ProviderKind.DEEPGRAM), api_key="secret"
+    )
+    backend._stream_ws = _Recorded(  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
+        [
+            json.dumps({"type": "Metadata", "duration": 1.0}),
+            _emptied(_PARIS_INTERIM, is_final=True),
+            _PARIS_INTERIM,
+        ]
+    )
+    signals: list[StreamSignal] = [signal async for signal in backend.signals()]
+
+    assert [type(s).__name__ for s in signals] == [
+        "StreamAlive",
+        "StreamAlive",
+        "TurnStarted",
+        "TurnPartial",
+    ]

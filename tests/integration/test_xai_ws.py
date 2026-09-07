@@ -17,12 +17,20 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import AsyncIterator, Awaitable, Callable
 from itertools import pairwise
+from typing import cast
 
 from websockets.asyncio.server import ServerConnection, serve
 
 from loreline.audio.chunker import Utterance
-from loreline.models import Glossary, ProviderConfig, ProviderKind, TranscriptEvent
+from loreline.models import (
+    GAP_SOURCE,
+    Glossary,
+    ProviderConfig,
+    ProviderKind,
+    TranscriptEvent,
+)
 from loreline.stt.backends._ws import as_dict, get_str
 from loreline.stt.backends.xai import XaiBackend
 from loreline.stt.base import transcribe_capabilities
@@ -256,10 +264,19 @@ _QUIET = b"\x01\x00" * 320
 
 
 async def _stream_events(
-    script: list[tuple[bytes, int]], *, start: float = 100.0
+    script: list[tuple[bytes, int]],
+    *,
+    start: float = 100.0,
+    handler: Callable[[ServerConnection], Awaitable[None]] = xai_handler,
+    settle: float = 0.0,
 ) -> list[TranscriptEvent]:
-    """Run the streaming path over a script of (frame, count) against the mock."""
-    async with serve(xai_handler, "127.0.0.1", 0) as server:
+    """Run the streaming path over a script of (frame, count) against the mock.
+
+    ``settle`` pauses between the script's blocks, which is where a reconnect
+    fits: a feed that never yields long enough for one would be testing the
+    queue's drop policy instead.
+    """
+    async with serve(handler, "127.0.0.1", 0) as server:
         port = server.sockets[0].getsockname()[1]
         backend = _backend(port)
         events: list[TranscriptEvent] = []
@@ -271,7 +288,12 @@ async def _stream_events(
             backend,
             publish=publish,
             capture_rate=16000,
-            config=StreamConfig(session_id="s1", interim_interval_s=0.0, final_wait_s=1.0),
+            config=StreamConfig(
+                session_id="s1",
+                interim_interval_s=0.0,
+                final_wait_s=1.0,
+                reconnect_backoff_s=0.0,
+            ),
         )
         task = asyncio.create_task(stream.run())
         ts = start
@@ -280,6 +302,8 @@ async def _stream_events(
                 stream.feed(frame, ts, is_speech=frame is _LOUD)
                 ts += 0.02
                 await asyncio.sleep(0)
+            if settle:
+                await asyncio.sleep(settle)
         await asyncio.sleep(0.2)
         stream.stop()
         await asyncio.wait_for(task, 10)
@@ -311,7 +335,11 @@ async def test_streaming_publishes_interims_then_a_final_per_vendor_turn() -> No
     assert first.end_ts > first.start_ts
     # Inline diarization comes off the same words[] the batch transport sends.
     assert {w.speaker for w in first.words} == {"Speaker 0", "Speaker 1"}
-    assert first.words[0].start == first.start_ts
+    # The settled words are the vendor's refined ones, which sit a little later
+    # than where the turn was opened: a turn's start does not move once the row
+    # exists, so the words may end up inside it rather than on it. See the
+    # mock's ``_SETTLE_SHIFT_MS`` and the connector's ``_partial``.
+    assert first.words[0].start >= first.start_ts
 
 
 async def test_streaming_replaces_a_turn_rather_than_appending_to_it() -> None:
@@ -401,3 +429,66 @@ async def test_finalize_flushes_and_audio_done_ends_the_socket() -> None:
         await asyncio.wait_for(ended.wait(), 5)
 
     assert control == ["finalize", "audio.done"]
+
+
+class _Hangup:
+    """A server socket that stops feeding its handler after ``limit`` messages.
+
+    The handler then returns, ``serve`` closes the connection, and the client
+    sees a socket that died mid-session - which is the only way to drive a
+    reconnect against a mock that would otherwise serve forever.
+    """
+
+    def __init__(self, ws: ServerConnection, limit: int) -> None:
+        self._ws = ws
+        self._limit = limit
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._ws, name)
+
+    def __aiter__(self) -> AsyncIterator[str | bytes]:
+        return self._limited()
+
+    async def _limited(self) -> AsyncIterator[str | bytes]:
+        seen = 0
+        async for message in self._ws:
+            yield message
+            seen += 1
+            if seen >= self._limit:
+                return
+
+
+async def test_a_reconnect_starts_a_connection_whose_books_are_empty() -> None:
+    """Nothing of the dead connection may reach the one that replaces it.
+
+    This connector reads every event against what it has already published on
+    *this* connection - the settled text it strips off the front, and the
+    offset before which a word belongs to a turn that is over. Both are stated
+    from the first byte of each connection, so carrying either across a
+    reconnect would strip the new connection's first turn against the old
+    connection's last.
+    """
+    connections = 0
+
+    async def dropping(ws: ServerConnection) -> None:
+        nonlocal connections
+        connections += 1
+        if connections == 1:
+            await xai_handler(cast("ServerConnection", _Hangup(ws, 40)))
+            return
+        await xai_handler(ws)
+
+    events = await _stream_events(
+        [(_LOUD, 60), (_QUIET, 30), (_LOUD, 60), (_QUIET, 30)], handler=dropping, settle=0.2
+    )
+
+    assert connections == 2
+    finals = [e for e in events if e.is_final and e.source == "xai-1"]
+    assert finals
+    # Generation 2's first turn opens at its own connection's zero, so its
+    # handle is a small offset behind a connection counter that moved.
+    assert any(str(e.turn_id).startswith("xai-1:2:") for e in finals)
+    second = next(e for e in finals if str(e.turn_id).startswith("xai-1:2:"))
+    assert second.text  # nothing was stripped against the dead connection's text
+    assert second.words
+    assert [e.source for e in events if e.source == GAP_SOURCE] == [GAP_SOURCE]

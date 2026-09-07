@@ -24,7 +24,13 @@ from websockets.asyncio.client import ClientConnection
 
 from loreline.models import ProviderConfig, ProviderKind
 from loreline.stt.backends.xai import XaiBackend
-from loreline.stt.streaming import TurnFinal, TurnPartial, TurnSignal, TurnStarted
+from loreline.stt.streaming import (
+    StreamAlive,
+    StreamSignal,
+    TurnFinal,
+    TurnPartial,
+    TurnStarted,
+)
 
 
 class _Frames:
@@ -67,7 +73,7 @@ def _partial(
     }
 
 
-async def _signals(frames: list[dict[str, object]]) -> list[TurnSignal]:
+async def _signals(frames: list[dict[str, object]]) -> list[StreamSignal]:
     """What one connection's events become, with no socket and no network."""
     backend = XaiBackend(
         ProviderConfig(id="xai-1", name="xAI", kind=ProviderKind.XAI, language="en"),
@@ -126,21 +132,70 @@ async def test_speech_final_closes_the_turn_with_its_words_and_span() -> None:
     assert final.text == "the goblin flees"
     # Offsets are documented as measured from the beginning of the audio
     # stream, which is what TranscriptStream maps onto the capture clock, so
-    # the connector forwards them untouched.
-    assert final.at == 1.0
+    # the connector forwards them untouched...
     assert final.to == 2.4
+    # ...but a final states no `at` at all, exactly as the Deepgram connector
+    # deliberately does not. The turn already has a start, from the
+    # TurnStarted its first partial carried, and restating a refined one here
+    # would move a published row's timestamps for nothing.
+    assert final.at is None
     assert [w.text for w in final.words] == ["the", "goblin", "flees"]
     assert [w.start for w in final.words] == [1.0, 1.3, 1.9]
     assert {w.speaker for w in final.words} == {"Speaker 0", "Speaker 1"}
+
+
+async def test_a_turn_is_announced_once_and_its_start_never_moves() -> None:
+    """The vendor revises where a turn began; the row it is written under may not.
+
+    Three partials of one turn, each naming a later first word than the last,
+    which is what a settling endpointer does (AssemblyAI was measured moving a
+    turn's start by a second, and Deepgram's docs warn it may). Only the first
+    of them announces the turn, so what the stream opens it at is where the
+    vendor first said it began.
+    """
+    signals = await _signals(
+        [
+            _partial("the", [_word("the", 1.0, 1.3, 0)]),
+            _partial("the goblin", [_word("the", 1.2, 1.5, 0), _word("goblin", 1.5, 1.9, 0)]),
+            _partial(
+                "the goblin flees",
+                [
+                    _word("the", 1.4, 1.7, 0),
+                    _word("goblin", 1.7, 2.1, 0),
+                    _word("flees", 2.1, 2.4, 1),
+                ],
+                speech_final=True,
+            ),
+        ]
+    )
+
+    starts = [s for s in signals if isinstance(s, TurnStarted)]
+    assert [s.at for s in starts] == [1.0]  # once, at the first offset stated
+    assert isinstance(signals[-1], TurnFinal)
+
+
+async def test_the_next_turn_is_announced_again() -> None:
+    """Announced once *per turn*, not once per connection."""
+    second = [_word("it", 3.0, 3.2, 0)]
+    signals = await _signals(
+        [
+            _partial("the goblin flees", _MORE, speech_final=True),
+            _partial("it", second),
+        ]
+    )
+
+    assert [s.at for s in signals if isinstance(s, TurnStarted)] == [1.0, 3.0]
 
 
 async def test_a_turn_with_no_words_falls_back_to_the_events_own_span() -> None:
     """Nothing here invents a timestamp; the start/duration pair is the vendor's."""
     signals = await _signals([_partial("mhm", [], speech_final=True, start=4.0, duration=0.6)])
 
-    final = signals[-1]
+    started, final = signals[0], signals[-1]
+    assert isinstance(started, TurnStarted)
     assert isinstance(final, TurnFinal)
-    assert (final.at, final.to) == (4.0, 4.6)
+    assert started.at == 4.0
+    assert (final.at, final.to) == (None, 4.6)
 
 
 async def test_transcript_done_ends_the_stream_without_publishing_the_session() -> None:
@@ -174,17 +229,22 @@ async def test_an_error_frame_ends_the_connection() -> None:
     assert signals == []
 
 
-async def test_the_greeting_and_anything_unknown_translate_to_nothing() -> None:
-    """Consumed, not translated: the watchdog counts messages, not signals."""
+async def test_the_greeting_and_anything_unknown_say_the_socket_is_alive() -> None:
+    """Not turns, and not nothing either.
+
+    The stream's liveness watchdog counts signals it was told about, so a
+    greeting swallowed here is a connection that has answered and looks quiet.
+    """
     signals = await _signals([{"type": "transcript.created"}, {"type": "something.new"}])
 
-    assert signals == []
+    assert signals == [StreamAlive(), StreamAlive()]
 
 
 async def test_an_empty_interim_is_not_a_turn() -> None:
+    """...but it is still a frame, so it is still proof of a live socket."""
     signals = await _signals([_partial("", [])])
 
-    assert signals == []
+    assert signals == [StreamAlive()]
 
 
 # -- the two readings of a cumulative `text` ------------------------------
@@ -230,8 +290,10 @@ async def test_a_second_turn_is_itself_when_text_accumulates_over_the_stream() -
         ["the", "goblin", "flees"],
         ["it", "escapes"],
     ]
-    # ...and the second turn still starts where its own first word does.
-    assert finals[1].at == 3.0
+    # ...and the second turn still starts where its own first word does, which
+    # is what its own TurnStarted says: the final states no start at all.
+    starts = [s for s in signals if isinstance(s, TurnStarted)]
+    assert [s.at for s in starts] == [1.0, 3.0]
 
 
 async def test_a_turn_repeated_word_for_word_survives_as_itself() -> None:

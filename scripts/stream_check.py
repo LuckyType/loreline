@@ -47,6 +47,7 @@ import sys
 import time
 import urllib.request
 from collections.abc import AsyncIterator
+from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TextIO, cast
@@ -54,7 +55,12 @@ from typing import TextIO, cast
 from loreline.models import ProviderConfig, ProviderKind, TranscriptEvent
 from loreline.secrets import SecretStore
 from loreline.stt.registry import create_backend
-from loreline.stt.streaming import StreamConfig, TranscriptStream, is_streaming
+from loreline.stt.streaming import (
+    StreamConfig,
+    StreamingConnector,
+    TranscriptStream,
+    is_streaming,
+)
 
 # A LibriVox recording in the public domain, picked through the metadata API so
 # only the item id has to be right. Any clear single-speaker reading does; the
@@ -334,14 +340,20 @@ class _Tee:
             yield raw
 
 
-def _record_frames(backend: object, path: Path) -> None:
-    """Patch the ``connect`` this connector's module imported, to tee its frames."""
+def _record_frames(backend: object, path: Path, stack: AsyncExitStack) -> None:
+    """Patch the ``connect`` this connector's module imported, to tee its frames.
+
+    The file is opened on the caller's exit stack rather than here, so a run
+    that ends any way at all - a vendor refusing the model, a keyboard
+    interrupt - still flushes and closes what was recorded instead of leaving
+    it to the interpreter's exit.
+    """
     module = sys.modules[type(backend).__module__]
     original = getattr(module, "connect", None)
     if original is None:
         msg = f"{module.__name__} does not open its socket through `websockets.connect`"
         raise SystemExit(msg)
-    handle = path.open("w", encoding="utf-8")
+    handle = stack.enter_context(path.open("w", encoding="utf-8"))
 
     async def connect(*args: object, **kwargs: object) -> _Tee:
         return _Tee(await original(*args, **kwargs), handle)
@@ -353,15 +365,30 @@ def _record_frames(backend: object, path: Path) -> None:
 
 
 async def _run(args: argparse.Namespace) -> int:
-    pcm = _clip(args.seconds, args.cache, args.clip, args.item)
-    config = _provider(args.db, args.kind, args.auth_ref, args.language)
-    backend = create_backend(config, SecretStore(args.secrets), args.model)
-    if not is_streaming(backend):
-        print(f"{config.kind.value}/{args.model} has no streaming shape yet")
-        return 1
-    if args.dump_frames is not None:
-        _record_frames(backend, args.dump_frames)
+    """Feed the clip through one provider's streaming path and report.
 
+    Everything opened here is closed here, on every path out: the backend owns
+    a socket and an HTTP client whichever shape it turned out to have, and the
+    frame dump is a file. An early return that skipped either used to leave the
+    connector's session open until the interpreter exited.
+    """
+    status = 1
+    async with AsyncExitStack() as stack:
+        pcm = _clip(args.seconds, args.cache, args.clip, args.item)
+        config = _provider(args.db, args.kind, args.auth_ref, args.language)
+        backend = create_backend(config, SecretStore(args.secrets), args.model)
+        stack.push_async_callback(backend.aclose)
+        if not is_streaming(backend):
+            print(f"{config.kind.value}/{args.model} has no streaming shape yet")
+        else:
+            if args.dump_frames is not None:
+                _record_frames(backend, args.dump_frames, stack)
+            status = await _stream(args, cast("StreamingConnector", backend), pcm)
+    return status
+
+
+async def _stream(args: argparse.Namespace, backend: StreamingConnector, pcm: bytes) -> int:
+    """Drive one streaming connector at wall clock and report what it did."""
     recorder = _Recorder()
     stream = TranscriptStream(
         backend,
@@ -386,8 +413,6 @@ async def _run(args: argparse.Namespace) -> int:
         await asyncio.sleep(max(0.0, started + (index + 1) * _FRAME_MS / 1000 - now))
     stream.stop()
     outcome = await task
-    await backend.aclose()
-
     _report(recorder, outcome, started, speech)
     return 0
 

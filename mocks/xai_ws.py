@@ -33,6 +33,21 @@ carry offsets from the start of the stream, which is the reading of the docs
 turns, is covered by ``tests/unit/test_xai_stream_frames.py`` instead, since one
 server cannot be both at once.
 
+A settled turn restates its words a little later than its interims did (see
+``_SETTLE_SHIFT_MS``). That is the one behaviour here copied from a *different*
+vendor rather than from x.ai's documentation: AssemblyAI was measured revising
+a turn's start by a second when it settled, Deepgram's own docs warn it may, and
+a connector that let a revised start reach the stream wrote the final as a
+second row beside the interims it was meant to replace. Whether x.ai does this
+is unknown; a connector that survives it either way costs nothing.
+
+UNVERIFIED, like the connector it serves: **no frame in this repository was
+ever recorded from api.x.ai**, here or in ``tests/unit/test_xai_stream_frames.py``,
+because this environment has never had an x.ai key. Everything below is built
+from the published event schema. A maintainer with a key should check it before
+trusting it, starting with which of the two readings of a cumulative ``text``
+is real.
+
 Deterministic throughout, so tests can assert wiring without the real API.
 
 Docs: https://docs.x.ai/developers/model-capabilities/audio/speech-to-text
@@ -63,6 +78,12 @@ _CHUNK_MS = 3000.0
 # clear of the near-silent filler a test sends between turns, and well under a
 # normal speaking level.
 _SPEECH_LEVEL = 500
+# How far a turn's word offsets move when it settles. See the module docstring:
+# the point is that ``words[0].start`` is not the same number on the interims
+# and on the ``speech_final`` event, so a connector that forwarded the settled
+# one as the turn's start would be forwarding a start that moved. Well under
+# the endpointing window, so it can never reorder two turns.
+_SETTLE_SHIFT_MS = 120.0
 
 _WORDS = ("grok", "hears", "the", "party", "argue", "about", "the", "map")
 
@@ -195,6 +216,7 @@ class _Stream:
             return []
         events: list[dict[str, object]] = []
         if self._words:
+            self._refine()
             event = self._partial(is_final=True, speech_final=True)
             self._settled.append(str(event["text"]))
             events.append(event)
@@ -211,6 +233,20 @@ class _Stream:
             "words": [],
             "duration": round(self._ms / 1000, 3),
         }
+
+    def _refine(self) -> None:
+        """Restate the turn's span a little later, as endpointing settles it.
+
+        The whole turn moves together, so its words stay in order and its text
+        is unchanged: the only thing that differs from the interims is where
+        the turn is said to have begun. See ``_SETTLE_SHIFT_MS``.
+        """
+        shift = _SETTLE_SHIFT_MS / 1000
+        self._start_ms = (self._start_ms or 0.0) + _SETTLE_SHIFT_MS
+        for word in self._words:
+            for edge in ("start", "end"):
+                value = word[edge]
+                word[edge] = round(float(cast("float", value)) + shift, 3)
 
     def _add_word(self) -> None:
         index = len(self._words)

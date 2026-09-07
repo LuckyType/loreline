@@ -86,12 +86,14 @@ from loreline.capability_config import TranscribeCapabilities
 from loreline.logging import get_logger
 from loreline.models import Glossary, Interaction, ProviderConfig, ProviderKind, Word
 from loreline.secrets import SecretStore
-from loreline.stt.backends._ws import as_dict, get_bool, get_float, get_str
+from loreline.stt.backends._ws import as_dict, close_socket, get_bool, get_float, get_str
 from loreline.stt.backends._xai import parse_words, stt_params
 from loreline.stt.base import Connector, Transcription, glossary_terms, secret_for
 from loreline.stt.registry import register
 from loreline.stt.streaming import (
+    StreamAlive,
     StreamingConnector,
+    StreamSignal,
     TurnFinal,
     TurnPartial,
     TurnSignal,
@@ -175,6 +177,12 @@ class XaiBackend(Connector[str], StreamingConnector):
         # words of the next event are read against. See the module docstring.
         self._settled_text = ""
         self._settled_until = 0.0
+        # Whether the open turn has already been announced. This vendor sends
+        # no turn-start event, so the start comes from the first word offset of
+        # the turn's first partial - and it comes from *that* one only, because
+        # later partials revise it and a turn's start must not move. See
+        # :meth:`_partial`.
+        self._turn_open = False
 
     def prepare(self, glossary: Glossary | None) -> str:
         """The socket URL for one utterance, glossary and all."""
@@ -296,12 +304,12 @@ class XaiBackend(Connector[str], StreamingConnector):
         try:
             await _await_ready(ws)
         except BaseException:
-            with contextlib.suppress(Exception):
-                await ws.close()
+            await close_socket(ws)
             raise
         self._stream_ws = ws
         self._settled_text = ""
         self._settled_until = 0.0
+        self._turn_open = False
 
     async def send_audio(self, pcm: bytes) -> None:
         """Write PCM as one raw binary frame: no base64, no JSON envelope."""
@@ -311,8 +319,8 @@ class XaiBackend(Connector[str], StreamingConnector):
             raise RuntimeError(msg)
         await ws.send(pcm)
 
-    async def signals(self) -> AsyncIterator[TurnSignal]:
-        """Translate this connection's events into turn signals.
+    async def signals(self) -> AsyncIterator[StreamSignal]:
+        """Translate this connection's events into signals.
 
         ``transcript.partial`` is the only event that carries text, and which
         of the three it is comes from two booleans: an interim, a locked chunk
@@ -326,6 +334,9 @@ class XaiBackend(Connector[str], StreamingConnector):
         An ``error`` is not going to start working on the next frame, so it
         stops the iteration too, which is what lets the stream reconnect or
         fail over rather than write into a socket that is answering nothing.
+
+        Everything else - ``transcript.created``, an empty partial, a message
+        this connector has never heard of - becomes :class:`StreamAlive`.
         """
         ws = self._stream_ws
         if ws is None:
@@ -334,8 +345,11 @@ class XaiBackend(Connector[str], StreamingConnector):
             message = as_dict(raw)
             kind = get_str(message, "type")
             if kind == "transcript.partial":
-                for signal in self._partial(message):
+                signals = self._partial(message)
+                for signal in signals:
                     yield signal
+                if not signals:
+                    yield StreamAlive()  # an empty partial is still a live socket
             elif kind == "transcript.done":
                 log.debug(
                     "stt.xai.stream_done",
@@ -351,20 +365,32 @@ class XaiBackend(Connector[str], StreamingConnector):
                     detail=get_str(message, "message") or "no detail",
                 )
                 return
-            # transcript.created and anything else is consumed and not
-            # translated, which is all the liveness watchdog needs: it counts
-            # messages received, and a connection that only greets is alive.
+            else:
+                # transcript.created, and anything this connector does not
+                # recognise, says only that the socket is there. That is worth
+                # saying: the liveness watchdog counts signals it was told
+                # about, so a greeting consumed silently left a connection
+                # that had only greeted looking dead.
+                yield StreamAlive()
 
     def _partial(self, message: dict[str, object]) -> list[TurnSignal]:
         """One ``transcript.partial`` as signals, on this connection's clock.
 
-        ``TurnStarted`` goes out ahead of every partial rather than once per
-        turn, because the vendor announces no turn start of its own and the
-        first word's offset is the only honest answer to when one began.
-        Repeating it is free: the stream opens a turn on the first and reads
-        the rest as naming the turn already open. Without it a turn would start
+        ``TurnStarted`` goes out once per turn, on the first partial that has
+        anything to say, because the vendor announces no turn start of its own
+        and that partial's first word offset is the only honest answer to when
+        the turn began. Once, and not per partial: this vendor *revises* where
+        a turn began as its endpointing refines, and a start that moves moves
+        the timeline dot, the click-to-jump target and the karaoke highlight
+        with it. Without any ``TurnStarted`` at all a turn would instead start
         at the frame its first partial happened to arrive on, which is the
-        vendor's latency late, and the timeline dots key off that number.
+        vendor's whole latency late.
+
+        For the same reason the final states no ``at``, exactly as the Deepgram
+        connector deliberately does not: the turn already has a start, the
+        stream keeps it, and restating a revised one here would move the row's
+        timestamps for nothing. ``to`` is still stated, because where a turn
+        *ended* is only known once it has.
         """
         words = self._turn_words(parse_words(message, offset=0.0))
         text = _since(self._settled_text, get_str(message, "text"))
@@ -372,12 +398,21 @@ class XaiBackend(Connector[str], StreamingConnector):
         if not get_bool(message, "speech_final"):
             if not text:
                 return []
-            return [TurnStarted(at=start), TurnPartial(text=text, append=False)]
+            return [*self._open_turn(start), TurnPartial(text=text, append=False)]
         end = words[-1].end if words else _span_end(message)
+        signals = [*self._open_turn(start), TurnFinal(text=text, words=words, to=end)]
         self._settled_text = get_str(message, "text")
         if words:
             self._settled_until = words[-1].end
-        return [TurnStarted(at=start), TurnFinal(text=text, words=words, at=start, to=end)]
+        self._turn_open = False
+        return signals
+
+    def _open_turn(self, start: float | None) -> list[TurnSignal]:
+        """``TurnStarted`` for a turn not announced yet, and nothing for one that is."""
+        if self._turn_open:
+            return []
+        self._turn_open = True
+        return [TurnStarted(at=start)]
 
     def _turn_words(self, words: list[Word]) -> tuple[Word, ...]:
         """Only the words of the turn still open; see the module docstring.
@@ -417,11 +452,13 @@ class XaiBackend(Connector[str], StreamingConnector):
         ws, self._stream_ws = self._stream_ws, None
         if ws is None:
             return
-        with contextlib.suppress(Exception):
-            async with asyncio.timeout(_CLOSE_TIMEOUT_S):
-                await ws.send(json.dumps({"type": "audio.done"}))
-        with contextlib.suppress(Exception):
-            await ws.close()
+        self._turn_open = False
+        try:
+            with contextlib.suppress(Exception):
+                async with asyncio.timeout(_CLOSE_TIMEOUT_S):
+                    await ws.send(json.dumps({"type": "audio.done"}))
+        finally:
+            await close_socket(ws)
 
     async def aclose(self) -> None:
         await self.close_stream()

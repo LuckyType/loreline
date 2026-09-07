@@ -81,6 +81,11 @@ none, the capture timestamp of the last frame written when the signal arrived,
 which is late by Google's own latency and is the best answer available without
 one (ADR 0006, Decision 5).
 
+No turn ids either, so this connector numbers the turns itself and sends the
+number as the ``ref``. That is not decoration: the service can settle one turn
+twice, and two finals with no ref between them are two rows rather than one row
+corrected. See :class:`_StreamTurns`.
+
 A glossary does work here, contrary to what this connector used to claim:
 ``setup.inputAudioTranscription.customVocabulary`` is accepted and it measurably
 changes the transcript (see _setup and _vocabulary_for).
@@ -95,7 +100,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import contextlib
 import json
 import time
 from collections.abc import AsyncIterator
@@ -113,8 +117,10 @@ from loreline.secrets import SecretStore
 from loreline.stt.backends._ws import (
     as_dict,
     as_obj_dict,
+    close_socket,
     get_bool,
     get_str,
+    next_frame,
 )
 from loreline.stt.base import (
     Connector,
@@ -125,7 +131,9 @@ from loreline.stt.base import (
 )
 from loreline.stt.registry import register
 from loreline.stt.streaming import (
+    StreamAlive,
     StreamingConnector,
+    StreamSignal,
     StreamUnsupportedError,
     TurnFinal,
     TurnPartial,
@@ -383,12 +391,31 @@ class _StreamTurns:
     The empty ``{"serverContent": {}}`` padding frames yield nothing at all,
     deliberately: their count differs between a turn with another behind it and
     a turn that ends the session, which makes them useless as a marker.
+
+    **Turns are numbered here even though the wire names none**, and that is
+    the one thing this class invents. The service can settle a turn twice: a
+    ``generationComplete`` for a turn that never finalized publishes the newest
+    interim (see above), and the ``inputTranscription`` that then turns up for
+    that same turn is its real, punctuated text. Without a ref the stream dates
+    the second one from the last frame written, which is a *different* key from
+    the first, so both survived and one turn reached the transcript and the
+    exports as two rows. With a ref the second final replaces the row the first
+    one wrote, which is what a settled turn saying itself better should do.
     """
 
     # The newest interim of the turn now open, and whether that turn still owes
     # the transcript its text.
     interim: str = ""
     owes_final: bool = False
+    # This connection's turn counter, and the ref every signal about the open
+    # turn carries. Per connection, like the stream's own turn ids.
+    turn: int = 1
+    # Whether generationComplete has closed the open turn, and whether what
+    # settled it was the interim rather than the service's own final. Together
+    # they say whether the next frame with text in it belongs to this turn or
+    # opens the next one.
+    ended: bool = False
+    provisional: bool = False
     # Set once the server announces that this connection is about to end, with
     # goAway.timeLeft as Google phrased it. The reader stops on it; the stream
     # above reconnects, which is what a session cap of minutes needs.
@@ -396,6 +423,11 @@ class _StreamTurns:
     # The newest session resumption handle, kept by the connector across
     # connections so a reconnect continues the same vendor session.
     handle: str = ""
+
+    @property
+    def ref(self) -> str:
+        """The handle every signal about the open turn carries. See the class docstring."""
+        return str(self.turn)
 
     def apply(self, raw: str | bytes) -> list[TurnSignal]:
         """Translate one server frame into the signals it means."""
@@ -418,20 +450,46 @@ class _StreamTurns:
             "text",
         )
         if final:
-            self.interim, self.owes_final = "", False
-            return [TurnFinal(text=final)]
+            return self._settle(final)
         if interim:
+            if self.ended:
+                self._next_turn()  # the last turn is closed; this opens the next
             self.interim, self.owes_final = interim, True
-            return [TurnPartial(text=interim)]
+            return [TurnPartial(text=interim, ref=self.ref)]
         if _ends_turn(content):
             return self._close_turn()
         return []
+
+    def _settle(self, final: str) -> list[TurnSignal]:
+        """An ``inputTranscription``: this turn's text, or a late correction of it.
+
+        Late when ``generationComplete`` already published the turn from its
+        newest interim, which is the only case where one turn is settled twice.
+        Same ref then, so the stream replaces that row rather than writing a
+        second one; a new turn otherwise, since a final for a turn the service
+        has already ended and settled properly is the next turn arriving with
+        no interim in front of it.
+        """
+        if self.ended and not self.provisional:
+            self._next_turn()
+        self.interim, self.owes_final, self.provisional = "", False, False
+        return [TurnFinal(text=final, ref=self.ref)]
 
     def _close_turn(self) -> list[TurnSignal]:
         """What generationComplete means for a turn that was never finalized."""
         text, owed = self.interim, self.owes_final
         self.interim, self.owes_final = "", False
-        return [TurnFinal(text=text)] if owed and text else []
+        self.ended = True
+        if not (owed and text):
+            return []
+        self.provisional = True
+        return [TurnFinal(text=text, ref=self.ref)]
+
+    def _next_turn(self) -> None:
+        """Move to the turn after the one just closed."""
+        self.turn += 1
+        self.ended = False
+        self.provisional = False
 
     def _remember(self, update: dict[str, object]) -> None:
         """Keep a resumption handle the server offered, if it offered one.
@@ -667,8 +725,7 @@ class GeminiLiveBackend(Connector[list[str]], StreamingConnector):
             await ws.send(setup)
             await self._await_setup_ack(ws)
         except BaseException as exc:
-            with contextlib.suppress(Exception):
-                await ws.close()
+            await close_socket(ws)
             if isinstance(exc, ConnectionClosed):
                 self._classify_refusal(exc)
             raise
@@ -738,13 +795,20 @@ class GeminiLiveBackend(Connector[list[str]], StreamingConnector):
             )
         )
 
-    async def signals(self) -> AsyncIterator[TurnSignal]:
-        """Translate this session's frames into turn signals until it ends.
+    async def signals(self) -> AsyncIterator[StreamSignal]:
+        """Translate this session's frames into signals until it ends.
 
         No offsets are yielded because the service states none: every signal
         leaves ``at`` unset and the stream above dates it from the last frame
-        written. No refs either, since the protocol names no turns, which the
-        stream reads as one turn open at a time.
+        written. The refs are this connector's own numbering rather than the
+        vendor's, which names no turns; see :class:`_StreamTurns` for the one
+        thing that buys.
+
+        Anything with no turn in it - the padding ``{"serverContent": {}}``
+        frames, a resumption update, ``goAway`` itself - is yielded as
+        :class:`StreamAlive`. The liveness watchdog counts signals it was told
+        about, and a Live session between turns sends nothing else, so
+        consuming those silently made a quiet table look like a dead socket.
 
         ``goAway`` ends the iteration rather than raising, and it ends it at the
         next turn boundary rather than at once. The stream above treats a reader
@@ -752,16 +816,32 @@ class GeminiLiveBackend(Connector[list[str]], StreamingConnector):
         reconnect: measured, about a second of audio, plus the settled text of
         whatever turn was open. Google gives 50 seconds of notice, which is many
         turns' worth, so waiting for one to close moves that cost onto silence.
+
         The deadline is the backstop for a room that has gone quiet with a turn
-        still open, and the server hanging up first is the backstop for that.
+        still open, and the read is *raced* against it rather than checked as
+        frames arrive: a quiet room sends no frames at all, so a deadline
+        checked inside ``async for`` is a deadline that only fires once
+        somebody speaks again - which on this vendor means the server hangs up
+        first, at a moment nobody chose and usually mid-turn.
         """
         ws = self._stream_ws
         if ws is None:
             return
         leave_by: float | None = None
-        async for raw in ws:
-            for signal in self._turns.apply(raw):
+        frames = aiter(ws)
+        while True:
+            try:
+                raw = await next_frame(frames, deadline=leave_by)
+            except StopAsyncIteration:
+                return
+            if raw is None:
+                log.info("gemini.live.go_away.deadline", provider=self.config.id)
+                return
+            signals = self._turns.apply(raw)
+            for signal in signals:
                 yield signal
+            if not signals:
+                yield StreamAlive()
             # Kept off the frame state and on the connector, because it is the
             # one thing about this connection that outlives it.
             self._resume_handle = self._turns.handle
@@ -791,10 +871,10 @@ class GeminiLiveBackend(Connector[list[str]], StreamingConnector):
             await ws.send(json.dumps({"realtimeInput": {"audioStreamEnd": True}}))
 
     async def close_stream(self) -> None:
+        """Drop the streaming socket, bounded and cancellation-safe."""
         ws, self._stream_ws = self._stream_ws, None
         if ws is not None:
-            with contextlib.suppress(Exception):
-                await ws.close()
+            await close_socket(ws)
 
     async def aclose(self) -> None:
         await self.close_stream()

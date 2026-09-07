@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import array
 import json
+import time
 from typing import cast
 from urllib.parse import parse_qs, urlparse
 
@@ -52,8 +53,14 @@ _PARTIAL_MS = 300
 _WORDS = ("the", "goblin", "takes", "the", "chest", "and", "runs", "for", "the", "door")
 
 
-async def assemblyai_handler(websocket: ServerConnection) -> None:
-    """Handle one mock AssemblyAI v3 connection, in whichever mode it asked for."""
+async def assemblyai_handler(websocket: ServerConnection, *, expires_in: float = 0.0) -> None:
+    """Handle one mock AssemblyAI v3 connection, in whichever mode it asked for.
+
+    ``expires_in`` is how far ahead the ``Begin`` frame's ``expires_at`` should
+    sit, in seconds. Zero, the default, states no expiry at all, which is what
+    every test that is not about the session cap wants; the real service states
+    a real one, three hours out.
+    """
     request = getattr(websocket, "request", None)
     query = parse_qs(urlparse(getattr(request, "path", "") or "").query)
     rate = int(next(iter(query.get("sample_rate", [])), _SAMPLE_RATE))
@@ -63,6 +70,7 @@ async def assemblyai_handler(websocket: ServerConnection) -> None:
             rate,
             speakers=query.get("speaker_labels") == ["true"],
             languages=_languages(query),
+            expires_in=expires_in,
         )
         return
     await _utterance_session(websocket, rate)
@@ -102,7 +110,12 @@ async def _utterance_session(websocket: ServerConnection, rate: int) -> None:
 
 
 async def _stream_session(
-    websocket: ServerConnection, rate: int, *, speakers: bool, languages: list[str]
+    websocket: ServerConnection,
+    rate: int,
+    *,
+    speakers: bool,
+    languages: list[str],
+    expires_in: float = 0.0,
 ) -> None:
     """The persistent mode: one session, the server's own endpointing."""
     configuration: dict[str, object] = {"model": "universal-3-5-pro", "speaker_labels": speakers}
@@ -113,7 +126,7 @@ async def _stream_session(
             {
                 "type": "Begin",
                 "id": "mock-session",
-                "expires_at": 0,
+                "expires_at": time.time() + expires_in if expires_in else 0,
                 "configuration": configuration,
             }
         )

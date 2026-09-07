@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
+import time
+from collections.abc import AsyncIterator
 from typing import cast
 
 from websockets.asyncio.client import ClientConnection, connect
@@ -18,14 +21,97 @@ from loreline.health import (
     error_message,
     looks_like_auth_message,
 )
+from loreline.logging import get_logger
+
+log = get_logger(__name__)
+
+# Longest a connector will spend dropping a socket. ``websockets`` waits its
+# own ``close_timeout`` (10 s) for the other end to answer the closing
+# handshake, and the sockets this is called on are usually ones that have
+# already stopped answering: a stop is waiting on every one of them, and the
+# handshake is a courtesy rather than something a transcript depends on.
+CLOSE_TIMEOUT_S = 2.0
 
 
 def as_dict(raw: str | bytes) -> dict[str, object]:
-    """Parse a JSON message into a string-keyed dict (empty if not an object)."""
-    data: object = json.loads(raw)
+    """Parse one frame into a string-keyed dict; empty for anything else.
+
+    Empty rather than an exception for a frame that is not JSON at all, which
+    is the whole point: every reader here calls this once per frame inside its
+    receive loop, so a single malformed frame - a proxy's error page, a
+    truncated write, a vendor's stray keepalive text - used to raise
+    ``JSONDecodeError`` out of the loop and end a live connection. Skipping it
+    costs one log line and the connection survives to the next frame.
+    """
+    try:
+        data: object = json.loads(raw)
+    except (ValueError, TypeError):
+        text = raw if isinstance(raw, str) else raw.decode("utf-8", "replace")
+        log.warning("ws.frame.unparsed", frame=text[:200])
+        return {}
     if isinstance(data, dict):
         return cast("dict[str, object]", data)
     return {}
+
+
+async def close_socket(ws: ClientConnection, *, timeout_s: float = CLOSE_TIMEOUT_S) -> None:
+    """Drop a socket within a bounded time, cancellation included. Never raises.
+
+    Two failures this exists to stop, and both of them cost a session its
+    shutdown rather than a frame. ``ws.close()`` performs the closing
+    handshake and waits ``close_timeout`` for an answer, which a dead socket
+    never sends, so an unbounded close holds Stop for ten seconds per
+    connection. And ``contextlib.suppress(Exception)`` does not cover
+    ``CancelledError``, so a connector cancelled while closing used to leave
+    the socket to the garbage collector - the file descriptor, the TLS session
+    and the vendor's own session with it.
+
+    The close therefore runs as a task of its own, which bounds itself. A
+    caller that is cancelled while waiting for it re-raises, as it must, and
+    the close finishes behind it.
+    """
+    closing = asyncio.create_task(_close_quietly(ws, timeout_s))
+    try:
+        await asyncio.shield(closing)
+    except asyncio.CancelledError:
+        raise  # ...and `closing` runs on to completion behind us
+    except Exception:  # pragma: no cover - _close_quietly swallows its own
+        log.debug("ws.close.failed")
+
+
+async def _close_quietly(ws: ClientConnection, timeout_s: float) -> None:
+    """The bounded close itself, which is never worth raising out of."""
+    with contextlib.suppress(Exception):
+        async with asyncio.timeout(timeout_s):
+            await ws.close()
+
+
+async def next_frame(
+    frames: AsyncIterator[str | bytes], *, deadline: float | None
+) -> str | bytes | None:
+    """The next frame, or None once ``deadline`` (a monotonic instant) passes.
+
+    Racing the read against the deadline, rather than checking the clock as
+    frames happen to arrive, is the difference between leaving a session on
+    time and leaving it when the room next says something. Both vendors that
+    cap a session announce the cap in advance (Gemini's ``goAway``,
+    AssemblyAI's ``expires_at``), and a quiet table produces no frames at all,
+    so a deadline checked only inside ``async for`` is a deadline the server
+    reaches first - and the server's own moment is mid-turn.
+
+    Raises ``StopAsyncIteration`` when the socket ends, which is the ordinary
+    way a connection finishes and is a different answer from the deadline.
+    """
+    if deadline is None:
+        return await anext(frames)
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return None
+    try:
+        async with asyncio.timeout(remaining):
+            return await anext(frames)
+    except TimeoutError:
+        return None
 
 
 def as_list(value: object) -> list[object]:

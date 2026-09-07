@@ -52,7 +52,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import contextlib
 import json
 from collections.abc import AsyncIterator
 
@@ -69,18 +68,20 @@ from loreline.secrets import SecretStore
 from loreline.stt.backends._ws import (
     as_dict,
     as_obj_dict,
+    close_socket,
     get_float,
     get_str,
 )
 from loreline.stt.base import Connector, Transcription, glossary_terms, secret_for
 from loreline.stt.registry import register
 from loreline.stt.streaming import (
+    StreamAlive,
     StreamingConnector,
+    StreamSignal,
     StreamUnsupportedError,
     TurnEnded,
     TurnFinal,
     TurnPartial,
-    TurnSignal,
     TurnStarted,
 )
 
@@ -230,8 +231,7 @@ class OpenAIRealtimeBackend(Connector[None], StreamingConnector):
         try:
             await self._configure(ws, turn_detection)
         except BaseException:
-            with contextlib.suppress(Exception):
-                await ws.close()
+            await close_socket(ws)
             raise
         return ws
 
@@ -252,6 +252,14 @@ class OpenAIRealtimeBackend(Connector[None], StreamingConnector):
         streaming shape to cut on, so this raises rather than carrying on into
         a session that would accept audio forever and answer nothing. See
         :class:`StreamUnsupportedError` for which models say it.
+
+        Every other rejection raises too, and that is the point of draining
+        the handshake here at all. A session that answered ``error`` and was
+        treated as configured is a socket with no server VAD on it: it takes
+        audio, produces nothing, and is only noticed ``watchdog_s`` later by
+        the liveness timer, having cost a gap marker and a failover for an
+        answer that was on the wire at connect. Raising makes it one failed
+        attempt against the stream's reconnect budget instead.
         """
         await ws.send(self._session_update(turn_detection))
         async with asyncio.timeout(_CONFIGURE_TIMEOUT_S):
@@ -283,13 +291,18 @@ class OpenAIRealtimeBackend(Connector[None], StreamingConnector):
                     event_type=kind,
                     detail=detail,
                 )
-                return
+                msg = f"OpenAI refused the session configuration: {get_str(detail, 'message')}"
+                raise RuntimeError(msg)
+        # The socket ended before it said anything about the update, which is
+        # the same thing as a refusal for everyone downstream: nothing here is
+        # configured, so nothing would be transcribed.
+        msg = "the session ended before it was configured"
+        raise RuntimeError(msg)
 
     async def _reset_ws(self) -> None:
         ws, self._ws = self._ws, None
         if ws is not None:
-            with contextlib.suppress(Exception):
-                await ws.close()
+            await close_socket(ws)
 
     async def transcribe_one(self, utterance: Utterance, prepared: None) -> Transcription:
         pcm = resample_pcm16(utterance.pcm, self.config.sample_rate, self._out_rate)
@@ -355,18 +368,32 @@ class OpenAIRealtimeBackend(Connector[None], StreamingConnector):
             )
         )
 
-    async def signals(self) -> AsyncIterator[TurnSignal]:
-        """Translate this session's events into turn signals.
+    async def signals(self) -> AsyncIterator[StreamSignal]:
+        """Translate this session's events into signals.
 
         The offsets are OpenAI's own count of milliseconds into the audio it
         has received on this connection, which is exactly what the stream's t0
         mapping expects; nothing here converts to the session clock.
 
         ``delta`` is an increment, not the whole interim so far, hence
-        ``append=True``. An error frame ends the iteration rather than being
-        skipped: a transcription session that rejected something is not going
-        to start working on the next frame, and ending here is what lets the
-        stream reconnect or fail over instead of streaming into silence.
+        ``append=True``.
+
+        Two kinds of bad news arrive here and they are not the same size.
+        ``error`` is about the session and ends the iteration: a transcription
+        session that rejected something is not going to start working on the
+        next frame, and ending here is what lets the stream reconnect or fail
+        over instead of streaming into silence. ``...transcription.failed`` is
+        about *one item* - audio too short to transcribe, a content filter -
+        and ending a whole live session on one of those threw away every turn
+        after it, plus a gap marker, for a two-word backchannel. It settles
+        that item instead: an empty final, which the stream publishes as the
+        turn's last interim text if it had any and drops if it had none.
+
+        Everything else OpenAI narrates - ``session.updated``,
+        ``input_audio_buffer.committed``, ``conversation.item.created`` - is
+        yielded as :class:`StreamAlive`, since the liveness watchdog counts
+        signals it was told about and a session between turns is a session
+        that is alive.
         """
         ws = self._stream_ws
         if ws is None:
@@ -383,7 +410,15 @@ class OpenAIRealtimeBackend(Connector[None], StreamingConnector):
                 yield TurnPartial(text=get_str(message, "delta"), ref=ref, append=True)
             elif kind == _COMPLETED:
                 yield TurnFinal(text=get_str(message, "transcript"), ref=ref)
-            elif kind in {_FAILED, "error"}:
+            elif kind == _FAILED:
+                log.warning(
+                    "openai.realtime.item_failed",
+                    provider=self.config.id,
+                    item_id=ref,
+                    detail=message.get("error", message),
+                )
+                yield TurnFinal(text="", ref=ref)
+            elif kind == "error":
                 log.warning(
                     "openai.realtime.error",
                     provider=self.config.id,
@@ -391,6 +426,8 @@ class OpenAIRealtimeBackend(Connector[None], StreamingConnector):
                     detail=message.get("error", message),
                 )
                 return
+            else:
+                yield StreamAlive()
 
     async def flush_input(self) -> None:
         """Commit once, so a turn still open when the mic stopped is transcribed.
@@ -406,10 +443,10 @@ class OpenAIRealtimeBackend(Connector[None], StreamingConnector):
             await ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
 
     async def close_stream(self) -> None:
+        """Drop the streaming socket, bounded and cancellation-safe."""
         ws, self._stream_ws = self._stream_ws, None
         if ws is not None:
-            with contextlib.suppress(Exception):
-                await ws.close()
+            await close_socket(ws)
 
     async def aclose(self) -> None:
         await self._reset_ws()

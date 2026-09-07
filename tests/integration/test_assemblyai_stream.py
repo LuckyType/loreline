@@ -9,14 +9,28 @@ floor the endpoint enforces, its own endpointing deciding the turns, and
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
+import time
+from collections.abc import AsyncIterator, Awaitable, Callable
+from typing import cast
 from urllib.parse import parse_qs, urlparse
 
 import pytest
+from websockets.asyncio.client import ClientConnection
 from websockets.asyncio.server import ServerConnection, serve
 
-from loreline.models import Glossary, ProviderConfig, ProviderKind, TranscriptEvent
-from loreline.stt.backends.assemblyai import AssemblyAIBackend
+from loreline.models import (
+    GAP_SOURCE,
+    Glossary,
+    ProviderConfig,
+    ProviderKind,
+    TranscriptEvent,
+)
+from loreline.stt.backends.assemblyai import (
+    _SESSION_END_MARGIN_S,  # pyright: ignore[reportPrivateUsage]
+    AssemblyAIBackend,
+)
 from loreline.stt.streaming import StreamConfig, StreamUnsupportedError, TranscriptStream
 from mocks.assemblyai_ws import assemblyai_handler
 
@@ -35,10 +49,19 @@ def _config(port: int) -> ProviderConfig:
 
 
 async def _stream_events(
-    script: list[tuple[bytes, int]], *, start: float = 100.0
+    script: list[tuple[bytes, int]],
+    *,
+    start: float = 100.0,
+    handler: Callable[[ServerConnection], Awaitable[None]] = assemblyai_handler,
+    settle: float = 0.0,
 ) -> list[TranscriptEvent]:
-    """Run the streaming path over a script of (frame, count) against the mock."""
-    async with serve(assemblyai_handler, "127.0.0.1", 0) as server:
+    """Run the streaming path over a script of (frame, count) against the mock.
+
+    ``settle`` pauses between the script's blocks, which is where a reconnect
+    fits: a feed that never yields long enough for one would be testing the
+    queue's drop policy instead.
+    """
+    async with serve(handler, "127.0.0.1", 0) as server:
         port = server.sockets[0].getsockname()[1]
         backend = AssemblyAIBackend(_config(port), api_key="secret")
         events: list[TranscriptEvent] = []
@@ -50,7 +73,12 @@ async def _stream_events(
             backend,
             publish=publish,
             capture_rate=16000,
-            config=StreamConfig(session_id="s1", interim_interval_s=0.0, final_wait_s=2.0),
+            config=StreamConfig(
+                session_id="s1",
+                interim_interval_s=0.0,
+                final_wait_s=2.0,
+                reconnect_backoff_s=0.0,
+            ),
         )
         task = asyncio.create_task(stream.run())
         ts = start
@@ -59,6 +87,8 @@ async def _stream_events(
                 stream.feed(frame, ts, is_speech=frame is _LOUD)
                 ts += 0.02
                 await asyncio.sleep(0)
+            if settle:
+                await asyncio.sleep(settle)
         await asyncio.sleep(0.2)
         stream.stop()
         await asyncio.wait_for(task, 15)
@@ -290,3 +320,177 @@ async def test_the_utterance_shape_still_opens_a_session_per_utterance() -> None
     assert event.is_final
     assert event.turn_id is None  # nothing to replace on the utterance path
     assert event.text == "assemblyai mock 1600 samples"
+
+
+async def test_a_rejected_optional_parameter_is_dropped_and_the_session_retried() -> None:
+    """3006 is not one answer, and reading it as one cost the whole session.
+
+    Verified live for the model case: ``speech_model=universal-2`` answers
+    ``Invalid 'speech_model'``. A refused ``language_codes`` is the same code
+    with a different name in it, and it is a nicety - dropping it and opening
+    the session again keeps the transcript, where taking the provider off the
+    streaming path lost it, and off the utterance path too, since both shapes
+    build one query string.
+    """
+    paths: list[str] = []
+
+    async def refusing_once(ws: ServerConnection) -> None:
+        path = getattr(ws.request, "path", "")
+        paths.append(path)
+        if "language_codes" in path:
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "Error",
+                        "error_code": 3006,
+                        "error": "User Input Validation Error: Invalid 'language_codes'",
+                    }
+                )
+            )
+            await ws.close()
+            return
+        await assemblyai_handler(ws)
+
+    async with serve(refusing_once, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        backend = AssemblyAIBackend(_config(port), api_key="secret")  # config.language: "de"
+        await backend.open_stream(None)
+        prepared = backend.prepare(None)  # the utterance shape stops sending it too
+        await backend.aclose()
+
+    assert len(paths) == 2
+    assert "language_codes" in paths[0]
+    assert "language_codes" not in paths[1]
+    assert "language_codes" not in prepared
+    assert "speaker_labels=true" in paths[1]  # only the one parameter was given up
+
+
+async def test_a_session_shortly_before_its_cap_leaves_on_its_own() -> None:
+    """v3 caps a session and a table runs for hours, so the cap is reached.
+
+    ``Begin`` states the exact second the server will cut the session off.
+    Leaving before it, and between turns, costs a reconnect and a gap marker on
+    silence; being cut off costs the same reconnect in the middle of whatever
+    somebody was saying. This is the same answer the Gemini connector gives to
+    ``goAway``, from a different vendor's way of announcing it.
+    """
+    handler = functools.partial(assemblyai_handler, expires_in=_SESSION_END_MARGIN_S + 0.2)
+    async with serve(handler, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        backend = AssemblyAIBackend(_config(port), api_key="secret")
+        await backend.open_stream(None)
+
+        started = time.perf_counter()
+        signals = [signal async for signal in backend.signals()]
+        elapsed = time.perf_counter() - started
+        await backend.aclose()
+
+    # A quiet room sends no frames at all, so the deadline has to be raced
+    # against the read rather than checked as frames arrive.
+    assert elapsed < 3.0
+    assert signals == []
+
+
+async def test_the_cap_waits_for_the_open_turn_before_it_leaves() -> None:
+    """Between turns, not inside one: a turn cut in half is a turn lost.
+
+    The deadline passes while a turn is still open here, and what closes the
+    connection is the turn ending rather than the clock.
+    """
+
+    class _SlowTurn:
+        """One partial, then a pause past the deadline, then the turn's final."""
+
+        def __aiter__(self) -> AsyncIterator[str]:
+            return self._frames()
+
+        async def _frames(self) -> AsyncIterator[str]:
+            yield json.dumps(
+                {
+                    "type": "Turn",
+                    "turn_order": 0,
+                    "end_of_turn": False,
+                    "transcript": "the goblin",
+                    "words": [{"start": 0, "end": 400, "text": "the"}],
+                }
+            )
+            await asyncio.sleep(0.3)
+            yield json.dumps(
+                {
+                    "type": "Turn",
+                    "turn_order": 0,
+                    "end_of_turn": True,
+                    "transcript": "the goblin takes",
+                    "words": [{"start": 0, "end": 800, "text": "the"}],
+                }
+            )
+            await asyncio.sleep(30)
+
+    backend = AssemblyAIBackend(_config(0), api_key="secret")
+    socket = cast("ClientConnection", _SlowTurn())
+    backend._stream_ws = socket  # pyright: ignore[reportPrivateUsage]
+    backend._leave_by = time.monotonic() + 0.1  # pyright: ignore[reportPrivateUsage]
+
+    started = time.perf_counter()
+    signals = [signal async for signal in backend.signals()]
+    elapsed = time.perf_counter() - started
+
+    assert [type(s).__name__ for s in signals] == ["TurnStarted", "TurnPartial", "TurnFinal"]
+    assert 0.3 <= elapsed < 3.0  # left once the turn closed, not at the deadline
+
+
+class _Hangup:
+    """A server socket that stops feeding its handler after ``limit`` messages.
+
+    The handler then returns, ``serve`` closes the connection, and the client
+    sees a socket that died mid-session - which is the only way to drive a
+    reconnect against a mock that would otherwise serve forever.
+    """
+
+    def __init__(self, ws: ServerConnection, limit: int) -> None:
+        self._ws = ws
+        self._limit = limit
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._ws, name)
+
+    def __aiter__(self) -> AsyncIterator[str | bytes]:
+        return self._limited()
+
+    async def _limited(self) -> AsyncIterator[str | bytes]:
+        seen = 0
+        async for message in self._ws:
+            yield message
+            seen += 1
+            if seen >= self._limit:
+                return
+
+
+async def test_a_reconnect_starts_a_session_whose_books_are_empty() -> None:
+    """Nothing of the dead session may reach the one that replaces it.
+
+    v3 numbers its turns per session, so the first turn after a dropped socket
+    is ``turn_order`` 0 again, and the audio tail, the settled text a
+    SpeakerRevision would republish and the expiry all belong to the session
+    that stated them. The connection counter in the turn id is what keeps
+    generation 2's first turn from replacing generation 1's.
+    """
+    connections = 0
+
+    async def dropping(ws: ServerConnection) -> None:
+        nonlocal connections
+        connections += 1
+        if connections == 1:
+            await assemblyai_handler(cast("ServerConnection", _Hangup(ws, 12)))
+            return
+        await assemblyai_handler(ws)
+
+    events = await _stream_events(
+        [(_LOUD, 50), (_QUIET, 50), (_LOUD, 50), (_QUIET, 50)], handler=dropping, settle=0.2
+    )
+
+    assert connections == 2
+    finals = [e for e in events if e.is_final and e.source == "aai"]
+    assert finals
+    assert any(str(e.turn_id).startswith("aai:2:0") for e in finals)
+    assert [e.source for e in events if e.source == GAP_SOURCE] == [GAP_SOURCE]

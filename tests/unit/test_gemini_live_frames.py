@@ -195,15 +195,50 @@ def test_streaming_padding_frames_are_not_signals() -> None:
     assert turns.go_away == ""
 
 
-def test_streaming_states_no_offsets_and_no_turn_ids() -> None:
-    """This service reports neither, which the stream reads as "now" and as
-    "the one open turn". Stating a zero instead would pin every turn to t0."""
+def test_streaming_states_no_offsets_and_numbers_its_own_turns() -> None:
+    """The service reports no timing at all, which the stream reads as "now".
+
+    Stating a zero instead would pin every turn to t0. The ``ref`` is this
+    connector's own, since the wire names no turns and one of them can be
+    settled twice; see the test below.
+    """
     _, signals = _signals(_turn(_FINALS[0]))
 
-    assert all(s.ref == "" for s in signals)
+    assert all(s.ref == "1" for s in signals)
     assert all(s.at is None for s in signals if isinstance(s, TurnFinal))
     assert all(s.to is None for s in signals if isinstance(s, TurnFinal))
     assert all(s.words == () for s in signals if isinstance(s, TurnFinal))
+
+
+def test_streaming_numbers_each_turn_after_the_one_before() -> None:
+    """One ref per turn, so a turn's interims and its final share a row."""
+    _, signals = _signals([f for text in _FINALS for f in _turn(text)])
+
+    assert [s.ref for s in signals if isinstance(s, TurnFinal)] == ["1", "2", "3", "4"]
+
+
+def test_a_late_final_replaces_the_turn_that_was_settled_without_it() -> None:
+    """One turn, settled twice, and it must not reach the transcript as two.
+
+    generationComplete for a turn the service never finalized publishes the
+    newest interim, because that is the only text that turn has. The service
+    can still send the real ``inputTranscription`` for it afterwards - probed
+    against the live model, and it is the better text, punctuated and cased.
+    Without a ref the stream dated the second one from the last frame written,
+    which is a different key from the first, so one turn became two final rows
+    and both survived into the exports.
+    """
+    turns, signals = _signals(
+        [
+            *_turn(_FINALS[0], final=False),
+            _frame({"generationComplete": True}),
+            _frame({"inputTranscription": {"text": _FINALS[0]}}),
+        ]
+    )
+    finals = [s for s in signals if isinstance(s, TurnFinal)]
+
+    assert [s.ref for s in finals] == ["1", "1"]  # the second replaces the first
+    assert turns.turn == 1  # ...rather than opening a turn of its own
 
 
 def test_streaming_replays_a_whole_recorded_session_in_order() -> None:
@@ -212,6 +247,18 @@ def test_streaming_replays_a_whole_recorded_session_in_order() -> None:
     assert [s.text for s in signals if isinstance(s, TurnFinal)] == _FINALS
     assert turns.interim == ""
     assert turns.owes_final is False
+
+
+def test_a_final_after_a_turn_the_service_ended_properly_is_the_next_turn() -> None:
+    """The other reading of a final behind a generationComplete.
+
+    Where the turn was settled by its own ``inputTranscription`` there is
+    nothing owed and nothing provisional, so a second final with no interim in
+    front of it is the next turn arriving rather than a correction of the last.
+    """
+    _, signals = _signals([*_turn(_FINALS[0]), _frame({"inputTranscription": {"text": "again"}})])
+
+    assert [s.ref for s in signals if isinstance(s, TurnFinal)] == ["1", "2"]
 
 
 def test_streaming_accepts_the_snake_case_spellings_too() -> None:

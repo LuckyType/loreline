@@ -21,11 +21,19 @@ only knowable from frames like these, not from the docs:
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import AsyncIterator
 
 from loreline.models import ProviderConfig, ProviderKind
 from loreline.stt.backends.assemblyai import AssemblyAIBackend
-from loreline.stt.streaming import TurnFinal, TurnPartial, TurnSignal, TurnStarted
+from loreline.stt.streaming import (
+    StreamAlive,
+    StreamSignal,
+    TurnFinal,
+    TurnPartial,
+    TurnSignal,
+    TurnStarted,
+)
 
 # --- the recorded session -------------------------------------------------
 
@@ -97,23 +105,32 @@ def _backend(frames: list[str]) -> AssemblyAIBackend:
     return backend
 
 
-async def _signals(frames: list[str]) -> list[TurnSignal]:
+async def _signals(frames: list[str]) -> list[StreamSignal]:
     return [signal async for signal in _backend(frames).signals()]
+
+
+def _turns(signals: list[StreamSignal]) -> list[TurnSignal]:
+    """Only the signals about turns; the rest say the socket is there."""
+    return [s for s in signals if not isinstance(s, StreamAlive)]
 
 
 async def test_the_whole_recorded_session_becomes_the_signals_it_should() -> None:
     signals = await _signals(_SESSION)
 
-    kinds = [type(s).__name__ for s in signals]
     # Two turns: a start plus a partial per interim, one final each, and one
     # more final per revised turn at the end. Begin, SpeechStarted and
-    # Termination translate into nothing at all.
-    assert kinds == [
+    # Termination say nothing about a turn, so they become StreamAlive: the
+    # liveness watchdog counts signals it was told about, and a session
+    # between turns sends nothing else.
+    assert [type(s).__name__ for s in signals] == [
+        "StreamAlive",  # Begin
+        "StreamAlive",  # SpeechStarted
         "TurnStarted",
         "TurnPartial",
         "TurnStarted",
         "TurnPartial",
         "TurnFinal",
+        "StreamAlive",  # SpeechStarted
         "TurnStarted",
         "TurnPartial",
         "TurnStarted",
@@ -123,8 +140,20 @@ async def test_the_whole_recorded_session_becomes_the_signals_it_should() -> Non
         "TurnFinal",
         "TurnFinal",
         "TurnFinal",
+        "StreamAlive",  # Termination
     ]
-    assert {s.ref for s in signals} == {"0", "1"}  # turn_order is the whole ref
+    assert {s.ref for s in _turns(signals)} == {"0", "1"}  # turn_order is the whole ref
+
+
+async def test_termination_ends_the_iteration_rather_than_waiting_for_a_close() -> None:
+    """It is the server's own "that was everything", so nothing is left to read.
+
+    Reading on past it spent the stream's final wait on a socket that had
+    already finished, which is time added to Stop for no answer.
+    """
+    signals = await _signals([*_SESSION, _TURN_0_PARTIAL_1])
+
+    assert signals == await _signals(_SESSION)  # the frame behind Termination is never read
 
 
 async def test_a_partial_carries_the_whole_turn_so_far() -> None:
@@ -197,7 +226,7 @@ async def test_a_revision_for_a_turn_that_never_settled_is_dropped() -> None:
     """
     signals = await _signals([_BEGIN, _SPEAKER_REVISION, _TERMINATION])
 
-    assert signals == []
+    assert _turns(signals) == []
 
 
 async def test_an_error_frame_ends_the_session_instead_of_being_skipped() -> None:
@@ -212,7 +241,14 @@ async def test_an_error_frame_ends_the_session_instead_of_being_skipped() -> Non
     )
     signals = await _signals([_BEGIN, _TURN_0_PARTIAL_1, error, _TURN_0_FINAL])
 
-    assert [type(s).__name__ for s in signals] == ["TurnStarted", "TurnPartial"]
+    assert [type(s).__name__ for s in signals] == ["StreamAlive", "TurnStarted", "TurnPartial"]
+
+
+async def test_a_frame_that_is_not_json_is_skipped_rather_than_raised() -> None:
+    """One malformed frame used to end a live session out of the read loop."""
+    signals = await _signals([_BEGIN, "<html>502 Bad Gateway</html>", _TURN_0_PARTIAL_1])
+
+    assert [type(s).__name__ for s in _turns(signals)] == ["TurnStarted", "TurnPartial"]
 
 
 async def test_signals_without_an_open_stream_yield_nothing() -> None:
@@ -245,18 +281,29 @@ async def test_audio_is_held_only_until_it_clears_the_fifty_millisecond_floor() 
 async def test_flush_pads_the_tail_and_terminates() -> None:
     """The last 20 ms would be refused on its own, and dropping it loses a word."""
     sent: list[bytes | str] = []
+    backend = _backend([])
 
     class _Ws:
+        """A socket that answers Terminate, which is what the real one does.
+
+        Without the answer this test sat out the whole flush timeout for a
+        session that had already said everything: a real second and a half of
+        the suite spent waiting for a frame nobody was going to send.
+        """
+
         async def send(self, data: bytes | str) -> None:
             sent.append(data)
+            if isinstance(data, str) and json.loads(data).get("type") == "Terminate":
+                backend._terminated.set()  # pyright: ignore[reportPrivateUsage]
 
-    backend = _backend([])
     backend._stream_ws = _Ws()  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
     tail = b"\x01\x00" * 320
 
+    started = time.monotonic()
     await backend.send_audio(tail)
     await backend.flush_input()
 
+    assert time.monotonic() - started < 1.0  # the answer ends the wait, not the timeout
     assert len(sent) == 2
     audio = sent[0]
     assert isinstance(audio, bytes)

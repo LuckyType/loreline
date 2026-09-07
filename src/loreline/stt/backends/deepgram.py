@@ -83,6 +83,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import re
 import time
 from collections.abc import AsyncIterator
 from http import HTTPStatus
@@ -100,9 +101,11 @@ from loreline.models import Glossary, Interaction, ProviderConfig, ProviderKind,
 from loreline.secrets import SecretStore
 from loreline.stt.backends._deepgram import listen_params, parse_alternative
 from loreline.stt.backends._ws import (
+    CLOSE_TIMEOUT_S,
     as_dict,
     as_list,
     as_obj_dict,
+    close_socket,
     get_bool,
     get_float,
     get_str,
@@ -110,7 +113,9 @@ from loreline.stt.backends._ws import (
 from loreline.stt.base import Connector, Transcription, glossary_terms, secret_for
 from loreline.stt.registry import register
 from loreline.stt.streaming import (
+    StreamAlive,
     StreamingConnector,
+    StreamSignal,
     StreamUnsupportedError,
     TurnFinal,
     TurnPartial,
@@ -147,6 +152,38 @@ _KEEPALIVE_IDLE_S = 5.0
 # ``UtteranceEnd`` reports this when the segment was already finalized before
 # its gap condition was met, and the docs say to disregard the message.
 _ALREADY_FINAL = -1.0
+
+# What Deepgram's rejected upgrade actually says, read off the live endpoint on
+# 2026-09-07. The body is always ``{"err_code": ..., "err_msg": ...,
+# "request_id": ...}``, and the four answers it gave are not one kind of no::
+#
+#   model=flux-general-en   400 V2_MODEL_ON_V1_LISTEN_ENDPOINT, "Flux models
+#                           are not supported on the `/v1/listen` endpoint."
+#   language=zz             400 "Bad Request", "Bad Request: No such
+#                           model/language/tier combination found."
+#   keyterm= on nova-2      400 INVALID_QUERY_PARAMETER, "`keyterm` is only
+#                           supported for Nova-3 and Flux. Please use
+#                           `keywords` instead."
+#   endpointing=banana      400 "Bad Request", "Invalid query string."
+#
+# Only the first two are about the model, and only those are permanent. The
+# third names one parameter, in backticks, and it is a parameter this connector
+# can go without, so it is dropped and the socket opened again rather than the
+# whole session being handed to the utterance path over a glossary field. The
+# fourth is neither, and spends one of the stream's reconnects like any other
+# failure. (A model the project has no plan for answers 403
+# INSUFFICIENT_PERMISSIONS, not a 400, and is left as a retry.)
+_MODEL_WORDS = ("model",)
+# Query parameters worth dropping to keep a session: each one is a nicety whose
+# absence changes what the transcript is like, not whether there is one.
+# `model`, `language`, `encoding`, `sample_rate`, `channels`,
+# `interim_results` and `endpointing` are deliberately absent - a session
+# without them is not the session that was asked for, and Deepgram's own
+# endpointing default of 10 ms cuts a turn at every breath.
+_OPTIONAL_PARAMS = frozenset({"keyterm", "keywords", "diarize", "punctuate", "utterance_end_ms"})
+# Deepgram names the offending parameter in backticks; nothing else in these
+# messages is quoted that way.
+_PARAM_PATTERN = re.compile(r"`([a-z_]+)`")
 
 # What the streaming shape adds to the query both shapes share. Interim results
 # are the feature, and they are also required for ``utterance_end_ms`` to work
@@ -204,8 +241,14 @@ class _TurnState:
         if is_final:
             if transcript:
                 self._parts.append(transcript)
+                # ...and only a segment that settled *text* spends the interims
+                # it superseded. An is_final with an empty transcript settles
+                # nothing - the near-silent lead-in sends one per turn - so
+                # clearing here dropped the newest thing this turn had said,
+                # and a speech_final behind it published an empty final over a
+                # turn that had words on screen.
+                self._interim = ""
             self._words.extend(words)
-            self._interim = ""  # this segment is settled; its interims are spent
             self._end = get_float(message, "start") + get_float(message, "duration")
         elif transcript:
             self._interim = transcript
@@ -297,6 +340,14 @@ class DeepgramBackend(Connector[str], StreamingConnector):
         self._stream_ws: ClientConnection | None = None
         self._keepalive: asyncio.Task[None] | None = None
         self._last_send = 0.0
+        # Query parameters the endpoint refused, dropped from every request
+        # this backend makes from then on. Kept across connections on purpose,
+        # the way OpenAI's `_prompt_rejected` is: a parameter this model will
+        # not take is one it will not take on the next socket either, and
+        # re-learning it costs a whole connection. Shared with `prepare`, so
+        # the utterance path stops sending it too - that shape used to fail on
+        # exactly the parameter the streaming shape had already been refused.
+        self._dropped: set[str] = set()
 
     def prepare(self, glossary: Glossary | None) -> str:
         params = listen_params(
@@ -315,7 +366,11 @@ class DeepgramBackend(Connector[str], StreamingConnector):
                 ("channels", "1"),
             ]
         )
-        return f"{self._url}?{urlencode(params)}"
+        return f"{self._url}?{urlencode(self._kept(params))}"
+
+    def _kept(self, params: list[tuple[str, str]]) -> list[tuple[str, str]]:
+        """The parameters minus the ones this endpoint has already refused."""
+        return [pair for pair in params if pair[0] not in self._dropped]
 
     @property
     def _headers(self) -> dict[str, str]:
@@ -374,24 +429,60 @@ class DeepgramBackend(Connector[str], StreamingConnector):
         """Open one live socket for a whole capture, endpointing switched on.
 
         Deepgram acks no configuration: the query string is the configuration,
-        so a model or a parameter it refuses is refused on the HTTP upgrade,
-        as a 400 with the reason in the body. That is an answer no retry can
-        change, hence :class:`StreamUnsupportedError` rather than a failed
-        attempt - Deepgram's Flux models are the live case, since they speak a
-        different protocol on ``/v2/listen`` and are not in this endpoint's
-        model enum at all.
+        so anything it refuses is refused on the HTTP upgrade, as a 400 with
+        the reason in the body. What that 400 says decides which of three
+        things it is (see the bodies quoted above ``_MODEL_WORDS``):
+
+        * the model, which no retry changes, so
+          :class:`StreamUnsupportedError` and the session runs this provider
+          one utterance at a time - Deepgram's Flux models are the live case,
+          since they speak a different protocol on ``/v2/listen``;
+        * one named parameter this connector can go without, which is dropped
+          for good and the socket opened again at once. Losing keyterm
+          biasing is worth a session; losing the session over it is not;
+        * anything else, which stays the exception it was and spends one of
+          the stream's reconnects.
         """
         await self.close_stream()  # a reconnect must not leak the dead socket
-        url = f"{self.prepare(glossary)}&{urlencode(_STREAM_PARAMS)}"
-        try:
-            self._stream_ws = await connect(url, additional_headers=self._headers)
-        except InvalidStatus as exc:
-            refusal = _refusal(exc, self._model)
-            if refusal is None:
+        # Twice at most: the second attempt is the one that follows dropping a
+        # parameter, and a second refusal is a refusal.
+        for attempt in (1, 2):
+            url = f"{self.prepare(glossary)}&{urlencode(self._kept(_STREAM_PARAMS))}"
+            try:
+                ws = await connect(url, additional_headers=self._headers)
+            except InvalidStatus as exc:
+                if attempt == 1 and self._drop_refused(exc):
+                    continue
+                refusal = _refusal(exc, self._model)
+                if refusal is not None:
+                    raise refusal from exc
                 raise
-            raise refusal from exc
-        self._last_send = time.monotonic()
-        self._keepalive = asyncio.create_task(self._keep_alive())
+            self._stream_ws = ws
+            self._last_send = time.monotonic()
+            self._keepalive = asyncio.create_task(self._keep_alive())
+            return
+
+    def _drop_refused(self, exc: InvalidStatus) -> bool:
+        """Drop the one parameter a rejected upgrade named, if it is droppable.
+
+        True when something was dropped and the request is worth making again.
+        """
+        if exc.response.status_code != HTTPStatus.BAD_REQUEST:
+            return False
+        body = exc.response.body.decode("utf-8", "replace")
+        match = _PARAM_PATTERN.search(error_message(body) or body)
+        param = match.group(1) if match else ""
+        if param not in _OPTIONAL_PARAMS or param in self._dropped:
+            return False
+        self._dropped.add(param)
+        log.warning(
+            "deepgram.stream.parameter_dropped",
+            provider=self.config.id,
+            parameter=param,
+            model=self._model,
+            detail=error_message(body),
+        )
+        return True
 
     async def send_audio(self, pcm: bytes) -> None:
         ws = self._stream_ws
@@ -401,8 +492,8 @@ class DeepgramBackend(Connector[str], StreamingConnector):
         await ws.send(pcm)
         self._last_send = time.monotonic()
 
-    async def signals(self) -> AsyncIterator[TurnSignal]:
-        """Translate this connection's messages into turn signals.
+    async def signals(self) -> AsyncIterator[StreamSignal]:
+        """Translate this connection's messages into signals.
 
         Every offset Deepgram states is seconds into the audio it has received
         on this connection, which is the base the stream's ``t0`` mapping
@@ -411,17 +502,24 @@ class DeepgramBackend(Connector[str], StreamingConnector):
         An error frame ends the iteration rather than being skipped: a live
         request that was rejected is not going to start working on the next
         frame, and ending here is what lets the stream reconnect or fail over
-        instead of streaming into silence. ``Metadata`` and the keepalive acks
-        are consumed and ignored, which is what keeps the liveness watchdog
-        seeing a connection that is merely quiet as alive.
+        instead of streaming into silence.
+
+        A frame that says nothing about a turn - ``Metadata``, the empty
+        near-silent lead-in, anything this connector does not recognise - is
+        yielded as :class:`StreamAlive` rather than swallowed. The liveness
+        watchdog counts signals it was told about, so a connector that
+        consumed an ack silently left a merely quiet connection looking dead.
         """
         ws = self._stream_ws
         if ws is None:
             return
         state = _TurnState()
         async for raw in ws:
-            for signal in state.apply(raw):
+            signals = state.apply(raw)
+            for signal in signals:
                 yield signal
+            if not signals:
+                yield StreamAlive()
             if state.error is not None:
                 log.warning("deepgram.stream.error", provider=self.config.id, detail=state.error)
                 return
@@ -441,12 +539,14 @@ class DeepgramBackend(Connector[str], StreamingConnector):
             await ws.send(json.dumps({"type": "Finalize"}))
 
     async def close_stream(self) -> None:
-        """Say CloseStream, then drop the socket.
+        """Say CloseStream, then drop the socket, both bounded.
 
         The stream has already stopped reading by the time this runs, so the
         results Deepgram flushes in reply reach nobody; it is sent anyway
         because it is how this protocol says "that was all the audio", and an
-        aborted TCP connection is not.
+        aborted TCP connection is not. Both steps are a courtesy, so neither
+        may hold a stop: the goodbye is bounded here and the close bounds
+        itself, cancellation included (see :func:`close_socket`).
         """
         task, self._keepalive = self._keepalive, None
         if task is not None:
@@ -454,11 +554,14 @@ class DeepgramBackend(Connector[str], StreamingConnector):
             with contextlib.suppress(BaseException):
                 await task
         ws, self._stream_ws = self._stream_ws, None
-        if ws is not None:
+        if ws is None:
+            return
+        try:
             with contextlib.suppress(Exception):
-                await ws.send(json.dumps({"type": "CloseStream"}))
-            with contextlib.suppress(Exception):
-                await ws.close()
+                async with asyncio.timeout(CLOSE_TIMEOUT_S):
+                    await ws.send(json.dumps({"type": "CloseStream"}))
+        finally:
+            await close_socket(ws)
 
     async def _keep_alive(self) -> None:
         """Hold the socket open across a lull in the frames. See ``_KEEPALIVE_IDLE_S``."""
@@ -480,20 +583,27 @@ class DeepgramBackend(Connector[str], StreamingConnector):
 
 
 def _refusal(exc: InvalidStatus, model: str | None) -> StreamUnsupportedError | None:
-    """Grade a rejected upgrade, or None where it is a connection to retry.
+    """A rejected upgrade that is about the *model*, or None for anything else.
 
-    400 is what Deepgram answers a query string it will not serve - an unknown
-    model, an illegal parameter combination - and no retry changes it. Anything
-    else (401, 429, 5xx, a proxy) may well work on the next attempt, so it
-    stays the exception it was and spends one of the stream's reconnects.
+    Only a 400 whose body names the model is permanent, because only that one
+    is an answer about the thing a retry could not change. A 400 over a
+    parameter is the caller's to downgrade (see
+    :meth:`DeepgramBackend._drop_refused`) and everything else - a malformed
+    value, 401, 429, 5xx, a proxy - may well work on the next attempt, so it
+    stays the exception it was.
+
+    This used to grade *every* 400 as permanent, which meant a rejected
+    glossary field took the whole session off the streaming path, and then off
+    the utterance path too, since both shapes build one query string.
     """
     if exc.response.status_code != HTTPStatus.BAD_REQUEST:
         return None
-    detail = error_message(exc.response.body.decode("utf-8", "replace"))
-    return StreamUnsupportedError(
-        f"Deepgram will not stream {model or 'this request'}: "
-        f"{detail or exc.response.reason_phrase}"
-    )
+    body = exc.response.body.decode("utf-8", "replace")
+    detail = error_message(body) or exc.response.reason_phrase
+    haystack = f"{body} {detail}".lower()
+    if not any(word in haystack for word in _MODEL_WORDS):
+        return None
+    return StreamUnsupportedError(f"Deepgram will not stream {model or 'this request'}: {detail}")
 
 
 def _parse_results(message: dict[str, object], *, offset: float = 0.0) -> tuple[str, list[Word]]:
