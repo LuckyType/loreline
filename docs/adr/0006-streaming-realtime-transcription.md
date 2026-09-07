@@ -155,6 +155,18 @@ vendor's protocol and yields `TranscriptEvent`s as they finalize.
    `SttRouter` built with the fallback drains it exactly as it would have from
    the start.
 
+   *Hardened after review (`f21a8f1`).* The marker did not yet survive a
+   failover: a provider that ran out of reconnects published its gap
+   immediately, closed at whatever it had last written, before the caller had
+   even chosen the next provider. It now stays open across that handoff.
+   `TranscriptStream.pending_gap` hands it to `StreamPath`, which seeds it
+   into the next stream it opens, still naming the provider that lost it
+   rather than the one now carrying it, and that stream's first written frame
+   closes it, the real moment transcription resumed. A gap nothing reopens
+   for, every streamable provider retired, a handoff to the utterance path, or
+   a session ending on a dead socket, is closed instead at the last frame
+   capture produced (`StreamPath._close_gap`).
+
 4. Timeout is a liveness watchdog, not `asyncio.wait_for` around a call: audio
    sent, nothing back (no partial, no final, no acknowledgement) inside a
    configured window means the connection is dead and (3) applies.
@@ -178,6 +190,18 @@ vendor's protocol and yields `TranscriptEvent`s as they finalize.
    emits something at a turn boundary and none of them promise anything inside
    one, so silence past the end of a turn is a dead connection and silence
    during one is a long sentence.
+
+   *Hardened after review (`f21a8f1`).* A connector's `signals()` gained a
+   fifth thing to yield beside the four turn signals: `StreamAlive`, for a
+   vendor message that proves the socket is alive but names no turn
+   (Deepgram's `Metadata`, AssemblyAI's `Begin` and `Termination`, x.ai's
+   `transcript.created`). The watchdog counts messages *the stream* was told
+   about, not messages the socket carried, so a connector that consumed one of
+   these silently left it unable to tell a slow connection from a dead one.
+   `StreamConfig.quiet_grace_s` now states its invariant outright rather than
+   leaving it to this decision's prose: it must exceed the vendor's own
+   endpointing silence, or an ordinary pause would read as a dead connection
+   before the vendor had any chance to close the turn itself.
 
 5. Diarization for a migrated connector keys off the vendor's turn boundary
    instead of an `Utterance`. Remote diarization has nothing to send until a
@@ -205,6 +229,24 @@ vendor's protocol and yields `TranscriptEvent`s as they finalize.
    AssemblyAI's. For a vendor that states no offset at all the base falls back
    to the capture timestamp of the last frame written, which is late by that
    vendor's own latency and is the best answer available without one.
+
+   *Hardened after review (`f21a8f1`).* That call no longer sits in front of
+   publishing. A closed turn's clip is sliced from `RollingPcm` and the turn
+   is published unlabelled in the same step; `merge_diarization` then runs in
+   a background task bounded by 10s, and on success the same turn is
+   published again with its speakers, under the same `turn_id`, which the
+   repository upserts on and both live feeds key on, so the second
+   publication replaces the first rather than following it. On failure or
+   timeout the unlabelled row simply keeps standing, and the session's stop
+   drain gives labels still in flight a further 5s before dropping them.
+   Awaiting the diarizer in front of publishing, which is what this did, put a
+   remote HTTP call on the connector's reader task: a slow answer held the
+   reader past the stream's own watchdog and cost a healthy socket a gap
+   marker, and an error answer raised through the reader and declared the
+   vendor dead over a fault that had nothing to do with it.
+   `SttRouter._merge_diarization` took the same fix on the utterance path: a
+   diarizer error now publishes the utterance unlabelled rather than raising
+   it out of the live path.
 
 ## Consequences
 
@@ -392,6 +434,72 @@ plus `endpointing` is documented as the endpoint's default behaviour rather
 than an opt-in feature, so nothing here raises `StreamUnsupportedError`;
 whether that documentation holds, and which of the two documented readings of
 "cumulative" text is the real one, are both unverified.
+
+## Hardening after review
+
+Four fix groups landed after the connectors above were verified, closing gaps
+a review found without reopening the decisions themselves. The streaming-core
+ones are folded into Decisions (3), (4) and (5) above; this collects all four
+with their merge hashes.
+
+* **Streaming core (`f21a8f1`).** Diarization moved beside the stream
+  (Decision 5) and gap markers now survive a failover (Decision 3), both
+  above. In addition: a turn's key is derived once, when it opens, so a final
+  that revises the turn's start moves its timestamps but never the row it
+  replaces. A partial naming a turn this connection already closed is dropped
+  rather than reopened. An empty final for a turn that published an interim
+  settles with that interim's text, since a vendor closing out a near-silent
+  lead-in with nothing is routine, not a retraction. `RollingPcm.slice`
+  returns the clip's real start alongside the clip, so a turn whose opening
+  aged out of the 90-second window shifts the diarizer's segments by what was
+  actually sent rather than by what was asked for. Open turns, stated ends
+  and closed refs are each bounded per connection (32, 64 and 128
+  respectively), so a misbehaving vendor cannot grow one without bound. A stop
+  arriving mid-reconnect ends the stream at once rather than spending the rest
+  of the reconnect budget on audio that is not coming. `StreamPath.run` now
+  guards every provider's stream, so a connector that raises instead of
+  returning a `StreamOutcome` becomes a failover rather than an escaped
+  exception, and connection teardown, closing the socket and settling open
+  turns, runs each step under its own 5s bound and never raises.
+  `SttRouter._merge_diarization`
+  gained the same resilience as the streaming path: a diarizer error
+  publishes the utterance unlabelled instead of raising out of the live path.
+* **Diarization service (`c5e7868`).** A cluster with no segment over the
+  minimum embedding length may match a remembered voice but never opens a new
+  one. `DIAR_MAX_SPEAKERS` (default 12) bounds a session's bank when the
+  caller sends no `max_speakers` of its own, which is always true on the live
+  path. The degrade path no longer renumbers the whole call when one cluster
+  has no embedding: that cluster's segments are left unlabelled and the rest
+  still resolves against the session, rather than every speaker in the call
+  losing its session identity because one cluster could not be placed.
+  `/healthz` also loads the embedding extractor and reports
+  `session_memory: true` and a per-process `generation`, so `probe_diarizer`
+  grades a service without the flag `DEGRADED` rather than `HEALTHY`.
+  `install.sh` writes `COMPOSE_PROFILES=diarization` to `.env` so later
+  updates rebuild the service's image; `update.sh` and `update-fast.sh` print
+  the manual rebuild command when a diarization container is running with the
+  profile inactive. See ADR 0007's restart bullet for the session-memory side
+  of this.
+* **Reprocess bank id (`6148240`).** A re-transcribe job diarizes under
+  `{session_id}:job:{job.id}` through `_JobBankDiarizer` (`reprocess/jobs.py`)
+  and deletes only that bank at close: its own `RemoteDiarizer` used to share
+  the live session's bank id, so closing it after the job finished deleted
+  the live capture's remembered speakers out from under it. `merge.py`'s
+  wordless-turn fallback sums each speaker's overlap across every segment
+  touching the span rather than taking whichever single segment overlapped
+  most.
+* **Transcript UI (`a97bd7a`).** The session page dims interim rows. A
+  session still `CAPTURING` when the process dies has its leftover interims
+  swept at the same startup pass that fails it
+  (`SessionRepository.mark_interrupted`), so a killed process does not leave
+  a half-typed row looking like settled text forever. The dashboard's live
+  feed keys a turn by session id as well as source and turn id, since a
+  vendor's own turn handle can restart from a small integer every session
+  (AssemblyAI does), which used to let a new session's first turn replace the
+  previous session's row in a pane that never clears between sessions. Gap
+  markers are excluded from segment counts, the session player's timeline
+  dots, and search, since a gap is audio nobody transcribed rather than a
+  segment of speech.
 
 ## Implementation plan
 
