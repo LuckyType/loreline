@@ -6,16 +6,35 @@ capture device). Exposes the HTTP contract consumed by Loreline's
 
 ## Endpoints
 
-- `GET /healthz` -> `{"status": "ok"}`, or HTTP 503 with `{"detail": ...}` until
-  both models below are configured and have loaded successfully
-- `POST /diarize` (multipart `file` = mono WAV) -> `{"segments": [{start, end, speaker}, ...]}`,
-  or the same HTTP 503 shape while the models are not ready
+- `GET /healthz` -> `{"status": "ok", "session_memory": true, "generation": "..."}`,
+  or HTTP 503 with `{"detail": ...}` until both models below are configured and
+  have loaded successfully
+- `POST /diarize` (multipart `file` = mono WAV) ->
+  `{"segments": [{start, end, speaker}, ...], "generation": "..."}`, or the same
+  HTTP 503 shape while the models are not ready
 - `DELETE /sessions/{session_id}` -> `{"deleted": bool}`, forgetting one session's
   remembered speakers. 200 either way, including for an id that was never seen.
 
-Speaker labels are consecutive (`Speaker 0..k-1`) regardless of raw cluster ids. If
-`min_speakers` and `max_speakers` are both sent and equal, that exact cluster count
-is enforced (otherwise clustering is automatic).
+Two fields describe the service rather than the audio. `session_memory` says this
+build understands `session_id` instead of accepting and ignoring it, which is what
+the image before it did and what no status code distinguishes; Loreline's endpoint
+probe grades a service without the flag as degraded and says so on the settings
+page. `generation` identifies this process and changes when it restarts, which is
+how a caller notices that a session's speaker numbering has started over (the bank
+is process memory - see below).
+
+What the labels mean depends on whether the call carries a `session_id`:
+
+- **Without one**, they are consecutive per call (`Speaker 0..k-1`) regardless of
+  raw cluster ids, and mean nothing from one call to the next. If `min_speakers`
+  and `max_speakers` are both sent and equal, that exact cluster count is enforced
+  (otherwise clustering is automatic).
+- **With one**, they are the session's speaker numbers, so a call can answer
+  `Speaker 3` alone, and can leave a gap. A cluster the session could not place -
+  no embedding at all, or one from a fragment too short to identify anyone by that
+  matched no known voice - has its segments left out of the answer rather than
+  labelled with a number that would name somebody else. Loreline's merge already
+  handles words that no segment covers, which is what those words become.
 
 ## Session speaker memory
 
@@ -60,6 +79,7 @@ what Loreline sends when a capture stops.
 | `DIAR_SPEAKER_THRESHOLD` | `0.5` | Cosine similarity above which a cluster is a voice the session already knows |
 | `DIAR_SESSION_TTL_S` | `3600` | Idle seconds before a session's bank is evicted |
 | `DIAR_MAX_SESSIONS` | `32` | How many sessions are remembered at once |
+| `DIAR_MAX_SPEAKERS` | `12` | How many voices one session may open before a further one borrows the nearest label instead. `0` lifts the cap |
 
 The default threshold comes from a measurement rather than a guess: on a
 two-narrator LibriVox clip through the models below, embeddings of the same
@@ -67,9 +87,26 @@ speaker sit at cosine 0.63 to 0.88 (median 0.77) and of different speakers at
 -0.00 to 0.22 (median 0.14). 0.5 is the middle of that gap, and is also what
 the within-call clustering uses as its distance threshold.
 
-Session memory loads a second copy of the embedding model, once, on the first
-call that asks for it: sherpa-onnx's diarization API returns clustered segments
-and never the embeddings behind them, so there is nothing to reuse.
+`DIAR_MAX_SPEAKERS` is the only bound on the live path, which sends neither
+`min_speakers` nor `max_speakers`: one utterance cannot say how many people are
+at the table. A tabletop group is three to six people, eight with guests, so the
+default of twelve is roughly double a large table - it cannot squeeze out a voice
+that is really there, and it still stops a noisy room from growing a speaker list
+nobody can rename. A `max_speakers` sent with a call overrides it for that call.
+
+A restart renumbers. The bank is this process's memory and nothing else (one
+container per box, no store to keep in step), so a service restarted mid-session
+forgets every voice and numbers the next turn from `Speaker 0` again. That is why
+every answer carries `generation`: Loreline logs a warning the first time it
+changes for a session, and the fix is renaming the speakers on the session page,
+since only a human knows which half of the transcript was whom.
+
+Session memory loads a second copy of the embedding model, once: sherpa-onnx's
+diarization API returns clustered segments and never the embeddings behind them,
+so there is nothing to reuse. `/healthz` loads it too, rather than waiting for
+the first session call to reach it - every call Loreline makes carries a session
+id, so a service whose extractor cannot load can serve none of them, and a health
+check that skipped it would report that service as healthy.
 
 ## Models
 
@@ -101,5 +138,8 @@ docker run --rm -p 8001:8001 \
 If the models are not configured, or fail to load, both `/healthz` and `/diarize`
 return HTTP 503: the first successful call loads them and the result is cached
 for the life of the process, so a misconfigured deployment shows unhealthy
-before a diarize job ever runs, not only once one fails. Use
-`mocks/diarization.py` for offline development/tests.
+before a diarize job ever runs, not only once one fails. A *failed* load is
+cached too, for a minute, so a broken deployment does not run a doomed ONNX
+init for every request it is sent, while a volume that mounts late is still
+picked up without a restart. Use `mocks/diarization.py` for offline
+development/tests.

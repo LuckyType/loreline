@@ -11,6 +11,13 @@ session's voices and answers with labels stable across calls, which needs the
 embedding models this mock exists to avoid. What a test can assert here is that
 the app sends the id and drops the session afterwards, which is the part that
 lives in ``RemoteDiarizer``.
+
+It does answer the two fields the client reads about the service itself, since
+those are contract rather than modelling: ``session_memory`` in ``/healthz``,
+which says the build understands ``session_id`` at all (an older image accepts
+the field and ignores it, and the probe grades that as degraded), and a
+``generation`` per app instance, which the client watches for the restart that
+renumbers a session's speakers.
 """
 
 # pyright: reportUnusedFunction=false
@@ -18,6 +25,7 @@ lives in ``RemoteDiarizer``.
 from __future__ import annotations
 
 import io
+import secrets
 import wave
 
 from fastapi import FastAPI, Form, UploadFile
@@ -41,10 +49,14 @@ def create_app() -> FastAPI:
     app = FastAPI(title="mock-diarization")
     app.state.seen_sessions = []
     app.state.deleted_sessions = []
+    # Per app, not per module: a test that builds two of these is two services,
+    # and the second one restarting is precisely what a generation is for.
+    generation: str = secrets.token_hex(8)
+    app.state.generation = generation
 
     @app.get("/healthz")
     async def healthz() -> JSONResponse:
-        return JSONResponse({"status": "ok"})
+        return JSONResponse({"status": "ok", "session_memory": True, "generation": generation})
 
     @app.delete("/sessions/{session_id}")
     async def forget_session(session_id: str) -> JSONResponse:
@@ -70,7 +82,7 @@ def create_app() -> FastAPI:
             {"start": 0.0, "end": half, "speaker": "Speaker 0"},
             {"start": half, "end": round(duration, 3), "speaker": "Speaker 1"},
         ]
-        return JSONResponse({"segments": segments})
+        return JSONResponse({"segments": segments, "generation": generation})
 
     return app
 

@@ -155,6 +155,27 @@ async def probe_endpoint(
     adding a trailing slash, is a working provider and should not read as one
     that answered strangely.
     """
+    report, _response = await probe_endpoint_response(
+        client, path, params=params, timeout_s=timeout_s
+    )
+    return report
+
+
+async def probe_endpoint_response(
+    client: httpx.AsyncClient,
+    path: str,
+    *,
+    params: dict[str, str | int] | None = None,
+    timeout_s: float = PROBE_TIMEOUT_S,
+) -> tuple[HealthReport, httpx.Response | None]:
+    """:func:`probe_endpoint`, handing back the answer as well as the verdict.
+
+    For the probe that has to read the body and not only the status: the
+    diarizer's does, to see whether the service advertises session speaker
+    memory, which no status code can say. Asking a second time to get the body
+    would double a request whose whole point is to be cheap. The response is
+    None exactly when nothing answered. Never raises, like everything here.
+    """
     try:
         # The wrapper, not the client's own timeout, is the real bound here:
         # connectors hand this their long-lived transcription client, whose
@@ -162,15 +183,15 @@ async def probe_endpoint(
         async with asyncio.timeout(timeout_s):
             response = await client.get(path, params=params, follow_redirects=True)
     except (TimeoutError, httpx.TimeoutException):
-        return HealthReport(HealthStatus.UNREACHABLE, f"no answer within {timeout_s:.0f}s")
+        return HealthReport(HealthStatus.UNREACHABLE, f"no answer within {timeout_s:.0f}s"), None
     except httpx.HTTPError as exc:
-        return HealthReport(HealthStatus.UNREACHABLE, _transport_detail(exc))
+        return HealthReport(HealthStatus.UNREACHABLE, _transport_detail(exc)), None
     except Exception as exc:
         # Anything else is a bug in this app, not a verdict about the provider,
         # so it degrades to "we could not tell" rather than to "down".
         log.warning("health.probe.unexpected_error", path=path, error=str(exc))
-        return HealthReport(HealthStatus.UNKNOWN, "the probe itself failed")
-    return classify_response(response)
+        return HealthReport(HealthStatus.UNKNOWN, "the probe itself failed"), None
+    return classify_response(response), response
 
 
 def classify_response(response: httpx.Response) -> HealthReport:
