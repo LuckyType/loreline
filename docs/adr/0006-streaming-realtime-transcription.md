@@ -210,9 +210,11 @@ vendor's protocol and yields `TranscriptEvent`s as they finalize.
 
 * Batch and reprocess are untouched: same contract, same connectors, same
   test fakes, same `stored_audio_backend()` forcing `prefer_batch=True`.
-* The four per-utterance connectors keep their behavior and their 800ms/30s
-  floor until each is migrated; a half-finished migration leaves every model
-  working, some faster than others.
+* The four per-utterance connectors have since been migrated (Phase 3, all
+  four merged on this branch): the 800ms/30s floor now describes only the
+  utterance path itself, batch, reprocess, the call-shaped fallback, and
+  whichever models a migrated connector still cannot stream (OpenAI's two
+  realtime-routed models; see "What the real vendor said" below).
 * `stt/base.py`'s docstring and ADR 0005 stay correct for batch and for any
   unmigrated realtime connector; once one is migrated, both need a line
   saying a second shape exists. That docstring also still counts "eight real
@@ -223,12 +225,17 @@ vendor's protocol and yields `TranscriptEvent`s as they finalize.
 * CONTEXT.md's Transport definition becomes literally true for a migrated
   connector, and `openai_realtime.py`'s module docstring, which still says
   "we open a session per voiced utterance" above an `_ensure_ws` that does
-  the opposite, gets corrected on the way.
+  the opposite, gets corrected on the way. *Done on landing: CONTEXT.md's
+  Transport entry says so directly, and the module docstring now describes
+  both shapes and why OpenAI keeps them on separate sockets.*
 * A reprocess version of a streamed session will not line up segment for
   segment with its original: reprocess reads VAD boundaries from the index,
   the original carries the vendor's turns. Nothing breaks, the index has no
   reader in the browser, but the two versions of one session will differ in
-  shape, not only in text, and the version list should say so.
+  shape, not only in text, and the version list should say so. *Done,
+  fast-forwarded onto this branch at `d13fdc2`: `TranscriptVersions.svelte`
+  shows a note under the version table whenever at least one re-transcription
+  job exists alongside an original that carries a `turn_id`.*
 * Interim events are the user-visible win of streaming and the thing most
   likely to corrupt the transcript if published early: finals only in Phase
   1, and replace-by-key semantics in `_persist` and both `LiveFeed`s before
@@ -258,8 +265,10 @@ vendor's protocol and yields `TranscriptEvent`s as they finalize.
   parts of Phase 4 that Phase 1 turned out to need (replace-by-key, the
   remote-diarization buffering). They are left as written, because what they
   record is why each piece was thought to be separable, and two of them were
-  not. Phase 3, the remaining four connectors, and Phase 5, the ADR that
-  supersedes this one, are still ahead.
+  not. Phase 3, the remaining four connectors, has since landed (see "What
+  the real vendor said" below for each); of Phase 5, the docstring and
+  CONTEXT.md updates landed with Phase 1, and only its closing ADR is still
+  ahead.
 
 ## What the real vendor said
 
@@ -303,6 +312,87 @@ said, on 2026-09-07 against real OpenAI:
   vendor emits *something* at a turn boundary and none of them promise
   anything inside one.
 
+Phase 3 repeated the same harness against the other four vendors as each was
+migrated, all on 2026-09-07 unless noted.
+
+**AssemblyAI**, `universal-3-5-pro`, merged at `a4d7351`:
+
+* Interims arrive mid-turn: first interim **1004ms** median, final **988ms**
+  median after a turn ends. A 60s LibriVox clip at wall clock produced 8
+  turns, 0 gaps, sentence-shaped 3.3-10s spans with a visible 10.0s cap and a
+  dropped word at two turn boundaries.
+* **Deviation from the plan.** The endpoint closes any single audio message
+  outside 50-1000ms (close code 3007, "Input Duration Violation", verified
+  live), which Phase 0 did not anticipate: the streaming shape buffers audio
+  to 60ms before sending rather than at capture size.
+* Labels are session-scoped and hold across turns, the reason this vendor was
+  worth migrating for diarization, but accuracy on a two-narrator clip was
+  poor: 8 of 10 turns labelled B including clear narrator-A passages, and a
+  second speaker invented on 2 of 8 single-narrator turns. Spliced readings
+  are not a real conversation, so this is a caveat on the measurement, not a
+  verdict on the feature.
+* **The language finding.** `prepare()` and `open_stream()` both sent
+  `language=<row language>` in the query string, which Universal-Streaming v3
+  does not define as a parameter at all; the vendor silently dropped it and
+  picked up no language hint. The real parameter is `language_codes`, a JSON
+  array (`?language_codes=["de"]`), documented for `universal-3-5-pro` only.
+  Fixed at `f8d832f`, on this branch as of `7bbcb70`: both call sites build
+  the query string through the connector's one `_params` method, so the fix
+  is gated on the model in one place. Verified by unit and integration tests
+  pinning the query-string encoding, and against the real vendor with a
+  German LibriVox clip streamed at wall clock: 8 turns of correct German over
+  60 s, first interim 1062 ms median, final 768 ms median, and `transcribe_one`
+  on a 7 s clip equally correct. The old `language=de` also came back as
+  German on that clean clip, because `universal-3-5-pro` code-switches by
+  default, so the value of the fix is deterministic steering rather than a
+  visible change on easy audio.
+
+**Deepgram**, `nova-3`, merged at `fcd0af3`:
+
+* Interims arrive roughly once a second: first interim **988ms** median on a
+  60s single-reader clip, **1151ms** on a 90s two-reader clip. Final text
+  lands 152 to 187ms after a turn ends. 0 gaps. Diarization: 91% of words
+  outside the splices carried the right narrator's label, and each narrator
+  kept one speaker number for the whole clip.
+* Two places the real vendor contradicts its own docs. `SpeechStarted` is not
+  a turn start: 12 arrivals for 7 turns, and every timestamp lagged the
+  segment it belonged to, so the connector does not use it. `UtteranceEnd`
+  can arrive late, describing a turn `speech_final` already closed, without
+  the documented `last_word_end: -1` marker (4 of 4 measured); it is ignored
+  whenever its own end is at or before the open turn's start, since acting on
+  it orphaned dimmed interim rows that never resolved.
+* No change to `streaming.py` was needed for this vendor; its turn shape fit
+  the contract as written.
+
+**Gemini Live**, `gemini-3.5-transcribe-live`, merged at `5631eaf`, 90 turns
+over a 780s paced run:
+
+* First interim **752ms** after speech onset (p90 1264ms); 89 of 90 turns
+  carried several mid-turn revisions (median 16); final text settled **265ms**
+  after the last interim (p90 450ms); turn length p50 7.0s. A separate paced
+  13-minute run cost one gap marker of one second.
+* **Session cap, and a deviation from the plan.** `goAway` arrives after 9
+  minutes with `timeLeft: "50s"`, and the connector spends that time by
+  leaving at the next turn boundary, so the reconnect lands on silence rather
+  than mid-word. `sessionResumption` is accepted in every setup, but the
+  service has never once answered with a handle, so every reconnect is a
+  fresh session regardless.
+* `silenceDurationMs: 300` was chosen from three runs (500 produced 4 to 23s
+  turns, 200 split a sentence mid-way); `endOfSpeechSensitivity` was measured
+  inert.
+* No offsets at all: Google states no timing of any kind for this model, so
+  `at` stays unset and the base falls back to the capture timestamp of the
+  last frame written, exactly as Decision (5) anticipated for "a vendor that
+  states no offset at all."
+* Unverified: `contextWindowCompression` as a way to extend the 9-minute cap.
+
+**x.ai**, mock-verified only: no `xai-` key exists in the secret store, so
+this connector has never spoken to the real endpoint. `interim_results=true`
+plus `endpointing` is documented as the endpoint's default behaviour rather
+than an opt-in feature, so nothing here raises `StreamUnsupportedError`;
+whether that documentation holds, and which of the two documented readings of
+"cumulative" text is the real one, are both unverified.
+
 ## Implementation plan
 
 **Phase 0, research, no code.** Each connector already parses part of its
@@ -325,6 +415,10 @@ confirm the server VAD event names and that `speech_started`/`speech_stopped`
 carry the offsets a `start_ts` needs. Write the per-vendor findings down
 before Phase 1.
 
+**Landed**: each connector's module docstring records these per-vendor
+findings, updated against the real service rather than left as this phase's
+notes alone.
+
 **Phase 1, OpenAI Realtime only, behind an opt-in.** Server VAD on, a
 persistent reader task, one `TranscriptEvent` per server-decided turn with
 timing from the VAD events, finals only. Add the `SessionManager` streaming
@@ -333,6 +427,17 @@ standard this project already applies to realtime vendors, measure latency
 against today's 800ms floor, and check the session page and diarization
 before touching any other connector.
 
+**Landed**, at `21a1524`, with two deviations from this paragraph. No opt-in
+flag exists or was needed: `SessionManager` picks the streaming path from a
+fact about the connector's class (`is_streaming(primary)`), never from a flag
+or the model row, so migrating a connector is what turns its models on (see
+the docstring above `_start_live_path` in `session/manager.py`). And interims
+shipped from the start rather than finals only, per the amendment under
+Decision (1). The connector migrated first turned out to be inert for both
+models `capabilities.yaml` routes to it, since OpenAI refuses server VAD for
+`gpt-live-transcribe` and `gpt-realtime-whisper`; see "What the real vendor
+said" above.
+
 **Phase 2, failover and timeout for a stream.** Build Decision (3) and (4)
 against the Phase 1 connector plus a call-shaped fallback. A fallback is any
 enabled provider row (`SessionManager._resolve_providers`, `req.
@@ -340,9 +445,24 @@ fallback_provider`), so a streaming primary with a batch fallback is a
 configuration a user can already save; this is where the two shapes first
 have to hand audio to each other.
 
+**Landed**: `StreamConfig`, `TranscriptStream`'s reconnect and watchdog, and
+`StreamPath.handoff` in `session/streaming.py` are this phase, and the
+amendments under Decision (3) and (4) are what real audio changed about it.
+
 **Phase 3, the remaining four**, one at a time: `AssemblyAIBackend`,
 `DeepgramBackend`, `GeminiLiveBackend`, `XaiBackend`, each verified against
 its real vendor with paced audio.
+
+**Landed**, verified against the real vendor for three of the four
+(AssemblyAI at `a4d7351`, Deepgram at `fcd0af3`, Gemini Live at `5631eaf`; see
+"What the real vendor said" above for the numbers). `XaiBackend` landed on
+this branch too but mock-verified only, no `xai-` key exists in this
+environment's secret store. Two deviations the plan did not anticipate:
+AssemblyAI's streaming shape buffers audio to 60ms before sending rather than
+at capture size, because the endpoint closes any single message outside
+50-1000ms; and Gemini Live leaves its session at the next turn boundary
+rather than mid-turn when the vendor sends `goAway`, so its 9-minute session
+cap costs a reconnect timed to land on silence instead of a word.
 
 **Phase 4, what a turn carries.** With real turn shapes in hand: the
 remote-diarization buffering from Decision (5), timestamps for the two
@@ -352,7 +472,21 @@ no longer match the original's. Consider scoping the speaker-consistency gap
 alongside, since both are about what a turn means once STT stops being the
 source of utterance boundaries.
 
+**Landed earlier than written here**: the remote-diarization buffering and
+the replace-by-key handling arrived with Phase 1 rather than after Phase 3,
+because Phase 1 needed both to ship interims safely (see the amendments under
+Decision (1) and (5)). The version-list note landed separately
+(`TranscriptVersions.svelte`, fast-forwarded onto this branch at `d13fdc2`).
+The speaker-consistency gap was scoped alongside as suggested here, and
+closed by ADR 0007 rather than by this one.
+
 **Phase 5, close the loop.** Update `stt/base.py`'s docstring, CONTEXT.md's
 Transport definition and `openai_realtime.py`'s module docstring to what
 shipped, and record the final shape in a new ADR that supersedes this one,
 the way ADR 0005 superseded one bullet of ADR 0001.
+
+**Landed in part**: the docstring and CONTEXT.md updates shipped with Phase
+1, ahead of schedule (see Consequences). The new ADR to supersede this one
+has not been written; this docs pass extended this ADR in place instead with
+the other four vendors' measurements and the language finding, since nothing
+here has been superseded, only completed.

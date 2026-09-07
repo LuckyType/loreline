@@ -245,5 +245,22 @@ run_docker compose up -d --no-build app
 # would be silly.
 run_docker compose images app || true
 
+# The diarization service is built from this checkout and published to no
+# registry, so this path cannot update it at all: there is nothing to pull, and
+# the recreate above is scoped to `app` whether or not the diarization profile
+# is active. That is not a reason to change what this script does - the fast
+# path exists precisely to touch one service - but it is a reason to say so
+# when that service is actually running, instead of leaving an operator to
+# assume "Update complete" covered it. `docker ps` and not `compose ps`, which
+# filters by active profile; captured and matched rather than piped into
+# `grep -q`, which would SIGPIPE the producer under `set -o pipefail`.
+DIAR_RUNNING="$(run_docker ps --filter label=com.docker.compose.service=diarization --format '{{.Names}}' 2>/dev/null || true)"
+if [[ -n ${DIAR_RUNNING} ]]; then
+  echo
+  echo "note: the diarization service is built from this checkout rather than pulled,"
+  echo "      so this fast path never updates it. To rebuild that service:"
+  echo "        docker compose --profile diarization up -d --build diarization"
+fi
+
 echo "Update complete."
 }

@@ -51,5 +51,32 @@ sudo docker compose up -d --build --remove-orphans
 
 NEW_COMMIT="$(git rev-parse HEAD)"
 echo "new_commit=${NEW_COMMIT}"
+
+# The diarization service is built from this checkout exactly like the app is,
+# but only when its compose profile is active for this project: the `up` above
+# passes no --profile and takes COMPOSE_PROFILES from .env, which
+# deploy/install.sh writes there when the profile is chosen at install time. A
+# box that started that service some other way - by hand, or from Settings >
+# Services - has it running with the profile recorded nowhere, and this update
+# would leave it on the image it was first built with while updating everything
+# around it. Say so, with the command that fixes it, rather than let a stale
+# diarizer look updated.
+#
+# `docker ps` rather than `compose ps`, because the latter filters by active
+# profile and that is the very thing being tested here. Both answers are
+# captured and then matched with bash, not piped into `grep -q`: grep exits at
+# the first match, SIGPIPEs the producer, and `set -o pipefail` turns that into
+# a failed update (same trap as have_pkg in deploy/install.sh).
+DIAR_RUNNING="$(sudo docker ps --filter label=com.docker.compose.service=diarization --format '{{.Names}}' 2>/dev/null || true)"
+DIAR_ACTIVE="$(sudo docker compose config --services 2>/dev/null || true)"
+if [[ -n ${DIAR_RUNNING} && $'\n'${DIAR_ACTIVE}$'\n' != *$'\n'diarization$'\n'* ]]; then
+  echo
+  echo "note: the diarization service is running, but its compose profile is not"
+  echo "      active here, so it was not rebuilt. To update that service too:"
+  echo "        sudo docker compose --profile diarization up -d --build diarization"
+  echo "      To have every update rebuild it, add this line to ${APP_DIR}/.env:"
+  echo "        COMPOSE_PROFILES=diarization"
+fi
+
 echo "Update complete."
 }

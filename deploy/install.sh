@@ -341,6 +341,42 @@ ENVFILE
   msg_ok "Wrote .env"
 fi
 
+# --- compose profiles -------------------------------------------------------
+# Record a chosen diarization profile in .env, not only in the --profile flag
+# passed to the `up` further down. Compose reads its own pre-defined variables
+# from three places - "the .env file located in the working directory", the
+# shell, and CLI flags - and COMPOSE_PROFILES is one of those variables, so a
+# line here is what makes the profile this project's default for every later
+# `docker compose` on this box.
+#
+# Without it the diarization image is built exactly once, by this install, and
+# never again: deploy/update.sh runs `up -d --build` with no profile,
+# deploy/update-fast.sh recreates only `app`, and neither has any way to know
+# this box asked for diarization. The service would stay on its first-install
+# image while the app it serves is updated around it.
+#
+# Only appended when the key is absent, so a value edited by hand (a second
+# profile, say) survives re-running this installer, and only for diarization:
+# local-stt is pulled rather than built here, so nothing about updating it
+# depends on the profile being recorded. Non-fatal - a box whose .env this user
+# cannot append to still has a working install, it just needs the manual
+# rebuild command that the update scripts print.
+if [[ $ENABLE_DIAR == yes ]] && ! grep -q '^COMPOSE_PROFILES=' .env 2>/dev/null; then
+  if {
+    echo ""
+    echo "# Profiles Compose enables without being passed --profile. Written here"
+    echo "# because deploy/update.sh passes none, and the diarization service is"
+    echo "# built from this checkout: without this line an update rebuilds the app"
+    echo "# and leaves the diarizer on the image it was installed with. Remove the"
+    echo "# line to stop starting that service on a plain \`docker compose up -d\`."
+    echo "COMPOSE_PROFILES=diarization"
+  } >>.env 2>/dev/null; then
+    msg_ok "Recorded COMPOSE_PROFILES=diarization in .env (so updates rebuild it)"
+  else
+    msg_warn "Could not add COMPOSE_PROFILES=diarization to .env - add it by hand, or updates will not rebuild the diarization image"
+  fi
+fi
+
 # Mic passthrough is a compose-file concern, not an env var: an override file
 # keeps docker-compose.yml itself untouched (so `git pull` never conflicts).
 if [[ $ENABLE_MIC == yes ]]; then
@@ -422,6 +458,6 @@ echo ""
 echo -e "${DIM}  Logs         sudo docker compose logs -f app"
 echo -e "  Update       deploy/update.sh"
 [[ $ENABLE_STT == no ]] && echo -e "  Local STT    sudo docker compose --profile local-stt up -d"
-[[ $ENABLE_DIAR == no ]] && echo -e "  Diarization  sudo docker compose --profile diarization up -d"
+[[ $ENABLE_DIAR == no ]] && echo -e "  Diarization  sudo docker compose --profile diarization up -d\n               (then add COMPOSE_PROFILES=diarization to .env, or updates won't rebuild it)"
 echo -e "  Bluetooth    bash deploy/setup-bluetooth-audio.sh${CL}"
 echo ""

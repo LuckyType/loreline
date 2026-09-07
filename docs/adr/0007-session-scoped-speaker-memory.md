@@ -48,3 +48,9 @@ speakers: the models were never the problem, the call pattern was.
 * A wrong match is now sticky within a session rather than only within an
   utterance. A forced match, made when the bank is at its cap, deliberately
   does not update the centroid it borrowed.
+* A service restart renumbers a session's speakers: the bank is process memory,
+  so the first turn after a restart starts again at `Speaker 0` and one label
+  ends up naming two people. Every answer carries a generation id that changes
+  with the process, and the app logs a warning the first time it changes for a
+  session; the fix is renaming the speakers on the session page, because only a
+  human knows which half of the transcript was whom.

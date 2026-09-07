@@ -98,3 +98,23 @@ def test_assign_speakers_event_takes_the_dominant_segment_over_its_span() -> Non
         SpeakerSegment(start=0.2, end=1.0, speaker="Speaker 1"),
     ]
     assert assign_speakers(event, segments).speaker == "Speaker 1"
+
+
+def test_assign_speakers_event_level_sums_overlap_per_speaker() -> None:
+    """No words: the fallback must sum a speaker's overlap across every
+    segment, not take whichever single segment is longest.
+
+    Speaker A only ever holds the floor in short bursts (three 2s segments,
+    6s total); Speaker B holds it continuously for one 3s segment. No single
+    A segment beats B's, but A held the turn longer overall and must win.
+    """
+    event = TranscriptEvent(
+        session_id="s1", source="p1", text="x", start_ts=0.0, end_ts=11.0, is_final=True
+    )
+    segments = [
+        SpeakerSegment(start=0.0, end=2.0, speaker="Speaker A"),
+        SpeakerSegment(start=3.0, end=5.0, speaker="Speaker A"),
+        SpeakerSegment(start=6.0, end=8.0, speaker="Speaker A"),
+        SpeakerSegment(start=8.0, end=11.0, speaker="Speaker B"),
+    ]
+    assert assign_speakers(event, segments).speaker == "Speaker A"
