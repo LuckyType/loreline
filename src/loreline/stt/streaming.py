@@ -223,6 +223,13 @@ class StreamingConnector(ABC):
         connection must be dropped or deliberately kept (a "this model rejects
         the prompt parameter" flag is worth keeping; a socket is not). Raising
         counts as one failed attempt against the stream's reconnect budget.
+
+        Raise :class:`StreamUnsupportedError` instead where the vendor says it
+        will not stream *this model*, which is an answer no retry can change:
+        the stream stops at once and the session runs this same provider on the
+        utterance path. Check for it here rather than declaring it, because the
+        vendor is where the answer lives; OpenAI's is a rejected
+        ``turn_detection`` in its reply to ``session.update``.
         """
 
     @abstractmethod
