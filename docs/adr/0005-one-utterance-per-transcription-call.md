@@ -31,3 +31,8 @@ for the glossary ceiling and for the declared conflicts.
 * What a connector keeps between utterances is instance state and reads as it:
   the Realtime socket, the `verbose_json` tri-state, the guard's reported flag.
 * `prepare` runs per utterance and stays cheap: it shapes values in memory.
+* Superseded in part by ADR 0006: live capture on a connector with the
+  streaming shape is fed raw frames with no caller-decided boundary at all,
+  not one utterance per call. This ADR's contract stands unchanged for batch,
+  reprocess, the call-shaped fallback path, and any realtime connector that
+  has not implemented the streaming shape.
