@@ -15,6 +15,12 @@ clock, one 20 ms frame at a time with a real sleep between them, and reports:
 * **time to final**, from the moment the speaker *stopped* to the settled text.
   Compare against the utterance path's floor, which is 800 ms of trailing
   silence before the vendor is even asked, plus the round trip.
+* the same two again for a vendor that reports **no offsets at all**, where
+  both of the above are circular: the stream dates such a turn from the frame
+  in flight when the vendor first mentioned it, so "from the turn's start" is
+  zero by construction. Those two are measured from the clip's own speech
+  instead (see :class:`_Speech`) and from the turn's newest interim, which is
+  the closest thing to when the vendor thought the speaker had stopped.
 
 Never burst the audio in: a paced feed is not politeness, it is a correctness
 condition. At least one vendor's turn machinery desynchronizes when audio
@@ -65,10 +71,51 @@ _DOWNLOAD_URL = "https://archive.org/download/{item}/{name}"
 _CAPTURE_RATE = 16000
 _FRAME_MS = 20
 _FRAME_BYTES = _CAPTURE_RATE * _FRAME_MS // 1000 * 2
-# Mean absolute sample value above which a frame counts as speech. Only the
-# liveness watchdog reads this, so a threshold is enough and Silero is not
-# worth the model download here.
+# Mean absolute sample value above which a frame counts as speech. The liveness
+# watchdog reads it, and so does _Speech below, so a threshold is enough and
+# Silero is not worth the model download here.
 _SPEECH_LEVEL = 300
+# Quiet this long ends a span of local speech. Longer than the pauses inside a
+# sentence, shorter than the ones between two people's turns.
+_HANGOVER_S = 0.5
+
+
+@dataclass
+class _Speech:
+    """When the clip's own audio was voiced, on the capture clock.
+
+    Only needed for a vendor that reports no offsets at all: for one that does,
+    the turn's own ``start_ts`` already says when the speaker started, and "time
+    to first interim" is measured from it. Gemini Live states nothing, so the
+    stream dates a turn from the frame that was in flight when the first partial
+    arrived, and measuring against that would answer zero to the one question
+    the whole feature is about. The threshold here is not Google's endpointing
+    and is not meant to be: it is a second opinion on when somebody started
+    talking, which is what makes a latency number mean something.
+    """
+
+    spans: list[list[float]] = field(default_factory=list[list[float]])
+    _quiet_since: float | None = None
+
+    def feed(self, ts: float, *, voiced: bool) -> None:
+        if voiced:
+            self._quiet_since = None
+            if not self.spans or self.spans[-1][1] > 0:
+                self.spans.append([ts, 0.0])
+            return
+        if self.spans and self.spans[-1][1] == 0:
+            self._quiet_since = self._quiet_since or ts
+            if ts - self._quiet_since >= _HANGOVER_S:
+                self.spans[-1][1] = self._quiet_since
+
+    def around(self, ts: float) -> tuple[float, float] | None:
+        """The span of local speech a turn dated ``ts`` belongs to.
+
+        The last one that began at or before it, since a vendor's turn is always
+        reported after the speech that produced it.
+        """
+        earlier = [s for s in self.spans if s[0] <= ts]
+        return (earlier[-1][0], earlier[-1][1] or ts) if earlier else None
 
 
 @dataclass
@@ -80,6 +127,10 @@ class _Turn:
     end_ts: float = 0.0
     text: str = ""
     first_interim_at: float | None = None
+    # The newest interim, which is where the vendor had got to just before it
+    # settled: for one that reports no end offset, the distance from here to
+    # the final is the closest thing to "how long the text took to settle".
+    last_interim_at: float | None = None
     final_at: float | None = None
     revisions: int = 0
     interims: int = 0
@@ -119,6 +170,7 @@ class _Recorder:
             turn.final_at = turn.final_at or now
         else:
             turn.interims += 1
+            turn.last_interim_at = now
             if turn.first_interim_at is None:
                 turn.first_interim_at = now
 
@@ -322,9 +374,12 @@ async def _run(args: argparse.Namespace) -> int:
     print(f"feeding {len(frames)} frames ({len(frames) * _FRAME_MS / 1000:.0f}s) at wall clock")
 
     started = time.monotonic()
+    speech = _Speech()
     for index, frame in enumerate(frames):
         now = time.monotonic()
-        stream.feed(frame, now, is_speech=_is_speech(frame))
+        voiced = _is_speech(frame)
+        speech.feed(now, voiced=voiced)
+        stream.feed(frame, now, is_speech=voiced)
         # Against the run's own start, not the previous frame: sleeping a fixed
         # interval per frame drifts late by whatever each iteration costs, and
         # over a minute that is a feed slower than real time.
@@ -333,25 +388,38 @@ async def _run(args: argparse.Namespace) -> int:
     outcome = await task
     await backend.aclose()
 
-    _report(recorder, outcome, started)
+    _report(recorder, outcome, started, speech)
     return 0
 
 
-def _report(recorder: _Recorder, outcome: str, started: float) -> None:
+def _report(recorder: _Recorder, outcome: str, started: float, speech: _Speech) -> None:
     print(f"\nstream ended: {outcome}; {len(recorder.turns)} turns, {len(recorder.gaps)} gaps\n")
     interims: list[float] = []
     finals: list[float] = []
+    heard: list[float] = []
+    settled: list[float] = []
     for turn in sorted(recorder.turns.values(), key=lambda t: t.start_ts):
         to_interim = turn.first_interim_at - turn.start_ts if turn.first_interim_at else None
         to_final = turn.final_at - turn.end_ts if turn.final_at else None
-        if to_interim is not None:
-            interims.append(to_interim)
-        if to_final is not None:
-            finals.append(to_final)
+        # ...and the same two against the clip's own speech, for a vendor whose
+        # turns carry no offsets and are therefore dated from our own frames.
+        span = speech.around(turn.start_ts)
+        after_onset = turn.first_interim_at - span[0] if span and turn.first_interim_at else None
+        last, final = turn.last_interim_at, turn.final_at
+        after_last = final - last if final and last else None
+        for value, bucket in (
+            (to_interim, interims),
+            (to_final, finals),
+            (after_onset, heard),
+            (after_last, settled),
+        ):
+            if value is not None:
+                bucket.append(value)
         print(
             f"[{turn.start_ts - started:6.2f}s -> {turn.end_ts - started:6.2f}s] "
             f"interim {_ms(to_interim)}  final {_ms(to_final)}  "
-            f"({turn.interims} interims, {turn.revisions} revisions)"
+            f"({turn.interims} interims, {turn.revisions} revisions, "
+            f"after onset {_ms(after_onset)}, settled {_ms(after_last)})"
             f"  {'/'.join(turn.speakers) or '-'}\n    {turn.text}"
         )
     for gap in recorder.gaps:
@@ -369,6 +437,11 @@ def _report(recorder: _Recorder, outcome: str, started: float) -> None:
         # means text really did appear while somebody was speaking.
         f"\nmedian interim lead over the final: {_ms(_median(leads))}"
         f"\nmedian turn length: {_ms(_median(spans))}"
+        # The same two again for a vendor that states no offsets, where the two
+        # medians above are circular: measured from the clip's own speech and
+        # from the turn's newest interim instead.
+        f"\nmedian first interim after speech onset: {_ms(_median(heard))}"
+        f"\nmedian final after last interim:         {_ms(_median(settled))}"
         f"\nspeakers per turn: " + " ".join("/".join(t.speakers) or "-" for t in ordered)
     )
 
