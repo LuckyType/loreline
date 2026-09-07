@@ -750,7 +750,12 @@ class TranscriptStream:
     # -- endings ----------------------------------------------------------
 
     async def _finish_turns(self, reader: asyncio.Task[None]) -> None:
-        """Flush the vendor, wait a bounded time, then settle what is left."""
+        """Flush the vendor and give the last finals a bounded time to arrive.
+
+        Whatever is still open when that time is up is settled by
+        :meth:`_settle_open`, which runs from :meth:`_serve`'s ``finally`` and
+        so covers this ending and every other one alike.
+        """
         if reader.done():
             return
         with contextlib.suppress(Exception):
