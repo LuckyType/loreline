@@ -284,6 +284,7 @@ onMount(async () => {
 				bind:open={sections.transcript}
 				{activeStart}
 				revealNonce={seekNonce}
+				dimInterim
 				onqueued={refreshJobs}
 				onrenamed={reloadDetail}
 				onerror={setError}

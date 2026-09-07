@@ -262,7 +262,7 @@ def create_app(
             video_client_factory=video_client_factory,
         )
         await state.db.connect()
-        await state.sessions.mark_interrupted()
+        await state.sessions.mark_interrupted(state.transcripts)
         await state.reprocess.reconcile()
         await state.video.reconcile()
         # Retention for the per-version log files. Deleting a session takes its

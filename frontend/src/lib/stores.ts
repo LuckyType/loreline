@@ -86,9 +86,13 @@ export function providerName(id: string | null | undefined, providers: ProviderC
  * this behaves exactly as it did before turns existed.
  *
  * The source is part of the key because a session's versions share the table:
- * a re-run's copy of a turn is a different row from the original's. */
+ * a re-run's copy of a turn is a different row from the original's. The
+ * session id is part of it too: a vendor's own turn handle can be a small
+ * per-session integer starting back at 0 (AssemblyAI does this), so without
+ * it a new session's first turn would replace the previous session's row in
+ * a pane that never clears between sessions. */
 export function turnKey(event: TranscriptEvent): string | null {
-	return event.turn_id ? `${event.source}:${event.turn_id}` : null
+	return event.turn_id ? `${event.session_id}:${event.source}:${event.turn_id}` : null
 }
 
 // A transcript segment's `source` is a provider id, `gap`, a `diarize:<version>`

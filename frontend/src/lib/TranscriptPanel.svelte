@@ -28,7 +28,7 @@ import Dropdown from '$lib/Dropdown.svelte'
 import Foldable from '$lib/Foldable.svelte'
 import { Input } from '$lib/components/ui/input'
 import RenameSpeakersDialog from '$lib/RenameSpeakersDialog.svelte'
-import { diarizerLabel, providerName } from '$lib/stores'
+import { diarizerLabel, GAP_SOURCE, providerName } from '$lib/stores'
 import TranscriptList from '$lib/TranscriptList.svelte'
 import { matchesQuery } from '$lib/transcriptSearch'
 import { cn } from '$lib/utils'
@@ -45,6 +45,7 @@ let {
 	open = $bindable(true),
 	activeStart = null,
 	revealNonce = 0,
+	dimInterim = false,
 	onqueued,
 	onerror,
 	onrenamed,
@@ -69,6 +70,10 @@ let {
 	activeStart?: number | null
 	/** Bumped by the page on a seek the user made by hand. */
 	revealNonce?: number
+	/** Dim segments still marked interim: `events` can hold one whenever the
+	 *  version shown is the live capture in progress, since the API returns
+	 *  those deliberately rather than waiting for them to settle. */
+	dimInterim?: boolean
 	/** A diarization has been queued: the caller refetches the job list. */
 	onqueued?: () => Promise<void> | void
 	/** Names were saved: the caller refetches the session. */
@@ -94,11 +99,16 @@ let filterOpen = $state(false)
 const shownEvents = $derived(
 	filter ? events.filter((e) => matchesQuery(e, detail.session.speaker_names, filter)) : events,
 )
+/** How many of a list are an actual spoken segment - a gap marker is audio
+ *  nobody transcribed, not one, and must not inflate the count. */
+function segmentCount(list: TranscriptEvent[]): number {
+	return list.filter((e) => e.source !== GAP_SOURCE).length
+}
 // "12/340" while a search is on, a plain total otherwise. Both places that
 // count segments read this, so the fold header and the bar cannot disagree
 // about how much of the transcript is actually on screen.
 const segmentsLabel = $derived(
-	filter ? `${shownEvents.length}/${events.length}` : `${events.length}`,
+	filter ? `${segmentCount(shownEvents)}/${segmentCount(events)}` : `${segmentCount(events)}`,
 )
 
 function toggleFilter() {
@@ -279,6 +289,7 @@ async function diarizeSession() {
 				providers={actionSetup.providers}
 				showSource={version === 'original'}
 				query={filter}
+				{dimInterim}
 				emptyText={filter ? 'No segments match the search.' : 'No transcript segments.'}
 				{activeStart}
 				{revealNonce}

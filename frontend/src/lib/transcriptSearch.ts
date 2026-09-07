@@ -9,18 +9,25 @@
  * list only so the hits can be marked in the text they were found in.
  */
 
+import { GAP_SOURCE } from '$lib/stores'
 import type { TranscriptEvent } from '$lib/wire'
 
 /** Whether a segment answers the query: matched in what was said, or in who
  *  said it, under the speaker's display name as well as its raw label (the
  *  transcript shows the name, so that is what a reader will search for; the
  *  label is still what an undiarized or unnamed speaker shows). An empty
- *  query matches everything, which is what makes it the "no filter" case. */
+ *  query matches everything, which is what makes it the "no filter" case.
+ *
+ *  A gap marker is not something anyone said, so it is exempt from the
+ *  question entirely: it always answers true, never on account of its own
+ *  wording happening to contain the query, so a caller filtering by this
+ *  never hides it and never counts it as a hit either. */
 export function matchesQuery(
 	event: TranscriptEvent,
 	names: Record<string, string>,
 	query: string,
 ): boolean {
+	if (event.source === GAP_SOURCE) return true
 	const needle = query.toLowerCase()
 	if (!needle) return true
 	if (event.text.toLowerCase().includes(needle)) return true
