@@ -1,54 +1,99 @@
 """Gemini Live API transcription connector (WebSocket, ``BidiGenerateContent``).
 
-VERIFIED against the real service (45 s of human speech, one session): the
-wire names below are the ones Google actually sends, all lowerCamelCase.
-Two service behaviours the docs do not mention shape this connector, and both
-were measured rather than guessed: a turn ends with generationComplete and
-never with turnComplete (see _TurnState), and audio pushed faster than
-realtime desynchronises the service's turn machinery (see _CHUNK_MS).
+Both connector shapes over one protocol, on two separate sockets, because the
+two want opposite things from the session: one is bounded by the caller's
+utterance and ends with ``audioStreamEnd``, the other outlives every turn in it.
+
+**Streaming** (``StreamingConnector``, what a live capture takes, ADR 0006):
+one session for the whole capture, with Google's own endpointing deciding the
+turns. ``setup.realtimeInputConfig.automaticActivityDetection`` is what turns
+that on (see _AUTOMATIC_VAD), and a model that refuses it gets
+``StreamUnsupportedError`` rather than a session that would accept audio
+forever and answer nothing. Frames arrive at capture pace from the stream above,
+which is what the pacing note under _CHUNK_MS is about: this shape does not
+pace anything itself because it is never handed audio faster than a microphone
+produces it.
+
+Manual activity signals (``activityStart`` / ``activityEnd``) exist and are
+deliberately unused: they would put a local VAD back in charge of the turn
+boundaries, which is precisely what the streaming shape exists to stop doing.
+
+**One utterance per call** (``Connector``, ADR 0005) is kept for re-processing
+stored audio, for the call-shaped fallback path, and for the tests that predate
+streaming. It opens a session per utterance, paces its own send, and flushes
+with ``audioStreamEnd``. That per-utterance session is not a preference: on a
+caller-bounded utterance ``audioStreamEnd`` is the only "no more audio" signal
+there is, and a fresh session keeps a late frame from poisoning the next
+utterance's reads. Neither fact says anything about a stream with no caller
+boundary in it, where nothing is flushed per turn and one reader consumes the
+vendor's own finals for the life of the session.
+
+VERIFIED against the real service (45 s of human speech, one session): the wire
+names below are the ones Google actually sends, all lowerCamelCase. Two service
+behaviours the docs do not mention were measured rather than guessed: a turn
+ends with generationComplete and never with turnComplete (see _TurnState), and
+audio pushed faster than realtime desynchronises the service's turn machinery
+(see _CHUNK_MS).
 
 Deliberately raw WebSocket rather than the ``google-genai`` SDK: this app
 targets a Raspberry Pi and shed ``google-cloud-speech`` specifically to stay
-light, the three existing streaming connectors (Deepgram, AssemblyAI, OpenAI
-Realtime) already speak ``websockets`` directly, and only a raw connector can
-be pointed at the local mock servers those connectors are tested against
-(``config.base_url``).
+light, the other realtime connectors already speak ``websockets`` directly, and
+only a raw connector can be pointed at the local mock servers those connectors
+are tested against (``config.base_url``).
 
 Protocol: the client sends a ``setup`` message, then ``realtimeInput`` audio
-chunks (raw 16-bit PCM, base64, ~100 ms each - which is precisely what the
-capture pipeline produces at 16 kHz s16le, no resampling needed), then
-``audioStreamEnd`` to flush. The server answers with ``serverContent`` frames
-whose ``interimInputTranscription`` is the low-latency partial and
-``inputTranscription`` the finalized text. One session per voiced utterance,
-like the Deepgram and AssemblyAI connectors: ``audioStreamEnd`` is the only
-documented "no more audio" signal, and a fresh session per utterance keeps a
-late frame from poisoning the next utterance's reads.
+chunks (raw 16-bit PCM at 16 kHz, base64), then ``audioStreamEnd`` to say the
+audio has stopped. The server answers with ``serverContent`` frames whose
+``interimInputTranscription`` is the low-latency partial (cumulative within a
+turn, so it replaces rather than appends) and ``inputTranscription`` the
+finalized text, and with ``goAway`` and ``sessionResumptionUpdate`` frames for
+the session lifetime described below.
+
+**Sessions are capped in minutes and a table runs for hours.** Google documents
+10 minutes for live transcription and 15 for audio-only sessions generally, so a
+connection ending is normal operation here rather than a fault. ``goAway`` is
+the announcement, and this connector ends its signal iteration on it, which the
+stream above reads as a lost connection: it settles the open turn from its last
+interim, reconnects, and marks the second or so of audio that the reconnect
+swallowed with a gap row. ``sessionResumption`` is asked for in every setup and
+the newest handle is carried across connections, so the vendor sees one
+continuing session rather than a fresh one every ten minutes.
 
 Server-side VAD gates the whole pipeline: synthetic speech (espeak-ng and
 friends) is never classified as speech, so a session fed it returns
 ``setupComplete`` and nothing else. That is not a connector fault, and it is
 why the mock in ``mocks/gemini_live_ws.py`` replays recorded real frames.
 
-No words, no speakers: Google states plainly that "Speaker diarization is not
-supported in live streaming sessions" (the batch ``gemini-3.5-transcribe``
-diarizes; this model does not - see loreline.capabilities).
+No words, no speakers, and no timing of any kind: Google states plainly that
+"Speaker diarization is not supported in live streaming sessions" (the batch
+``gemini-3.5-transcribe`` diarizes; this model does not - see
+loreline.capabilities), and no frame carries an offset into the audio. A turn's
+start and end therefore come from the stream's fallback for a vendor that states
+none, the capture timestamp of the last frame written when the signal arrived,
+which is late by Google's own latency and is the best answer available without
+one (ADR 0006, Decision 5).
 
-A glossary, however, does work here, contrary to what this connector used to
-claim: ``setup.inputAudioTranscription.customVocabulary`` is accepted and it
-measurably changes the transcript (see _setup and _vocabulary_for).
+A glossary does work here, contrary to what this connector used to claim:
+``setup.inputAudioTranscription.customVocabulary`` is accepted and it measurably
+changes the transcript (see _setup and _vocabulary_for).
 
-Docs: https://ai.google.dev/gemini-api/docs/live-api/live-transcribe
+Docs:
+- https://ai.google.dev/gemini-api/docs/live-api/live-transcribe
+- https://ai.google.dev/gemini-api/docs/live-guide
+- https://ai.google.dev/gemini-api/docs/live-session
 """
 
 from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import json
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 
 from websockets.asyncio.client import ClientConnection, connect
-from websockets.exceptions import ConnectionClosedOK
+from websockets.exceptions import ConnectionClosed, ConnectionClosedOK
 
 from loreline.audio.chunker import Utterance
 from loreline.capabilities import surface_for
@@ -70,6 +115,13 @@ from loreline.stt.base import (
     secret_for,
 )
 from loreline.stt.registry import register
+from loreline.stt.streaming import (
+    StreamingConnector,
+    StreamUnsupportedError,
+    TurnFinal,
+    TurnPartial,
+    TurnSignal,
+)
 
 log = get_logger(__name__)
 
@@ -104,6 +156,43 @@ _SETUP_TIMEOUT_S = 10.0
 # session; it is not how a healthy session ends, which is generationComplete
 # arriving after audioStreamEnd (see _read_last_turn).
 _RECV_TIMEOUT_S = 10.0
+# What the Live API accepts, and the only rate it accepts: "raw, little-endian,
+# 16-bit PCM" at 16 kHz. It happens to be what Silero pins capture to as well,
+# so the stream's resampler is a pass-through for this vendor.
+_INPUT_RATE = 16_000
+# Google's own endpointing, which is what the streaming shape is for: it decides
+# turns from the audio it is hearing rather than from a local VAD that has never
+# heard the model. Every value is stated rather than inherited, so a change here
+# is a change with a reason.
+#
+# VERIFIED accepted by gemini-3.5-transcribe-live, setup only, no audio: the
+# service rejects unknown fields and bad enum values by closing with 1007 and
+# naming the field path in snake_case ("Invalid value at 'setup.
+# realtime_input_config.automatic_activity_detection.start_of_speech_
+# sensitivity'"), so setupComplete over this block is evidence rather than
+# silence. That naming is also what _refusal below reads.
+_AUTOMATIC_VAD: dict[str, object] = {
+    "disabled": False,
+    # A table has people at different distances from one microphone, and a turn
+    # start the service misses is speech nobody ever sees; a false start costs
+    # an empty turn, which the stream drops because it has no text.
+    "startOfSpeechSensitivity": "START_SENSITIVITY_HIGH",
+    # The other way round at the end of a turn: cutting eagerly splits one
+    # sentence across two rows, and the silence threshold below is the knob that
+    # is supposed to decide when a turn is over.
+    "endOfSpeechSensitivity": "END_SENSITIVITY_LOW",
+    # Google recommends 500-800 ms. 500 is deliberate, and it is the whole
+    # latency argument for this shape: the utterance path cannot answer before
+    # 800 ms of trailing silence has elapsed, because that is when its chunker
+    # hands the utterance over.
+    "silenceDurationMs": 500,
+    "prefixPaddingMs": 300,
+}
+# How the service names the two setup blocks in a rejection. A refused
+# automaticActivityDetection is this model saying it will not stream, which no
+# retry can change; a refused sessionResumption only costs the resumption.
+_VAD_FIELDS = ("automatic_activity_detection", "realtime_input_config")
+_RESUMPTION_FIELDS = ("session_resumption", "session not found")
 
 
 def _vocabulary_for(caps: TranscribeCapabilities | None, terms: list[str]) -> list[str]:
@@ -185,7 +274,7 @@ class _TurnState:
             self.interim = interim
         if final or interim:
             self.turn_ended = False
-        elif self._ends_turn(content):
+        elif _ends_turn(content):
             self._flush_open_turn()
             self.turn_ended = True
 
@@ -212,23 +301,127 @@ class _TurnState:
             self.parts.append(self.interim)
             self.interim = ""
 
-    @staticmethod
-    def _ends_turn(content: dict[str, object]) -> bool:
-        return any(
-            get_bool(content, name)
-            for name in (
-                "generationComplete",
-                "generation_complete",
-                "turnComplete",
-                "turn_complete",
-            )
+
+def _ends_turn(content: dict[str, object]) -> bool:
+    """Whether a ``serverContent`` body closes the turn it belongs to.
+
+    generationComplete is the one the service actually sends; turnComplete is
+    the one the docs define and is still honoured, since either means the same
+    thing to both shapes of this connector.
+    """
+    return any(
+        get_bool(content, name)
+        for name in (
+            "generationComplete",
+            "generation_complete",
+            "turnComplete",
+            "turn_complete",
         )
+    )
 
 
-class GeminiLiveBackend(Connector[list[str]]):
+@dataclass
+class _StreamTurns:
+    """One persistent session's frames, as the turn signals ADR 0006 defines.
+
+    The same frames :class:`_TurnState` folds into one utterance's text, read
+    the other way round: each one becomes zero or one signal for the stream
+    above, which owns the clock, the turn ids and the reconnects. Kept apart
+    from the socket for the same reason as _TurnState, so the translation can be
+    tested against frames recorded from the real service.
+
+    Two frames need state, and it is the minimum the protocol forces:
+
+    * ``interimInputTranscription`` is *cumulative within a turn*, so it is a
+      ``TurnPartial`` with ``append=False``. Appending them would repeat every
+      word as many times as the service revised the turn.
+    * ``generationComplete`` arrives *after* the ``inputTranscription`` that
+      settles a turn, so on its own it must publish nothing, or every turn would
+      be written twice. It is not useless, though: a turn the service never
+      finalizes ends here too, and then the newest interim is that turn's text
+      (the recorded blast run left 212 characters sitting in interims). Which of
+      the two happened is what :attr:`owes_final` remembers.
+
+    The empty ``{"serverContent": {}}`` padding frames yield nothing at all,
+    deliberately: their count differs between a turn with another behind it and
+    a turn that ends the session, which makes them useless as a marker.
+    """
+
+    # The newest interim of the turn now open, and whether that turn still owes
+    # the transcript its text.
+    interim: str = ""
+    owes_final: bool = False
+    # Set once the server announces that this connection is about to end, with
+    # goAway.timeLeft as Google phrased it. The reader stops on it; the stream
+    # above reconnects, which is what a session cap of minutes needs.
+    go_away: str = ""
+    # The newest session resumption handle, kept by the connector across
+    # connections so a reconnect continues the same vendor session.
+    handle: str = ""
+
+    def apply(self, raw: str | bytes) -> list[TurnSignal]:
+        """Translate one server frame into the signals it means."""
+        message = as_dict(raw)
+        go_away = _wire(message, "goAway", "go_away")
+        if go_away is not None:
+            left = as_obj_dict(go_away)
+            self.go_away = get_str(left, "timeLeft") or get_str(left, "time_left") or "soon"
+            return []
+        update = as_obj_dict(_wire(message, "sessionResumptionUpdate", "session_resumption_update"))
+        if update:
+            self._remember(update)
+            return []
+        content = as_obj_dict(_wire(message, "serverContent", "server_content"))
+        final = get_str(
+            as_obj_dict(_wire(content, "inputTranscription", "input_transcription")), "text"
+        )
+        interim = get_str(
+            as_obj_dict(_wire(content, "interimInputTranscription", "interim_input_transcription")),
+            "text",
+        )
+        if final:
+            self.interim, self.owes_final = "", False
+            return [TurnFinal(text=final)]
+        if interim:
+            self.interim, self.owes_final = interim, True
+            return [TurnPartial(text=interim)]
+        if _ends_turn(content):
+            return self._close_turn()
+        return []
+
+    def _close_turn(self) -> list[TurnSignal]:
+        """What generationComplete means for a turn that was never finalized."""
+        text, owed = self.interim, self.owes_final
+        self.interim, self.owes_final = "", False
+        return [TurnFinal(text=text)] if owed and text else []
+
+    def _remember(self, update: dict[str, object]) -> None:
+        """Keep a resumption handle the server offered, if it offered one.
+
+        ``resumable: false`` is the server saying this session cannot be picked
+        up again, so the handle it may have sent earlier is dropped rather than
+        presented to a reconnect that would be refused for it.
+        """
+        handle = get_str(update, "newHandle") or get_str(update, "new_handle")
+        if handle:
+            self.handle = handle
+        elif not get_bool(update, "resumable", default=True):
+            self.handle = ""
+
+
+class GeminiLiveBackend(Connector[list[str]], StreamingConnector):
     """Streaming transcription (no diarization) via the Gemini Live API.
 
-    The prepared value is the ``customVocabulary`` list, capped for the model.
+    Both connector shapes; see the module docstring for what each one does and
+    why they cannot share a socket. The prepared value is the
+    ``customVocabulary`` list, capped for the model, and the streaming shape
+    prepares it in :meth:`open_stream` because the session carries it.
+
+    Two things are deliberately kept across connections, and only two: the
+    session resumption handle, which is the whole point of resumption, and
+    ``_resumption_refused``, because a model that will not resume will not
+    resume on the next socket either and re-learning it costs a whole
+    connection.
     """
 
     def __init__(
@@ -246,6 +439,13 @@ class GeminiLiveBackend(Connector[list[str]]):
         self._model = model
         self._caps = caps
         self._endpoint = surface_for(config, Interaction.TRANSCRIBE, "realtime")
+        # The streaming shape's socket and its per-connection frame state. Both
+        # are None/fresh between connections; see the class docstring for the
+        # two things that are not.
+        self._stream_ws: ClientConnection | None = None
+        self._turns = _StreamTurns()
+        self._resume_handle = ""
+        self._resumption_refused = False
 
     def _session_url(self) -> str:
         # The Live API authenticates with the key as a URL query parameter,
@@ -387,6 +587,170 @@ class GeminiLiveBackend(Connector[list[str]]):
                 message = as_dict(await ws.recv())
                 if _wire(message, "setupComplete", "setup_complete") is not None:
                     return
+
+    # -- the streaming shape ---------------------------------------------
+
+    @property
+    def stream_rate(self) -> int:
+        return _INPUT_RATE
+
+    def _stream_setup(self, vocabulary: list[str]) -> dict[str, object]:
+        """The per-utterance setup plus what a session outliving a turn needs.
+
+        Built on :meth:`_setup` rather than beside it, so the model, the
+        language and the custom vocabulary can only ever be spelled once.
+        """
+        setup = as_obj_dict(self._setup(vocabulary)["setup"])
+        setup["realtimeInputConfig"] = {"automaticActivityDetection": dict(_AUTOMATIC_VAD)}
+        if not self._resumption_refused:
+            # An empty config asks the server to start issuing handles; a handle
+            # asks it to continue the session that one names.
+            setup["sessionResumption"] = (
+                {"handle": self._resume_handle} if self._resume_handle else {}
+            )
+        return {"setup": setup}
+
+    async def open_stream(self, glossary: Glossary | None) -> None:
+        """Open one automatic-VAD session for a whole capture.
+
+        Runs again after every disconnect, which is routine for this vendor
+        rather than exceptional: see the module docstring on the session cap.
+        The glossary rides in the setup, so a reconnect re-applies it because
+        this runs again, and the resumption handle from the connection that just
+        died is presented here.
+        """
+        await self.close_stream()  # a reconnect must not leak the dead socket
+        # Seeded with the handle the dead connection left, so a connection the
+        # server never sends an update on still resumes on the one after it.
+        self._turns = _StreamTurns(handle=self._resume_handle)
+        setup = json.dumps(self._stream_setup(self.prepare(glossary)))
+        ws = await connect(self._session_url())
+        try:
+            await ws.send(setup)
+            await self._await_setup_ack(ws)
+        except BaseException as exc:
+            with contextlib.suppress(Exception):
+                await ws.close()
+            if isinstance(exc, ConnectionClosed):
+                self._classify_refusal(exc)
+            raise
+        self._stream_ws = ws
+
+    def _classify_refusal(self, closed: ConnectionClosed) -> None:
+        """Read a rejected setup out of the close frame the service sent.
+
+        This service says no by closing with 1007 and naming the offending
+        field path in snake_case, rather than by an error message on an open
+        socket. Two of those names matter here and the rest are ordinary
+        connection failures for the stream above to retry.
+
+        A refused ``automaticActivityDetection`` is this model saying it will
+        not stream, which is an answer no retry can change, so it becomes
+        :class:`StreamUnsupportedError` and the session runs this same connector
+        one utterance at a time. A refused ``sessionResumption`` is only the
+        resumption failing: the handle is dropped and the field is left out from
+        here on, and the next attempt connects as a fresh session. A stale
+        handle says so differently, 1008 "session not found", and is the same
+        answer for the same reason - handles expire two hours after the session
+        they name.
+        """
+        reason = (closed.rcvd.reason if closed.rcvd is not None else "").lower()
+        if any(name in reason for name in _VAD_FIELDS):
+            msg = (
+                f"{self._model or 'this model'} does not support server-side turn "
+                f"detection: {closed.rcvd.reason if closed.rcvd else closed}"
+            )
+            raise StreamUnsupportedError(msg)
+        if any(name in reason for name in _RESUMPTION_FIELDS):
+            log.warning(
+                "gemini.live.resumption_refused",
+                provider=self.config.id,
+                had_handle=bool(self._resume_handle),
+                detail=closed.rcvd.reason if closed.rcvd else str(closed),
+            )
+            # A handle that was merely stale is worth dropping on its own; the
+            # field is only abandoned when the service refused the field itself.
+            self._resume_handle = ""
+            self._resumption_refused = "session not found" not in reason
+
+    async def send_audio(self, pcm: bytes) -> None:
+        """Write one block of 16 kHz s16le PCM as a ``realtimeInput`` frame.
+
+        One frame in, one message out, deliberately: the stream above feeds at
+        capture pace, so nothing here has to pace or batch, and buffering to the
+        documented ~100 ms cadence would only add up to 100 ms to the latency
+        this whole shape exists to cut. The rate in the mime type is
+        :attr:`stream_rate` and not ``config.sample_rate``, because the stream
+        has already resampled to it.
+        """
+        ws = self._stream_ws
+        if ws is None:
+            msg = "send_audio before open_stream"
+            raise RuntimeError(msg)
+        await ws.send(
+            json.dumps(
+                {
+                    "realtimeInput": {
+                        "audio": {
+                            "data": base64.b64encode(pcm).decode("ascii"),
+                            "mimeType": f"audio/pcm;rate={_INPUT_RATE}",
+                        }
+                    }
+                }
+            )
+        )
+
+    async def signals(self) -> AsyncIterator[TurnSignal]:
+        """Translate this session's frames into turn signals until it ends.
+
+        No offsets are yielded because the service states none: every signal
+        leaves ``at`` unset and the stream above dates it from the last frame
+        written. No refs either, since the protocol names no turns, which the
+        stream reads as one turn open at a time.
+
+        ``goAway`` ends the iteration rather than raising. The connection really
+        is over, the stream above treats a reader that returned exactly as it
+        treats one that failed, and this way the reconnect happens at a moment
+        we chose instead of whenever the server hangs up.
+        """
+        ws = self._stream_ws
+        if ws is None:
+            return
+        async for raw in ws:
+            for signal in self._turns.apply(raw):
+                yield signal
+            # Kept off the frame state and on the connector, because it is the
+            # one thing about this connection that outlives it.
+            self._resume_handle = self._turns.handle
+            if self._turns.go_away:
+                log.info(
+                    "gemini.live.go_away",
+                    provider=self.config.id,
+                    time_left=self._turns.go_away,
+                    resumable=bool(self._resume_handle),
+                )
+                return
+
+    async def flush_input(self) -> None:
+        """Say the audio has stopped, so the open turn finalizes now.
+
+        ``audioStreamEnd`` is what the docs prescribe for a microphone going
+        away, and the service answers it by finalizing without waiting out its
+        own silence threshold. Only ever the last turn: every earlier one was
+        closed by the service's own endpointing while audio was still arriving.
+        """
+        ws = self._stream_ws
+        if ws is not None:
+            await ws.send(json.dumps({"realtimeInput": {"audioStreamEnd": True}}))
+
+    async def close_stream(self) -> None:
+        ws, self._stream_ws = self._stream_ws, None
+        if ws is not None:
+            with contextlib.suppress(Exception):
+                await ws.close()
+
+    async def aclose(self) -> None:
+        await self.close_stream()
 
 
 def _audio_chunks(pcm: bytes, sample_rate: int) -> list[bytes]:
