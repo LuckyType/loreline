@@ -339,8 +339,13 @@ migrated, all on 2026-09-07 unless noted.
   Fixed at `f8d832f`, on this branch as of `7bbcb70`: both call sites build
   the query string through the connector's one `_params` method, so the fix
   is gated on the model in one place. Verified by unit and integration tests
-  pinning the query-string encoding; not re-verified against the real vendor
-  with live audio.
+  pinning the query-string encoding, and against the real vendor with a
+  German LibriVox clip streamed at wall clock: 8 turns of correct German over
+  60 s, first interim 1062 ms median, final 768 ms median, and `transcribe_one`
+  on a 7 s clip equally correct. The old `language=de` also came back as
+  German on that clean clip, because `universal-3-5-pro` code-switches by
+  default, so the value of the fix is deterministic steering rather than a
+  visible change on easy audio.
 
 **Deepgram**, `nova-3`, merged at `fcd0af3`:
 
