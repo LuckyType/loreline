@@ -98,6 +98,21 @@ vendor's protocol and yields `TranscriptEvent`s as they finalize.
    both `LiveFeed`s accept by `start_ts` plus text, so a growing interim
    published as-is would be stored and shown once per revision.
 
+   *Amended on landing (2026-09-06).* The condition was met rather than
+   waited on: the interim handling landed with the first connector, so
+   interims ship from the start. `TranscriptEvent` gained a `turn_id`, a key
+   every revision of one vendor turn carries; `transcript_segments` gained the
+   column and a unique index on `(session_id, source, turn_id)`, so
+   `TranscriptRepository.add` upserts by it; and both `LiveFeed`s take a `key`
+   callback that replaces a held item instead of appending. A start timestamp
+   was the cheaper key and was rejected: it is stable across a turn's interims
+   only for a vendor reporting server-VAD offsets, and Deepgram and AssemblyAI
+   both revise a turn's start as their endpointing refines, where a key that
+   quietly stops matching writes a second row rather than failing. Rows the
+   utterance path writes carry no `turn_id` at all, which SQLite counts as
+   distinct from every other NULL, so that path still appends exactly as it
+   did.
+
 2. Migration is per connector, not a flag day, and a connector's shape is a
    fact about its class, not a new field in `capabilities.yaml`.
    `OpenAIRealtimeBackend` goes first because its connection lifecycle already
@@ -122,9 +137,40 @@ vendor's protocol and yields `TranscriptEvent`s as they finalize.
    A streaming loss is a span aligned to nothing, so it needs a visible marker
    in the transcript, not just a log line.
 
+   *Amended on landing.* Three things this did not say, each decided against
+   the code. **The marker** is a row whose `source` is `gap`
+   (`models.GAP_SOURCE`), beside the existing `reprocess:` and `diarize:`
+   tags. A source rather than a flag, because everything that already routes
+   by source then routes it for free: it belongs to the live capture's
+   version, so the session page and the dashboard show it (rendered as a rule,
+   not as a line of speech), while `export.final_rows` keeps it out of
+   exports, summaries and the rows a diarize job relabels, which read finals
+   only for the same reason. **The budget** counts *consecutive* failures and
+   is reset by a connection that stayed up longer than `healthy_after_s`:
+   without that, an evening's ordinary reconnects would spend it and fail over
+   for no reason, while a socket that dies every few seconds still never earns
+   a reset. **A fallback that does not stream** was the case with nowhere to
+   go: the session hands over to the utterance path for good, the chunker's
+   utterances start reaching the queue they were being withheld from, and an
+   `SttRouter` built with the fallback drains it exactly as it would have from
+   the start.
+
 4. Timeout is a liveness watchdog, not `asyncio.wait_for` around a call: audio
    sent, nothing back (no partial, no final, no acknowledgement) inside a
    configured window means the connection is dead and (3) applies.
+
+   *Amended on landing.* "Audio sent" had to become "*voiced* audio sent",
+   read off the local VAD the capture loop is running anyway. With server VAD
+   on, a silent room produces no vendor messages at all by design, so a plain
+   "nothing received" timer fires on every coffee break, reconnects, and marks
+   a gap over silence. Silero keeps deciding the WAV's utterance index and now
+   also answers "was there anything to transcribe", which is the one question
+   that makes the watchdog's silence meaningful. A second liveness rule came
+   with it: a write that blocks past `send_timeout_s`, and a frame queue that
+   overflows, are both dead connections, because each means audio was dropped
+   and the byte count the vendor's offsets are measured against no longer
+   matches the capture clock. Reconnecting is what restores that mapping, with
+   a fresh `t0`.
 
 5. Diarization for a migrated connector keys off the vendor's turn boundary
    instead of an `Utterance`. Remote diarization has nothing to send until a
@@ -138,6 +184,21 @@ vendor's protocol and yields `TranscriptEvent`s as they finalize.
    has nothing to work with. Decided in Phase 4, after Phase 3 shows what
    each vendor's turns actually carry.
 
+   *Amended on landing.* Remote diarization took the buffering option and took
+   it immediately, because withholding it would have made the first migrated
+   connector worse than the path it replaced. `RollingPcm` holds the last 90
+   seconds of capture (only in remote mode, where somebody wants it back), a
+   closed turn's span is sliced out of it, and from there it is literally the
+   same call: `SttRouter._merge_diarization` and the streaming path both go
+   through one `merge_diarization`, which is also the only place a live
+   capture ships audio to the diarizer. OpenAI's `speech_started` and
+   `speech_stopped` do carry the offsets a `start_ts` needs
+   (`audio_start_ms` / `audio_end_ms`), so the two-vendors-without-timing
+   problem is Gemini Live's and, in a different form, Deepgram's and
+   AssemblyAI's. For a vendor that states no offset at all the base falls back
+   to the capture timestamp of the last frame written, which is late by that
+   vendor's own latency and is the best answer available without one.
+
 ## Consequences
 
 * Batch and reprocess are untouched: same contract, same connectors, same
@@ -149,7 +210,9 @@ vendor's protocol and yields `TranscriptEvent`s as they finalize.
   unmigrated realtime connector; once one is migrated, both need a line
   saying a second shape exists. That docstring also still counts "eight real
   connectors" and "four batch connectors"; there are eleven, five realtime
-  and six batch, and the same edit should fix the count.
+  and six batch, and the same edit should fix the count. *Done on landing,
+  along with `CONTEXT.md`, which gained the streaming shape, a turn, a turn
+  id and the gap marker as terms.*
 * CONTEXT.md's Transport definition becomes literally true for a migrated
   connector, and `openai_realtime.py`'s module docstring, which still says
   "we open a session per voiced utterance" above an `_ensure_ws` that does
@@ -162,7 +225,15 @@ vendor's protocol and yields `TranscriptEvent`s as they finalize.
 * Interim events are the user-visible win of streaming and the thing most
   likely to corrupt the transcript if published early: finals only in Phase
   1, and replace-by-key semantics in `_persist` and both `LiveFeed`s before
-  any connector publishes a partial.
+  any connector publishes a partial. *Superseded on landing: the second half
+  was built first, so the first half never applied. See the amendment under
+  Decision (1) for the key, and note the rule it forced everywhere else, that
+  only finals are a transcript. Exports, summaries and diarize jobs read
+  through `export.final_rows`; the browser's views do not, because an interim
+  on screen is the whole point. A session's ending settles every open turn
+  rather than dropping it, and `delete_interims` sweeps whatever an ending
+  that could settle nothing left behind, so a stored transcript never holds a
+  half-typed row.*
 * The timeline dots, click-to-jump and karaoke highlight key off
   `TranscriptEvent.start_ts` on the bus, which both paths populate, so no
   frontend change follows as long as a migrated connector reports a real
@@ -170,7 +241,18 @@ vendor's protocol and yields `TranscriptEvent`s as they finalize.
   that is not free.
 * The cross-utterance speaker-consistency gap (no speaker embeddings kept
   between diarizer calls) is adjacent to Phase 4 and stays its own piece of
-  work.
+  work. *Closed separately and in time to matter here: ADR 0007's
+  session-scoped speaker bank landed alongside this, and the streaming path
+  passes the same `session_id` to every call. It matters more per turn than
+  it did per utterance, since a vendor's turns are shorter and there are more
+  of them.*
+* The phases below were written as an order to build in, and the first
+  landing did not follow it: Phase 1 and Phase 2 arrived together with the
+  parts of Phase 4 that Phase 1 turned out to need (replace-by-key, the
+  remote-diarization buffering). They are left as written, because what they
+  record is why each piece was thought to be separable, and two of them were
+  not. Phase 3, the remaining four connectors, and Phase 5, the ADR that
+  supersedes this one, are still ahead.
 
 ## Implementation plan
 
