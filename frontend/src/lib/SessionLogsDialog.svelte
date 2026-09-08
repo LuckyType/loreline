@@ -5,6 +5,9 @@
  * Fetched on demand rather than with the version list: a whole session's log
  * is far larger than the row it belongs to, and nobody reads it until
  * something about that version looks wrong.
+ *
+ * One instance serves the whole table, so where focus goes on close is not
+ * something this dialog can work out for itself - see `trigger`.
  */
 
 import { ApiError, api } from '$lib/api'
@@ -18,16 +21,27 @@ import {
 	DialogTitle,
 } from '$lib/components/ui/dialog'
 import LogLine from '$lib/LogLine.svelte'
+import { versionLabel } from '$lib/stores'
 
 let {
 	open = $bindable(false),
 	sessionId,
 	version,
+	trigger = null,
 }: {
 	open?: boolean
 	sessionId: string
 	/** Which version's log to show: 'original', or a job id. */
 	version: string
+	/** The control that opened this, so Escape hands focus back to it.
+	 *
+	 * The dialog is rendered once for the whole version table and driven by a
+	 * pair of variables, so no element "owns" it and the focus that comes back
+	 * on close is not the row's button but the section's fold header - one
+	 * Space from collapsing the table the reader was looking at. The row that
+	 * opened it is the only thing that knows which button that was, so it says
+	 * so. Null means whatever the dialog would do on its own. */
+	trigger?: HTMLElement | null
 } = $props()
 
 let lines = $state<string[]>([])
@@ -58,11 +72,18 @@ async function load(wanted: string) {
 </script>
 
 <Dialog bind:open>
-	<DialogContent class="sm:max-w-3xl">
+	<DialogContent
+		class="sm:max-w-3xl"
+		onCloseAutoFocus={(e) => {
+			// A row deleted while its log was open has no button left to focus, so
+			// let the default restoration have it.
+			if (!trigger?.isConnected) return
+			e.preventDefault()
+			trigger.focus()
+		}}
+	>
 		<DialogHeader>
-			<DialogTitle>
-				Logs · {version === 'original' ? 'original' : version.slice(0, 8)}
-			</DialogTitle>
+			<DialogTitle>Logs · {versionLabel(version)}</DialogTitle>
 			<DialogDescription>
 				What this version was produced by, kept per version: the live view on the Dashboard only
 				holds the last few hundred lines of the running capture.

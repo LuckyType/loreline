@@ -28,7 +28,7 @@ import Dropdown from '$lib/Dropdown.svelte'
 import Foldable from '$lib/Foldable.svelte'
 import { Input } from '$lib/components/ui/input'
 import RenameSpeakersDialog from '$lib/RenameSpeakersDialog.svelte'
-import { diarizerLabel, GAP_SOURCE, providerName } from '$lib/stores'
+import { diarizerLabel, GAP_SOURCE, providerName, versionLabel } from '$lib/stores'
 import TranscriptList from '$lib/TranscriptList.svelte'
 import { matchesQuery } from '$lib/transcriptSearch'
 import { cn } from '$lib/utils'
@@ -192,9 +192,7 @@ async function diarizeSession() {
 <CardContent class={cn('flex flex-col gap-3', open ? 'min-h-0 flex-1' : 'shrink-0')}>
 	<Foldable
 		title="Transcript"
-		meta="{version === 'original'
-			? 'original'
-			: version.slice(0, 8)} · {loading ? 'loading…' : `${segmentsLabel} segments`}"
+		meta="{versionLabel(version)} · {loading ? 'loading…' : `${segmentsLabel} segments`}"
 		bind:open
 		bodyClass="flex min-h-0 flex-1 flex-col gap-3"
 	>
@@ -202,10 +200,7 @@ async function diarizeSession() {
 			class="flex shrink-0 flex-wrap items-center justify-between gap-3 rounded-md bg-accent/40 px-3 py-2.5"
 		>
 			<div class="flex flex-wrap items-center gap-x-4 gap-y-1">
-				<span
-					>Transcript
-					<code>{version === 'original' ? 'original' : version.slice(0, 8)}</code></span
-				>
+				<span>Transcript <code>{versionLabel(version)}</code></span>
 				<span><span class="text-muted-foreground">Provider</span> {selectedProviderName}</span>
 				<span><span class="text-muted-foreground">Model</span> {selectedModel}</span>
 				{#if diarizeJob}

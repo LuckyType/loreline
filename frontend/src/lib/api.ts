@@ -207,7 +207,12 @@ export const api = {
 			method: 'POST',
 			body: JSON.stringify(body),
 		}),
-	exportUrl: (id: string, fmt: ExportFormat) => `/api/session/${id}/export?fmt=${fmt}`,
+	/** Download one version's transcript. The version is explicit because the
+	 *  page can be showing a re-transcription while the header's Export menu
+	 *  sits above it: the server defaults to 'original', so leaving it off is
+	 *  how a download quietly disagreed with what was on screen. */
+	exportUrl: (id: string, fmt: ExportFormat, version: string) =>
+		`/api/session/${id}/export?fmt=${fmt}&version=${encodeURIComponent(version)}`,
 	audioUrl: (id: string) => `/api/session/${id}/audio`,
 	deleteSessions: (ids: string[]) =>
 		request<OkResponse>('/api/session/delete', {

@@ -29,6 +29,21 @@ export function inFlight(job: ReprocessJob): boolean {
 	return job.status === 'queued' || job.status === 'running'
 }
 
+/**
+ * What one transcript version is called, wherever the UI has to name it.
+ *
+ * The live capture is 'original'; every re-transcription is its job id, and a
+ * 32-char hex string is unreadable in a sentence, so it is cut to the same
+ * 8-char prefix the version table and the transcript's own info bar show. One
+ * helper because the Export menu, the Summarize dialog and the log viewer all
+ * have to say the same thing about the same version - a page that names a
+ * version two different ways is how "export gave me the wrong transcript"
+ * became hard to see in the first place.
+ */
+export function versionLabel(version: string): string {
+	return version === 'original' ? 'original' : version.slice(0, 8)
+}
+
 /** What the diarizer a job used is called: named in the version list, and
  *  again next to the transcript that job relabeled. */
 export function diarizerLabel(job: ReprocessJob): string {
@@ -36,6 +51,24 @@ export function diarizerLabel(job: ReprocessJob): string {
 	if (job.diarization.mode === 'remote')
 		return `sherpa-onnx${job.diarization.endpoint ? ` · ${job.diarization.endpoint}` : ''}`
 	return job.diarization.mode
+}
+
+/**
+ * How long something ran, as m:ss or h:mm:ss, from the two moments it ran
+ * between.
+ *
+ * Empty when there is no end, which is three different rows: a capture still
+ * going, one that died without being stopped, and a merged session, which was
+ * assembled out of other sessions rather than recorded and so never had an end
+ * of its own. Each caller decides what to print instead.
+ */
+export function fmtDuration(startedAt: number, endedAt: number | null): string {
+	if (!endedAt) return ''
+	const secs = Math.max(0, Math.floor(endedAt - startedAt))
+	const h = Math.floor(secs / 3600)
+	const m = Math.floor((secs % 3600) / 60)
+	const sec = String(secs % 60).padStart(2, '0')
+	return h > 0 ? `${h}:${String(m).padStart(2, '0')}:${sec}` : `${m}:${sec}`
 }
 
 export function formatTime(seconds: number): string {
