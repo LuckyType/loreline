@@ -83,8 +83,12 @@ class OpenAIDiarizer:
         sample_rate: int = 16000,
         min_speakers: int | None = None,
         max_speakers: int | None = None,
+        session_id: str | None = None,
     ) -> list[SpeakerSegment]:
-        _ = (sample_rate, min_speakers, max_speakers)  # not configurable on this model
+        # None of these reach the vendor: the model takes no speaker bounds, and
+        # it is handed a whole session at a time rather than an utterance, so it
+        # has no use for a session to remember voices across either.
+        _ = (sample_rate, min_speakers, max_speakers, session_id)
         audio, filename, content_type = await self._prepare(wav)
         files = {"file": (filename, audio, content_type)}
         data = {

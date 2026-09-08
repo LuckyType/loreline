@@ -241,25 +241,69 @@ class SttRouter:
     async def _merge_diarization(
         self, event: TranscriptEvent, utterance: Utterance
     ) -> TranscriptEvent:
-        mode = self._config.diarization.mode
-        if mode == DiarizationMode.REMOTE and self._diarizer is not None:
-            wav = pcm_to_wav(utterance.pcm, sample_rate=self._primary.config.sample_rate)
-            segments = await self._diarizer.diarize(
-                wav,
+        """Label this utterance's words, or publish it unlabelled.
+
+        A diarizer that answers with an error - any non-2xx, a timeout, a
+        refused connection - used to raise straight out of :meth:`run`, which
+        ends the live path and loses the text this utterance already has.
+        Speaker labels are an improvement on a transcript; they are not worth
+        the transcript.
+        """
+        try:
+            return await merge_diarization(
+                event,
+                utterance.pcm,
+                start=utterance.start,
                 sample_rate=self._primary.config.sample_rate,
-                min_speakers=self._config.diarization.min_speakers,
-                max_speakers=self._config.diarization.max_speakers,
+                config=self._config.diarization,
+                diarizer=self._diarizer,
+                session_id=self._config.session_id,
             )
-            # The diarizer only sees this utterance's isolated audio, so its
-            # segments are utterance-relative (0-based); shift them to match the
-            # word timings, which already carry the utterance's session offset.
-            shifted = [
-                s.model_copy(
-                    update={"start": s.start + utterance.start, "end": s.end + utterance.start}
-                )
-                for s in segments
-            ]
-            return assign_speakers(event, shifted)
-        if mode == DiarizationMode.INLINE:
-            return assign_speakers(event, segments_from_words(event.words))
-        return event
+        except Exception as exc:  # resilience: any diarizer error, same answer
+            log.warning("stt.diarize.failed", session_id=self._config.session_id, error=str(exc))
+            return event
+
+
+async def merge_diarization(
+    event: TranscriptEvent,
+    pcm: bytes,
+    *,
+    start: float,
+    sample_rate: int,
+    config: DiarizationConfig,
+    diarizer: DiarizationProvider | None,
+    session_id: str,
+) -> TranscriptEvent:
+    """Label one segment's words with speakers, from its own audio or its words.
+
+    The one place a live capture ships audio to the remote diarizer, called by
+    both live paths: ``SttRouter`` with an ``Utterance``'s PCM and start, the
+    streaming path with the slice of its rolling buffer that a closed vendor
+    turn covers (see ``loreline.session.streaming``). Neither path has anything
+    to say about diarization that the other does not, and the shift below is
+    exactly the kind of arithmetic that goes wrong once it exists twice.
+
+    ``pcm`` is the segment's own isolated audio, so the diarizer's segments come
+    back 0-based; ``start`` is where that audio sits on the session clock, which
+    is what the word timings already carry.
+    """
+    if config.mode == DiarizationMode.REMOTE and diarizer is not None:
+        wav = pcm_to_wav(pcm, sample_rate=sample_rate)
+        segments = await diarizer.diarize(
+            wav,
+            sample_rate=sample_rate,
+            min_speakers=config.min_speakers,
+            max_speakers=config.max_speakers,
+            # Passed because the labels otherwise mean nothing between calls
+            # (see ``DiarizationProvider.diarize``). It matters more here than
+            # it did per utterance: a vendor's turns are shorter and there are
+            # more of them, so more calls have to agree about who is who.
+            session_id=session_id,
+        )
+        shifted = [
+            s.model_copy(update={"start": s.start + start, "end": s.end + start}) for s in segments
+        ]
+        return assign_speakers(event, shifted)
+    if config.mode == DiarizationMode.INLINE:
+        return assign_speakers(event, segments_from_words(event.words))
+    return event

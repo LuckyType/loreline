@@ -35,6 +35,16 @@ export interface LiveFeedOptions<T> {
 	 *  argument is what a feed whose history and socket can overlap by an item
 	 *  needs to recognize the duplicate. */
 	accept?: (item: T, held: readonly T[]) => boolean
+	/** A stable identity, for a feed carrying revisions of one thing rather
+	 *  than a series of separate ones. An arriving item whose key matches one
+	 *  already held replaces it in place; everything else is appended.
+	 *
+	 *  A streaming transcript is the case this exists for: a vendor's turn
+	 *  arrives as a growing interim and then as a final, all under one
+	 *  `turn_id`, and a pane that appended them would show the same sentence
+	 *  once per word. `null` for an item means it is its own item, which is
+	 *  what every event from the utterance path is. */
+	key?: (item: T) => string | null
 	/** Whether an arriving item should scroll `element` to the tail. */
 	follow?: () => boolean
 	/** The socket's connection status, for a status indicator: connected,
@@ -62,6 +72,12 @@ export class LiveFeed<T> {
 	element = $state<HTMLElement | null>(null)
 
 	#options: LiveFeedOptions<T>
+	/** Keys trimmed off the cap. A later revision of one of these must not
+	 *  re-append at the tail: the row it would revise is gone, out of the
+	 *  visible window for good, and appending the revision would show it
+	 *  wildly out of order instead of leaving it dropped with the rest of the
+	 *  turn it belongs to. */
+	#dropped = new Set<string>()
 
 	/** Construct one at the top level of a component's `<script>`: the effect
 	 *  it owns is what closes the socket when that component goes away. */
@@ -101,13 +117,16 @@ export class LiveFeed<T> {
 	/** Drop everything held. The socket stays open, so the pane fills again. */
 	clear() {
 		this.items = []
+		this.#dropped.clear()
 	}
 
 	#receive(frame: string) {
 		const item = this.#options.parse(frame)
 		if (item === null) return
 		if (this.#options.accept && !this.#options.accept(item, this.items)) return
-		this.items = this.#trim([...this.items, item])
+		const placed = this.#place(item)
+		if (placed === null) return // a revision of a key already trimmed off the cap
+		this.items = this.#trim(placed)
 		if (this.#options.follow?.()) {
 			queueMicrotask(() => {
 				const el = this.element
@@ -116,8 +135,31 @@ export class LiveFeed<T> {
 		}
 	}
 
+	/** Where an arriving item goes: over the revision it supersedes, last, or
+	 *  nowhere (`null`) when its key already fell off the cap - the row it
+	 *  would revise is gone, so appending it would land it out of order at
+	 *  the tail instead of leaving it dropped. */
+	#place(item: T): T[] | null {
+		const key = this.#options.key?.(item)
+		if (key == null) return [...this.items, item]
+		const at = this.items.findIndex((held) => this.#options.key?.(held) === key)
+		if (at >= 0) {
+			const next = [...this.items]
+			next[at] = item
+			return next
+		}
+		return this.#dropped.has(key) ? null : [...this.items, item]
+	}
+
 	#trim(items: T[]): T[] {
 		const cap = this.#options.cap
-		return cap && items.length > cap ? items.slice(-cap) : items
+		if (!cap || items.length <= cap) return items
+		// Remember what fell off so a later revision of one of these is
+		// dropped instead of re-appended (see #place).
+		for (const held of items.slice(0, items.length - cap)) {
+			const key = this.#options.key?.(held)
+			if (key != null) this.#dropped.add(key)
+		}
+		return items.slice(-cap)
 	}
 }

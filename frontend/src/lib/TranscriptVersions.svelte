@@ -77,6 +77,16 @@ const transcribeJobs = $derived(
 	jobs.filter((j) => j.operation === 'transcribe').sort((a, b) => a.created_at - b.created_at),
 )
 
+// Whether the versions on screen were cut on different boundaries: the
+// original streamed (its rows carry a turn_id, one per vendor turn) while
+// every re-transcription always runs over the stored recording cut at the
+// local VAD's utterance boundaries instead (docs/adr/0006). Same audio, a
+// different segmentation - shown once, near the table, when there is a
+// re-transcription to actually compare it against.
+const versionsDifferInShape = $derived(
+	transcribeJobs.length > 0 && detail.transcript.some((e) => e.turn_id),
+)
+
 // The most recent failure, surfaced under the table (there is no error column).
 const lastJobError = $derived(
 	jobs.filter((j) => j.error).sort((a, b) => b.created_at - a.created_at)[0],
@@ -283,6 +293,12 @@ const originalStatus = $derived.by(() => {
 				{/each}
 			</TableBody>
 		</Table>
+		{#if versionsDifferInShape}
+			<p class="text-xs text-muted-foreground">
+				The original was transcribed live in vendor turns; re-transcriptions are cut at the
+				recording's utterance boundaries, so segments will not line up one to one between versions.
+			</p>
+		{/if}
 		{#if lastJobError?.error}
 			<p class="text-xs text-destructive">
 				Last failed job ({lastJobError.operation}): {lastJobError.error}

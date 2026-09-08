@@ -10,19 +10,28 @@ speak to it and nothing else. It is structural on purpose. Nothing subclasses
 it, the fakes in the tests satisfy it by shape, and it stays alongside the base
 class below so that a caller never has to know how a backend was built.
 
-One utterance per call, not a stream of them: every caller has always fed
-exactly one (the router drives the failover, the timeout and the diarization
-per utterance, so it could never hand over more), and a contract that promised
-a stream made eight connectors implement a loop that never ran twice. A
-connector that keeps something alive between utterances keeps it on the
-instance, as the OpenAI Realtime session's socket does.
+One utterance per call, not a stream of them: every caller of *this* shape has
+always fed exactly one (the router drives the failover, the timeout and the
+diarization per utterance, so it could never hand over more), and a contract
+that promised a stream made every connector implement a loop that never ran
+twice. A connector that keeps something alive between utterances keeps it on
+the instance, as the OpenAI Realtime session's socket does.
 
-``Connector`` is how the eight real connectors are built. Every one of them
-does the same thing per utterance: build the setup from the glossary, send the
-utterance to the vendor, turn the answer into text and words, and wrap that in
-a ``TranscriptEvent`` whose fields are the same eight whichever vendor
-answered. The base class owns that shape and the event; a connector supplies
-two hooks:
+There is a second shape now, and it is not this one. ``loreline.stt.streaming``
+holds it: a connector fed a session's raw PCM frames with no caller-decided
+boundary at all, deciding its own turns by its vendor's protocol and publishing
+interims while a turn is open. A live capture takes it where the primary
+connector implements it; batch, re-processing and the call-shaped fallback path
+keep everything below. The two are shapes a class may have, not modes an app is
+in, and one class may have both (``OpenAIRealtimeBackend`` does). See
+``docs/adr/0006-streaming-realtime-transcription.md``.
+
+``Connector`` is how the eleven real connectors are built, five realtime and
+six batch. Every one of them does the same thing per utterance: build the setup
+from the glossary, send the utterance to the vendor, turn the answer into text
+and words, and wrap that in a ``TranscriptEvent`` whose fields are the same
+whichever vendor answered. The base class owns that shape and the event; a
+connector supplies two hooks:
 
 * ``prepare(glossary) -> P``: whatever one call to ``transcribe`` needs (a URL
   with the query string built, a params tuple, a capped term list, a prompt).
@@ -41,7 +50,7 @@ about its declared surface and its key, not about a connector, and
 no-op until a connector holds something.
 
 ``HttpConnector`` is the one level below ``Connector`` and the last: it serves
-the four batch connectors, which post through an ``httpx.AsyncClient`` that is
+the batch connectors, which post through an ``httpx.AsyncClient`` that is
 either injected (tests) or owned, and which all report a failed request with
 the vendor's body in the message because the status line alone ("400 Bad
 Request") never says which parameter was wrong.

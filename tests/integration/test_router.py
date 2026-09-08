@@ -98,6 +98,7 @@ class FakeDiarizer:
     def __init__(self, segments: list[SpeakerSegment]) -> None:
         self._segments = segments
         self.calls = 0
+        self.session_ids: list[str | None] = []
 
     async def diarize(
         self,
@@ -106,13 +107,40 @@ class FakeDiarizer:
         sample_rate: int = 16000,
         min_speakers: int | None = None,
         max_speakers: int | None = None,
+        session_id: str | None = None,
     ) -> list[SpeakerSegment]:
         _ = (wav, sample_rate, min_speakers, max_speakers)
         self.calls += 1
+        self.session_ids.append(session_id)
         return self._segments
 
     async def aclose(self) -> None:
         return None
+
+
+class FailingDiarizer(FakeDiarizer):
+    """Every way a real one refuses: a non-2xx, a timeout, a refused connection.
+
+    ``RemoteDiarizer.diarize`` raises for all of them, through
+    ``raise_for_vendor_status``.
+    """
+
+    def __init__(self) -> None:
+        super().__init__([])
+
+    async def diarize(
+        self,
+        wav: bytes,
+        *,
+        sample_rate: int = 16000,
+        min_speakers: int | None = None,
+        max_speakers: int | None = None,
+        session_id: str | None = None,
+    ) -> list[SpeakerSegment]:
+        _ = (wav, sample_rate, min_speakers, max_speakers, session_id)
+        self.calls += 1
+        msg = "the diarization service answered 503"
+        raise RuntimeError(msg)
 
 
 async def _utterances() -> AsyncIterator[Utterance]:
@@ -205,6 +233,34 @@ async def test_router_remote_diarization_merge() -> None:
     assert events[0].words[1].speaker == "Speaker 1"
 
 
+async def test_router_publishes_text_a_failing_diarizer_could_not_label() -> None:
+    """A diarizer that refuses costs the speaker labels, never the transcript.
+
+    Awaited unguarded, its exception left ``SttRouter.run`` entirely: this
+    utterance's text was dropped and so was every utterance behind it, for the
+    rest of the session, because the live path was over.
+    """
+    bus: EventBus[TranscriptEvent] = EventBus()
+    diarizer = FailingDiarizer()
+    router = SttRouter(
+        FakeBackend("p1", words=[Word(text="hallo", start=0.1, end=0.4)]),
+        bus,
+        RouterConfig(
+            session_id="s1",
+            diarization=DiarizationConfig(mode=DiarizationMode.REMOTE, endpoint="http://x"),
+        ),
+        diarizer=diarizer,
+    )
+    collector = asyncio.create_task(_collect(bus, 1))
+    await asyncio.sleep(0.01)
+    await router.run(_utterances())
+    events = await collector
+
+    assert diarizer.calls == 1
+    assert events[0].text == "ok"
+    assert events[0].words[0].speaker is None
+
+
 async def test_router_remote_diarization_merge_mid_session() -> None:
     """The diarizer only sees one utterance's isolated audio, so its segments are
     utterance-relative (0-based) regardless of where in the session the utterance
@@ -238,6 +294,68 @@ async def test_router_remote_diarization_merge_mid_session() -> None:
     events = await collector
     assert events[0].words[0].speaker == "Speaker 0"
     assert events[0].words[1].speaker == "Speaker 1"
+
+
+async def test_router_sends_the_session_id_to_the_diarizer() -> None:
+    """Every utterance of one session is diarized under that session's id.
+
+    Without it a remote diarizer clusters each utterance on its own and calls
+    whoever is speaking "Speaker 0", so the session's rename map renames the
+    whole table to one name. The id is what lets the service answer with the
+    same label for the same voice from the first utterance to the last.
+    """
+    bus: EventBus[TranscriptEvent] = EventBus()
+    diarizer = FakeDiarizer([SpeakerSegment(start=0.0, end=1.0, speaker="Speaker 0")])
+    router = SttRouter(
+        FakeBackend("p1", words=[Word(text="hallo", start=0.1, end=0.4)]),
+        bus,
+        RouterConfig(
+            session_id="s-42",
+            diarization=DiarizationConfig(mode=DiarizationMode.REMOTE, endpoint="http://x"),
+        ),
+        diarizer=diarizer,
+    )
+
+    async def _two_utterances() -> AsyncIterator[Utterance]:
+        yield Utterance(pcm=b"\x01\x00" * 1600, start=0.0, end=1.0)
+        yield Utterance(pcm=b"\x01\x00" * 1600, start=9.0, end=10.0)
+
+    collector = asyncio.create_task(_collect(bus, 2))
+    await asyncio.sleep(0.01)
+    await router.run(_two_utterances())
+    await collector
+    assert diarizer.session_ids == ["s-42", "s-42"]
+
+
+async def test_router_remote_diarization_labels_an_event_without_words() -> None:
+    """Two connectors return no words at all (OpenAI Realtime, Gemini Live).
+
+    The event is still one voiced stretch with a speaker in it, so it takes the
+    label of the segment covering most of its span rather than coming out
+    unattributed.
+    """
+    bus: EventBus[TranscriptEvent] = EventBus()
+    diarizer = FakeDiarizer(
+        [
+            SpeakerSegment(start=0.0, end=0.2, speaker="Speaker 0"),
+            SpeakerSegment(start=0.2, end=1.0, speaker="Speaker 1"),
+        ]
+    )
+    router = SttRouter(
+        FakeBackend("p1"),  # no words, as those two sessions answer
+        bus,
+        RouterConfig(
+            session_id="s1",
+            diarization=DiarizationConfig(mode=DiarizationMode.REMOTE, endpoint="http://x"),
+        ),
+        diarizer=diarizer,
+    )
+    collector = asyncio.create_task(_collect(bus, 1))
+    await asyncio.sleep(0.01)
+    await router.run(_utterances())
+    events = await collector
+    assert events[0].words == []
+    assert events[0].speaker == "Speaker 1"
 
 
 async def test_router_inline_diarization_sets_event_speaker() -> None:

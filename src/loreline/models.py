@@ -203,20 +203,36 @@ class Word(BaseModel):
 
 
 class TranscriptEvent(BaseModel):
-    """A transcript segment emitted by a backend.
+    """One segment of one transcript version: what was said, when, by whom.
 
-    Interim events may be upgraded to ``is_final`` and gain speaker labels once
-    diarization completes.
+    Two shapes produce these (see ``docs/adr/0006``). The utterance path emits
+    one final event per ``Utterance`` and nothing else. The streaming path
+    emits a growing interim (``is_final=False``) while a vendor's turn is open
+    and one final when it closes, all of them carrying the same ``turn_id``, so
+    the final replaces its interims rather than piling up behind them.
+
+    ``turn_id`` is that replace key, and it is the whole key: a reader
+    (the transcript table, either live feed) replaces a held event with an
+    arriving one when both name the same ``turn_id``, and appends otherwise.
+    None on the utterance path, where every event is settled when it is
+    published and nothing ever replaces anything.
+
+    A start timestamp would not do instead. It is stable across a turn's
+    interims for a vendor that reports server-VAD offsets, which OpenAI does,
+    but Deepgram and AssemblyAI both revise a turn's start as their endpointing
+    refines, and a key that silently stops matching appends a second row rather
+    than failing.
     """
 
     session_id: str
-    source: str  # provider id, or a REPROCESS_SOURCE_PREFIX/DIARIZE_SOURCE tag
+    source: str  # provider id, GAP_SOURCE, or a REPROCESS/DIARIZE tag
     text: str
     words: list[Word] = Field(default_factory=list[Word])
     speaker: str | None = None
     start_ts: float
     end_ts: float
     is_final: bool = False
+    turn_id: str | None = None
 
 
 # ``TranscriptEvent.source`` tags used by post-session re-processing (see
@@ -230,6 +246,18 @@ class TranscriptEvent(BaseModel):
 ORIGINAL_VERSION = "original"
 DIARIZE_SOURCE_PREFIX = "diarize:"
 REPROCESS_SOURCE_PREFIX = "reprocess:"
+
+# ``TranscriptEvent.source`` for the marker a streaming connector leaves where a
+# dead connection swallowed audio (see ``loreline.stt.streaming``). A whole
+# value rather than a prefix, because there is nothing to vary: one session's
+# gaps are all the same kind of thing.
+#
+# It is a source rather than a flag so that everything already routing by source
+# routes it for free: it belongs to the live capture's version, so the session
+# page and the dashboard show it, and it is not text anybody said, so
+# ``loreline.export.final_rows`` keeps it out of exports, summaries and the
+# rows a diarize job relabels.
+GAP_SOURCE = "gap"
 
 
 def rebase_transcript(event: TranscriptEvent, offset: float) -> TranscriptEvent:

@@ -103,6 +103,16 @@ glossary policy can never disagree about which model is running. `SttRouter`
 then hands that connector one utterance at a time, falls over to the fallback
 provider when it fails, and hands the events to the diarizer.
 
+Where the connector also has the streaming shape (`is_streaming`),
+`SessionManager` picks `StreamPath` instead: frames go straight from capture
+to the connector, which decides its own turns and yields interim and final
+events over one long-held connection, reconnecting a bounded number of times
+before failing over to the next streaming provider, then to `SttRouter` where
+the fallback is call-shaped instead. Diarization goes through the same
+`merge_diarization` either way, but beside the stream rather than in front of
+it: a turn publishes unlabelled the moment it closes and is republished with
+speakers once the diarizer answers. See `docs/adr/0006`.
+
 The connector itself holds no addresses. `capabilities.surface_for` returns the
 URL and the auth scheme the yaml declares for that interaction and transport,
 with the provider row's `base_url` applied where the surface says it may be. The

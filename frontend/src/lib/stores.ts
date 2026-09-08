@@ -1,5 +1,5 @@
 import { writable } from 'svelte/store'
-import type { Health, ProviderConfig, ReprocessJob } from './wire'
+import type { Health, ProviderConfig, ReprocessJob, TranscriptEvent } from './wire'
 import type { ConnectionStatus } from './ws'
 
 export const health = writable<Health | null>(null)
@@ -66,6 +66,9 @@ export function audioIsEmpty(durationS: number | null | undefined): boolean {
 // for providers that have since been deleted.
 const DIARIZE_SOURCE = 'diarize'
 const REPROCESS_PREFIX = 'reprocess:'
+/** `TranscriptEvent.source` of the marker a streaming connector leaves where a
+ *  dead connection swallowed audio - see loreline.models.GAP_SOURCE. */
+export const GAP_SOURCE = 'gap'
 
 export function providerName(id: string | null | undefined, providers: ProviderConfig[]): string {
 	if (!id) return '-'
@@ -75,9 +78,27 @@ export function providerName(id: string | null | undefined, providers: ProviderC
 	return `${id.slice(0, 8)}…`
 }
 
-// A transcript segment's `source` is a provider id, a `diarize:<version>` tag,
-// or `reprocess:<job id>` - see loreline.models.
+/** How a feed knows two events are one turn being revised.
+ *
+ * A streaming connector publishes a turn as a growing interim and then as a
+ * final, all carrying one `turn_id`; the utterance path publishes each segment
+ * once, settled, with none. Null here means "its own item", so a pane keyed on
+ * this behaves exactly as it did before turns existed.
+ *
+ * The source is part of the key because a session's versions share the table:
+ * a re-run's copy of a turn is a different row from the original's. The
+ * session id is part of it too: a vendor's own turn handle can be a small
+ * per-session integer starting back at 0 (AssemblyAI does this), so without
+ * it a new session's first turn would replace the previous session's row in
+ * a pane that never clears between sessions. */
+export function turnKey(event: TranscriptEvent): string | null {
+	return event.turn_id ? `${event.session_id}:${event.source}:${event.turn_id}` : null
+}
+
+// A transcript segment's `source` is a provider id, `gap`, a `diarize:<version>`
+// tag, or `reprocess:<job id>` - see loreline.models.
 export function sourceLabel(source: string, providers: ProviderConfig[]): string {
+	if (source === GAP_SOURCE) return 'Lost audio'
 	if (source === DIARIZE_SOURCE || source.startsWith(`${DIARIZE_SOURCE}:`)) return 'Diarization'
 	if (source.startsWith(REPROCESS_PREFIX)) {
 		const suffix = source.slice(REPROCESS_PREFIX.length)

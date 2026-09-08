@@ -530,6 +530,14 @@ providers:
       # Realtime-only, lowest latency, streaming transcript deltas. Recommended default for live.
       # Model card: ONLY v1/realtime/transcription_sessions is supported.
       # https://developers.openai.com/api/docs/models/gpt-live-transcribe
+      #
+      # Measured 2026-09-07: this model REFUSES server-side turn detection
+      # ("Turn detection is not supported for this transcription model",
+      # param session.audio.input.turn_detection), so the streaming shape
+      # cannot run on it and a session picking it falls back to one utterance
+      # per call, which is what it always did. gpt-4o-transcribe, whisper-1 and
+      # gpt-4o-mini-transcribe accept server VAD on the same socket, and this
+      # file routes all three to batch. See docs/adr/0006.
       - id: gpt-live-transcribe
         label: GPT Live Transcribe
         interactions: [transcribe]
@@ -549,6 +557,7 @@ providers:
 
       # Realtime-only Whisper-lineage streaming model. Docs are thin on its parameters.
       # https://developers.openai.com/api/docs/models/gpt-realtime-whisper
+      # Refuses server-side turn detection, same as gpt-live-transcribe above.
       - id: gpt-realtime-whisper
         label: GPT Realtime Whisper
         interactions: [transcribe]
@@ -589,6 +598,14 @@ providers:
       # Legacy. Realtime here means the v1/realtime session path (input_audio_transcription),
       # NOT v1/realtime/transcription_sessions, which the model card marks "Not supported".
       # https://developers.openai.com/api/docs/models/gpt-4o-transcribe
+      #
+      # Measured 2026-09-07: this model DOES accept server-side turn detection
+      # over the realtime socket, and streams for real (median 758 ms from the
+      # end of a turn to its settled text, against the utterance path's 800 ms
+      # of trailing silence plus a round trip). `prefer: batch` below keeps a
+      # live capture off it anyway, which is the choice to revisit now that
+      # realtime buys something: it is a product decision about cost and about
+      # which endpoint an existing session moves to, not a code one.
       - id: gpt-4o-transcribe
         label: GPT-4o Transcribe
         interactions: [transcribe]
@@ -1328,7 +1345,17 @@ providers:
             - [glossary, word_timestamps]
         deprecated: null
       # Live/streaming variant over the Live API BidiGenerateContent websocket.
-      # Sessions capped at 10 minutes. No diarization, no word timestamps.
+      # No diarization, no word timestamps, and no timing of any kind.
+      #
+      # The session cap is real and it is not a fault: measured over one paced
+      # 13-minute run of the streaming shape (ADR 0006), goAway arrived after
+      # nine minutes carrying timeLeft: "50s", so a live capture reconnects
+      # about six times an hour. That run cost one gap marker of one second in
+      # thirteen minutes, because the connector spends the notice waiting for
+      # the open turn to close. sessionResumption is accepted in the setup and
+      # was never once answered with a handle, so a reconnect is a fresh
+      # session. Same run: 90 turns, first interim a median 752 ms after the
+      # speaker started, settled text a median 265 ms after the last interim.
       - id: gemini-3.5-transcribe-live
         label: Gemini 3.5 Transcribe (Live)
         interactions: [transcribe]
@@ -1609,7 +1636,12 @@ providers:
       # maintainer with a key should check first: that the socket's
       # transcript.done really carries the whole utterance (this file's reading
       # of "Final transcript after audio.done"), and that words[] carries
-      # `speaker` under diarize=true on both transports.
+      # `speaker` under diarize=true on both transports. The socket now also
+      # serves the streaming shape (ADR 0006), which adds two of the same kind,
+      # both places where the docs say a thing two ways: whether a partial's
+      # cumulative `text` accumulates over the utterance or over the whole
+      # stream, and whether `finalize` really answers with a speech_final
+      # partial on a socket that stays open.
       - id: grok-stt-1.0
         label: Grok STT
         interactions: [transcribe]

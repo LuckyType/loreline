@@ -169,7 +169,7 @@ class SessionRepository:
         )
         await self._db.connection.commit()
 
-    async def mark_interrupted(self) -> None:
+    async def mark_interrupted(self, transcripts: TranscriptRepository) -> None:
         """Fail sessions left CAPTURING by a previous process (startup sweep).
 
         ``SessionManager`` only ever transitions a session out of CAPTURING
@@ -179,12 +179,24 @@ class SessionRepository:
         at CAPTURING forever with no ``ended_at``: nothing else revisits it,
         so it just sits in the history list looking like a session that's
         eternally still recording. Mirrors ``ReprocessRepository.mark_interrupted``.
+
+        A capturing session that was streaming can also leave interim rows
+        behind: the connector never got the chance to replace them with a
+        final. ``TranscriptRepository.delete_interims`` otherwise only runs
+        from ``SessionManager._finish``, which a killed process never reaches,
+        so this sweeps it for every session about to be failed here - or a
+        reloaded history would show a half-typed line as settled text forever.
         """
+        interrupted = [s.id for s in await self.list() if s.status is SessionStatus.CAPTURING]
+
         await self._db.connection.execute(
             "UPDATE sessions SET status = ?, ended_at = ? WHERE status = ?;",
             (SessionStatus.ERROR.value, time.time(), SessionStatus.CAPTURING.value),
         )
         await self._db.connection.commit()
+
+        for session_id in interrupted:
+            await transcripts.delete_interims(session_id)
 
     async def delete(self, session_id: str) -> None:
         await self._db.connection.execute("DELETE FROM sessions WHERE id = ?;", (session_id,))
@@ -211,19 +223,39 @@ class SessionRepository:
 
 
 class TranscriptRepository:
-    """Append + read transcript segments."""
+    """Write + read transcript segments, one row per turn."""
 
     def __init__(self, db: Database) -> None:
         self._db = db
 
     async def add(self, event: TranscriptEvent) -> None:
+        """Store one segment, replacing the turn's previous revision if any.
+
+        The utterance path publishes each segment once, settled, with no
+        ``turn_id``: SQLite counts NULLs as distinct, so the conflict clause
+        below never fires for those and every call appends, exactly as it did
+        before turns existed.
+
+        A streaming connector publishes the same turn several times, as a
+        growing interim and then as a final, all under one ``turn_id``. Those
+        are revisions of one segment, not segments: appending them would store
+        (and show, and export) a session once per word. The upsert is what
+        makes "a final replaces its interims" true in the table rather than
+        only in the browser, so a page reloaded mid-session, and a session the
+        process died in, both read back one row per turn.
+        """
         words_json = json.dumps([w.model_dump() for w in event.words])
         await self._db.connection.execute(
             """
             INSERT INTO transcript_segments
                 (session_id, source, text, speaker, start_ts, end_ts, is_final,
-                 words, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+                 words, created_at, turn_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(session_id, source, turn_id) DO UPDATE SET
+                text=excluded.text, speaker=excluded.speaker,
+                start_ts=excluded.start_ts, end_ts=excluded.end_ts,
+                is_final=excluded.is_final, words=excluded.words,
+                created_at=excluded.created_at;
             """,
             (
                 event.session_id,
@@ -235,7 +267,24 @@ class TranscriptRepository:
                 int(event.is_final),
                 words_json,
                 time.time(),
+                event.turn_id,
             ),
+        )
+        await self._db.connection.commit()
+
+    async def delete_interims(self, session_id: str) -> None:
+        """Drop any segment still marked interim (used when a session ends).
+
+        A streaming stop settles every open turn, so this normally deletes
+        nothing. It exists for the endings that cannot settle anything: the
+        process killed mid-turn, a connector that died between an interim and
+        its final. What it prevents is a stored transcript keeping a half-typed
+        row forever, which no reader could tell from a real one, since the
+        vendor was never going to send that final.
+        """
+        await self._db.connection.execute(
+            "DELETE FROM transcript_segments WHERE session_id = ? AND is_final = 0;",
+            (session_id,),
         )
         await self._db.connection.commit()
 
@@ -428,6 +477,7 @@ def _row_to_event(row: aiosqlite.Row) -> TranscriptEvent:
         start_ts=row["start_ts"],
         end_ts=row["end_ts"],
         is_final=bool(row["is_final"]),
+        turn_id=row["turn_id"],
     )
 
 

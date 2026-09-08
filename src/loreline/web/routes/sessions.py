@@ -17,7 +17,14 @@ from starlette.status import (
 )
 
 from loreline.capabilities import supports
-from loreline.export import EXPORTERS, canonical_transcript, relabel_speakers, to_txt, variant_view
+from loreline.export import (
+    EXPORTERS,
+    canonical_transcript,
+    final_rows,
+    relabel_speakers,
+    to_txt,
+    variant_view,
+)
 from loreline.llm import LLMError, summarize_transcript
 from loreline.models import (
     ORIGINAL_VERSION,
@@ -213,7 +220,7 @@ async def summarize_session(
             status_code=HTTP_400_BAD_REQUEST, detail="provider is not an LLM provider"
         )
     events = relabel_speakers(
-        canonical_transcript(await state.transcripts.for_session(session_id)),
+        final_rows(canonical_transcript(await state.transcripts.for_session(session_id))),
         session.speaker_names,
     )
     if not events:
@@ -252,7 +259,7 @@ async def export_session(request: Request, session_id: str, fmt: str = "txt") ->
     if session is None:
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="session not found")
     transcript = relabel_speakers(
-        canonical_transcript(await state.transcripts.for_session(session_id)),
+        final_rows(canonical_transcript(await state.transcripts.for_session(session_id))),
         session.speaker_names,
     )
     body = render(session, transcript)
@@ -343,10 +350,16 @@ async def merge_sessions(request: Request, body: SessionIds) -> Session:
     names: dict[str, str] = {}
     offset = 0.0
     for i, src in enumerate(sources):
-        events = canonical_transcript(await state.transcripts.for_session(src.id))
+        events = final_rows(canonical_transcript(await state.transcripts.for_session(src.id)))
         for event in events:
             shifted = rebase_transcript(event, -offset)  # negative offset shifts forward
-            await state.transcripts.add(shifted.model_copy(update={"session_id": merged_id}))
+            # The turn id goes with the source session. It is a replace key for
+            # a turn still being revised, and these are settled copies that
+            # nothing will revise again; carrying it over would only let two
+            # merged sessions' turns collide on it.
+            await state.transcripts.add(
+                shifted.model_copy(update={"session_id": merged_id, "turn_id": None})
+            )
         if durations is not None:
             # With merged audio, parts advance by their audio length so the
             # transcript stays aligned with the concatenated WAV.

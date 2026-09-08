@@ -22,7 +22,7 @@ import { Card } from '$lib/components/ui/card'
 import { Input } from '$lib/components/ui/input'
 import { confirm } from '$lib/confirm.svelte'
 import { jsonFrame, LiveFeed } from '$lib/liveFeed.svelte'
-import { transcriptWs } from '$lib/stores'
+import { transcriptWs, turnKey } from '$lib/stores'
 import TranscriptList from '$lib/TranscriptList.svelte'
 import { matchesQuery } from '$lib/transcriptSearch'
 import { cn } from '$lib/utils'
@@ -46,6 +46,9 @@ const feed = new LiveFeed<TranscriptEvent>({
 	parse: jsonFrame,
 	seed: activeTranscript,
 	cap: 500,
+	// A streaming connector revises one turn several times before it settles;
+	// keyed by turn, each revision lands on the same line instead of adding one.
+	key: turnKey,
 	follow: () => autoscroll,
 	onstatus: (open) => transcriptWs.set(open),
 })

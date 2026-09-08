@@ -334,8 +334,9 @@ class _WholeSessionDiarizer:
         sample_rate: int = 16000,
         min_speakers: int | None = None,
         max_speakers: int | None = None,
+        session_id: str | None = None,
     ) -> list[SpeakerSegment]:
-        _ = (wav, sample_rate, min_speakers, max_speakers)
+        _ = (wav, sample_rate, min_speakers, max_speakers, session_id)
         return [SpeakerSegment(start=-1e12, end=1e12, speaker="Speaker A")]
 
     async def aclose(self) -> None:
@@ -453,8 +454,9 @@ class _FailingDiarizer:
         sample_rate: int = 16000,
         min_speakers: int | None = None,
         max_speakers: int | None = None,
+        session_id: str | None = None,
     ) -> list[SpeakerSegment]:
-        _ = (wav, sample_rate, min_speakers, max_speakers)
+        _ = (wav, sample_rate, min_speakers, max_speakers, session_id)
         raise self._exc
 
     async def aclose(self) -> None:
@@ -546,6 +548,97 @@ async def test_diarize_job_leaves_an_unreachable_diarizer_error_as_is(tmp_path: 
 
     assert job["status"] == "error"
     assert "Connection refused" in str(job["error"])
+
+
+class _TrackingDiarizer:
+    """Diarizer standing in for the remote service's per-session bank memory.
+
+    Records the ``session_id`` every ``diarize()`` call carries into ``seen``,
+    and mirrors ``RemoteDiarizer.aclose``: on close it "forgets" (into
+    ``forgotten``) every id this instance has itself sent, and only those.
+    ``seen``/``forgotten`` are shared across every diarizer the factory below
+    builds, so a test can tell whether a transcribe job's own instance ever
+    touches an id another caller (a live capture, another job) would use.
+    """
+
+    def __init__(self, seen: list[str | None], forgotten: list[str]) -> None:
+        self._seen = seen
+        self._forgotten = forgotten
+        self._sessions: set[str] = set()
+
+    async def diarize(
+        self,
+        wav: bytes,
+        *,
+        sample_rate: int = 16000,
+        min_speakers: int | None = None,
+        max_speakers: int | None = None,
+        session_id: str | None = None,
+    ) -> list[SpeakerSegment]:
+        _ = (wav, sample_rate, min_speakers, max_speakers)
+        self._seen.append(session_id)
+        if session_id is not None:
+            self._sessions.add(session_id)
+        return []
+
+    async def aclose(self) -> None:
+        self._forgotten.extend(sorted(self._sessions))
+        self._sessions.clear()
+
+
+async def test_transcribe_job_diarizes_under_its_own_bank_and_forgets_only_that(
+    tmp_path: Path,
+) -> None:
+    """A transcribe job must not diarize under the live session's own bank.
+
+    ``RouterConfig.session_id`` (see ``loreline.stt.router``) has to stay the
+    live session's own id - it is also what every produced ``TranscriptEvent``
+    is filed under - but the remote diarizer keys its speaker bank on that
+    same string over the wire. A transcribe job's own ``RemoteDiarizer``
+    instance sending it would land on the SAME remote bank a live capture of
+    that session uses, and the job's ``aclose`` - which deletes whatever it
+    sent - would wipe the live capture's voices out from under it, renumbering
+    it from Speaker 0. The job must diarize, and delete, under a bank id of
+    its own instead (see ``loreline.reprocess.jobs._JobBankDiarizer``).
+    """
+    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t")
+    seen: list[str | None] = []
+    forgotten: list[str] = []
+
+    async def tracking_diarizers(_config: DiarizationConfig) -> DiarizationProvider:
+        return _TrackingDiarizer(seen, forgotten)
+
+    app = create_app(
+        settings,
+        capture_factory=capture_factory,  # type: ignore[arg-type]
+        backend_factory=FakeBackend,  # type: ignore[arg-type]
+        diarizer_factory=tracking_diarizers,
+    )
+    async with LifespanManager(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            pid = await _provider(client)
+            sid = await _run_session(client, pid)
+
+            enqueue = await client.post(
+                "/api/reprocess",
+                json={
+                    "session_id": sid,
+                    "provider_id": pid,
+                    "model": _MODEL,
+                    "diarization": {"mode": "remote", "endpoint": "http://diar"},
+                },
+            )
+            assert enqueue.status_code == 202
+            job_id = enqueue.json()["id"]
+            job = await _wait_done(client, job_id)
+            assert job["status"] == "done"
+
+    expected_bank = f"{sid}:job:{job_id}"
+    assert seen  # the job actually diarized at least one utterance
+    assert sid not in seen  # never sent under the live session's own bare id
+    assert seen == [expected_bank] * len(seen)
+    assert forgotten == [expected_bank]  # only the job's own bank is deleted
 
 
 async def test_delete_transcript_version(tmp_path: Path) -> None:

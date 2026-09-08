@@ -16,7 +16,9 @@ generate video. Models are never interchangeable across these.
 is still going out, batch is one request per utterance. A model may serve one or both.
 It follows the chosen model, never the provider row. A model serving both names its
 preference, and that preference is written for a live capture, so re-processing a stored
-recording takes the batch transport instead wherever the model has one.
+recording takes the batch transport instead wherever the model has one. Realtime became
+literally true with the streaming shape below; before that a realtime connector still only
+ever saw audio a local VAD had finished cutting.
 _Avoid_: protocol (was a stored enum on a ProviderConfig that nothing read)
 
 **ProviderConfig**: One stored provider row a GM configured: a kind, a credential
@@ -34,8 +36,28 @@ transports served, speakers, word timings, glossary ceiling.
 **Connector**: The adapter for one kind over one transport, built on the `Connector` base
 and satisfying the `STTBackend` contract: one utterance in, one transcript event or nothing
 back. It is built with its model's capabilities already resolved, so it never asks the yaml
-which model is running.
+which model is running. A realtime connector may also have the **streaming shape** below;
+having it is a fact about the class, never a field in the yaml.
 _Avoid_: backend (kept only in class names and the contract), provider class
+
+**Streaming shape**: The second thing a realtime connector can be: fed a session's raw PCM
+frames with no boundary decided for it, translating its vendor's messages into turn signals
+and nothing else. `StreamingConnector` is that half; `TranscriptStream` is the other half,
+one per provider per session, owning the capture clock, interim throttling, resampling,
+the liveness watchdog, reconnects and the gap marker. See `docs/adr/0006`.
+_Avoid_: streaming backend, realtime mode (the shape is not a mode anything is in)
+
+**Turn**: One stretch of speech a vendor's own endpointing decided on, which is what a
+streaming connector produces instead of an Utterance. It is published several times, as a
+growing interim and then as a final, all carrying one **turn id**, which is the key a
+reader replaces by rather than appends after: the transcript table, both live feeds.
+_Avoid_: segment id, utterance (a turn is nobody's utterance)
+
+**Gap marker**: A transcript row saying the app lost this span of audio, left where a
+streaming connection died. Its `source` is `gap`, which keeps it in the live views (the
+browser is who it is for) and out of exports, summaries and diarize jobs, all of which read
+through `final_rows`. A streaming loss is aligned to nothing, so unlike a dropped utterance
+no re-process recovers exactly it, which is why it is a row and not a log line.
 
 **Health probe**: One question per provider row, "does this key work at this surface",
 answered as a **HealthReport** by `probe_provider`, never by building a connector. It asks
@@ -85,9 +107,10 @@ attributes it, a speaker label.
 **Transcription**: What a connector gets back for one utterance, the text and whatever words
 came with it. Not yet an event.
 
-**TranscriptEvent**: One final transcript segment for one utterance, tagged with the
-source that produced it. Its speaker is the speaker of the first word that carries one,
-else none. That is the one speaker rule for every connector.
+**TranscriptEvent**: One segment of one transcript version, tagged with the source that
+produced it: a settled one per utterance from the utterance path, or one turn's current
+state from the streaming path, final or interim. Its speaker is the speaker of the first
+word that carries one, else none. That is the one speaker rule for every connector.
 
 **Transcript version**: One full pass over a session's audio, the live capture
 ("original") or one re-processing job. Diarization relabels one into a copy.
@@ -99,8 +122,21 @@ _Avoid_: prompt, vocabulary, keyterms (each is one vendor's wire name for it)
 **SttRouter**: Runs a session's utterances through a primary connector, fails over to a
 fallback, applies diarization.
 
+**StreamPath**: The other live path, taken when a session's primary connector has the
+streaming shape: frames straight from capture to the connector, a fallback opened as a
+second stream or, where the fallback is call-shaped, the rest of the session handed to
+`SttRouter`. Both providers dead means what it always meant, keep recording and stop
+transcribing. The VAD and the chunker keep running under both, for the WAV's utterance
+index.
+
 **Diarizer**: The adapter that turns words or audio into speaker segments for one
 DiarizationMode: inline from the STT's labels, a remote sherpa-onnx service, OpenAI's batch
 model, or none. One factory, `DiarizerFactory`, owns construction and the credential
 precedence, a configured OpenAI row's stored key before the environment.
 _Avoid_: diarization provider (the class name it keeps in `DiarizationProvider`)
+
+**Speaker bank**: The voices one session has been heard to contain, kept by the remote
+service under the `session_id` every call carries, so a label means the same person in the
+first utterance and the hundredth. Without it each call clusters alone and calls whoever
+spoke "Speaker 0". Dropped when the diarizer closes, and on an idle TTL besides. See
+`docs/adr/0007`.

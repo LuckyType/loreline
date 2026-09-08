@@ -4,8 +4,17 @@ from __future__ import annotations
 
 import json
 
-from loreline.export import EXPORTERS, relabel_speakers, to_json, to_srt, to_txt, to_vtt
-from loreline.models import Session, SessionStatus, TranscriptEvent
+from loreline.export import (
+    EXPORTERS,
+    canonical_transcript,
+    final_rows,
+    relabel_speakers,
+    to_json,
+    to_srt,
+    to_txt,
+    to_vtt,
+)
+from loreline.models import GAP_SOURCE, Session, SessionStatus, TranscriptEvent
 
 
 def _session() -> Session:
@@ -75,3 +84,44 @@ def test_all_formats_registered() -> None:
         assert isinstance(body, str)
         assert media_type
         assert ext
+
+
+def test_final_rows_keeps_only_what_somebody_said() -> None:
+    """A running streaming session has three kinds of row in the table at once.
+
+    Interims are guesses about to be replaced and gap markers are the app
+    saying it lost audio; exporting, summarizing or diarizing either would make
+    text nobody said permanent (see ``docs/adr/0006``).
+    """
+    rows = [
+        TranscriptEvent(
+            session_id="s1",
+            source="oai",
+            text="the goblin runs",
+            start_ts=1.0,
+            end_ts=2.0,
+            is_final=True,
+            turn_id="oai:1:a",
+        ),
+        TranscriptEvent(
+            session_id="s1",
+            source="oai",
+            text="and then the",
+            start_ts=3.0,
+            end_ts=3.4,
+            is_final=False,
+            turn_id="oai:1:b",
+        ),
+        TranscriptEvent(
+            session_id="s1",
+            source=GAP_SOURCE,
+            text="4s of audio was not transcribed",
+            start_ts=5.0,
+            end_ts=9.0,
+            is_final=True,
+        ),
+    ]
+
+    assert [e.text for e in final_rows(rows)] == ["the goblin runs"]
+    # The live views keep all three: the browser is what the marker is for.
+    assert len(canonical_transcript(rows)) == 3
