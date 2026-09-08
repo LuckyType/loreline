@@ -218,6 +218,19 @@ class OkResponse(BaseModel):
     ok: bool = True
 
 
+class LivenessResponse(BaseModel):
+    """The unauthenticated liveness answer: this process is up, and no more.
+
+    Its own model rather than a reuse of ``OkResponse`` because the two are
+    read by different callers and mean different things: ``ok`` acknowledges a
+    write to whoever made it, ``status`` is what an uptime check and the
+    installer's start-up poll look at from outside. Deliberately carries
+    nothing about the deployment; see ``/api/system/livez``.
+    """
+
+    status: Literal["ok"] = "ok"
+
+
 class AlertChannelWrite(BaseModel):
     """Create/update payload for one alert channel (token is write-only)."""
 

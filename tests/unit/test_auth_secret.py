@@ -92,3 +92,23 @@ def test_login_rate_limiter_success_resets_count() -> None:
     limiter.record_failure("1.2.3.4")
     limiter.record_failure("1.2.3.4")
     assert limiter.allowed("1.2.3.4")  # only 2 failures since the reset, below threshold
+
+
+def test_login_rate_limiter_forgets_keys_that_have_gone_quiet() -> None:
+    """The table holds who is failing now, not every address that ever failed.
+
+    Without this, a key that never reaches the threshold is never removed: the
+    dict grows for the life of the process, one entry per address that mistyped
+    the password once, and the address is whatever the caller can make it.
+    """
+    limiter = LoginRateLimiter(max_attempts=3, lockout_seconds=0.05)
+    for octet in range(20):
+        limiter.record_failure(f"1.2.3.{octet}")
+    assert len(limiter) == 20
+
+    time.sleep(0.06)
+    limiter.record_failure("9.9.9.9")
+    assert len(limiter) == 1
+    # And their counts went with them: a window's silence is a clean slate,
+    # which is what sitting out a lockout already bought before the sweep.
+    assert limiter.allowed("1.2.3.0")

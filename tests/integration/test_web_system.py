@@ -362,5 +362,9 @@ async def test_ops_endpoints_require_auth(tmp_path: Path) -> None:
         assert (
             await ac.get("/api/system/diarizer/probe", params={"endpoint": "http://x"})
         ).status_code == 401
-        # health stays open for external pollers
-        assert (await ac.get("/api/system/healthz")).status_code == 200
+        # The snapshot is behind the cookie too: version, free disk, capture
+        # state, the diarizer endpoint and the STT vendor's error text are not
+        # for anyone who can reach the port.
+        assert (await ac.get("/api/system/healthz")).status_code == 401
+        # What stays open for external pollers is liveness, and only that.
+        assert (await ac.get("/api/system/livez")).status_code == 200

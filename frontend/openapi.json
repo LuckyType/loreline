@@ -6,13 +6,35 @@
     "version": "0.1.0"
   },
   "paths": {
+    "/api/system/livez": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Livez",
+        "description": "Say that this process is up. The one route here that needs no cookie.\n\nEmpty on purpose: it touches no disk, no database and no diarizer, so it\ncannot fail for a reason that has nothing to do with the process being\nalive, and it hands an anonymous caller nothing about the deployment. That\nis what makes it safe to leave open for the installer's start-up poll and\nfor any uptime check pointed at the box.",
+        "operationId": "livez_api_system_livez_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LivenessResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/system/healthz": {
       "get": {
         "tags": [
           "system"
         ],
         "summary": "Healthz",
-        "description": "Return service health. Used by UI badge, push alerts, and external polling.",
+        "description": "Return the full operational snapshot, for the UI badge and push alerts.\n\nBehind auth, unlike ``/livez`` above: the exact version, free disk, capture\nstate, the operator's own diarizer endpoint and the STT vendor's raw error\ntext add up to a reconnaissance report, and this app publishes its port on\nthe LAN. It also makes the shell's guard real - the SPA layout already\nredirects to /login when this call answers 401, a branch that could not be\nreached while the route was open.",
         "operationId": "healthz_api_system_healthz_get",
         "responses": {
           "200": {
@@ -25,7 +47,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
       }
     },
     "/api/system/diarizer/probe": {
@@ -724,7 +751,7 @@
           "auth"
         ],
         "summary": "Login",
-        "description": "Validate the shared password and set an auth cookie.\n\nRate-limited per client IP (see ``LoginRateLimiter``): a shared password\nwith no backoff is a free brute-force target on a device that's LAN- (or\nworse, internet-) reachable.",
+        "description": "Validate the shared password and set an auth cookie.\n\nRate-limited per client (see ``LoginRateLimiter``): a shared password with\nno backoff is a free brute-force target on a device that's LAN- (or worse,\ninternet-) reachable. The key comes from ``client_address`` rather than the\nsocket's peer, because behind the bundled Caddy every browser at the table\narrives from the same container address and a limiter keyed on that is a\nglobal one: anyone able to reach the box could hold the login shut for\neverybody, five requests at a time.",
         "operationId": "login_api_auth_login_post",
         "requestBody": {
           "content": {
@@ -3256,6 +3283,19 @@
         ],
         "title": "JobStatus",
         "description": "Lifecycle state of a re-processing job."
+      },
+      "LivenessResponse": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "const": "ok",
+            "title": "Status",
+            "default": "ok"
+          }
+        },
+        "type": "object",
+        "title": "LivenessResponse",
+        "description": "The unauthenticated liveness answer: this process is up, and no more.\n\nIts own model rather than a reuse of ``OkResponse`` because the two are\nread by different callers and mean different things: ``ok`` acknowledges a\nwrite to whoever made it, ``status`` is what an uptime check and the\ninstaller's start-up poll look at from outside. Deliberately carries\nnothing about the deployment; see ``/api/system/livez``."
       },
       "LlmCapabilities": {
         "properties": {

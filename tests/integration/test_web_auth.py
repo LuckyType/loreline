@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator, AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-import pytest
-import pytest_asyncio
 from asgi_lifespan import LifespanManager
 from fastapi.routing import APIRoute
 from httpx import ASGITransport, AsyncClient
@@ -15,24 +13,6 @@ from httpx import ASGITransport, AsyncClient
 from loreline.settings import Settings
 from loreline.web.app import create_app
 from loreline.web.auth import require_auth
-
-
-@pytest.fixture
-def auth_settings(tmp_path: Path) -> Settings:
-    return Settings(
-        data_dir=tmp_path / "data",
-        auth_password="hunter2",
-        jwt_secret="test-secret",
-    )
-
-
-@pytest_asyncio.fixture
-async def auth_client(auth_settings: Settings) -> AsyncIterator[AsyncClient]:
-    app = create_app(auth_settings)
-    async with LifespanManager(app):
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://test") as ac:
-            yield ac
 
 
 async def test_protected_route_requires_auth(auth_client: AsyncClient) -> None:
@@ -170,16 +150,89 @@ async def test_login_rate_limited_after_repeated_failures(auth_client: AsyncClie
     assert resp.status_code == 429
 
 
+# Who the backoff is counted against. Behind the bundled Caddy every browser on
+# the LAN opens its socket from the proxy container's address, so a limiter
+# keyed on the peer is a global one and five wrong passwords from any machine
+# shut the login for the whole table. X-Forwarded-For says who really called,
+# and is believed on the same terms as X-Forwarded-Proto above: only from a
+# listed proxy, and only its own rightmost entry.
+
+
+def _proxied_settings(tmp_path: Path) -> Settings:
+    """Auth on, and the loopback peer the test client uses listed as the proxy."""
+    return Settings(
+        data_dir=tmp_path / "data",
+        auth_password="hunter2",
+        jwt_secret="test-secret",
+        trusted_proxies="127.0.0.0/8",
+    )
+
+
+async def _attempt(client: AsyncClient, password: str, forwarded_for: str | None = None) -> int:
+    """One login attempt, optionally claiming a forwarded client. Returns the status."""
+    headers = {} if forwarded_for is None else {"X-Forwarded-For": forwarded_for}
+    resp = await client.post("/api/auth/login", json={"password": password}, headers=headers)
+    return resp.status_code
+
+
+async def test_one_forwarded_client_locking_out_leaves_the_others_alone(
+    tmp_path: Path,
+) -> None:
+    """The finding itself: a locked-out browser must not lock the table's out."""
+    async with _login_client(_proxied_settings(tmp_path)) as client:
+        for _ in range(5):
+            assert await _attempt(client, "wrong", "192.168.1.10") == 401
+        assert await _attempt(client, "hunter2", "192.168.1.10") == 429
+        # A different machine at the same table, arriving through the same
+        # proxy, still gets its five and logs in on the first try.
+        assert await _attempt(client, "hunter2", "192.168.1.11") == 200
+
+
+async def test_only_the_proxys_own_entry_counts(tmp_path: Path) -> None:
+    """Prefixing the header cannot buy a fresh bucket: the last entry is the proxy's."""
+    async with _login_client(_proxied_settings(tmp_path)) as client:
+        for hop in range(5):
+            assert await _attempt(client, "wrong", f"203.0.113.{hop}, 192.168.1.10") == 401
+        assert await _attempt(client, "hunter2", "198.51.100.7, 192.168.1.10") == 429
+
+
+async def test_the_forwarded_client_is_ignored_when_the_peer_is_not_a_proxy(
+    tmp_path: Path,
+) -> None:
+    """Nothing is trusted by default, so the header is just an unverified claim."""
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        auth_password="hunter2",
+        jwt_secret="test-secret",
+    )
+    async with _login_client(settings, peer="192.168.1.50") as client:
+        for attempt in range(5):
+            assert await _attempt(client, "wrong", f"10.0.0.{attempt}") == 401
+        # All five landed on the peer's own bucket, whatever they claimed.
+        assert await _attempt(client, "hunter2", "10.0.0.99") == 429
+
+
+async def test_an_unparseable_forwarded_client_falls_back_to_the_peer(
+    tmp_path: Path,
+) -> None:
+    """Junk is free to generate; a key per request would defeat the limiter."""
+    async with _login_client(_proxied_settings(tmp_path)) as client:
+        for attempt in range(5):
+            assert await _attempt(client, "wrong", f"not-an-address-{attempt}") == 401
+        assert await _attempt(client, "hunter2", "still-not-an-address") == 429
+
+
 # The routers gate routes with a plain ``Depends(require_auth)``, which FastAPI
 # cannot recognise as a security scheme on its own. ``require_auth`` therefore
 # pulls the cookie through ``Security(session_cookie)``, and these tests pin the
 # result: a new route added without auth metadata fails here rather than
 # quietly shipping a schema that says the API is open.
 
-# Deliberately unauthenticated: the health probe, the static capability config
-# the login screen needs to render, and the login/logout pair itself.
+# Deliberately unauthenticated: the liveness probe (which says only that the
+# process is up - /healthz and its snapshot are behind auth), the static
+# capability config the login screen needs to render, and the login/logout pair.
 PUBLIC_OPERATIONS = {
-    ("/api/system/healthz", "get"),
+    ("/api/system/livez", "get"),
     ("/api/capabilities", "get"),
     ("/api/auth/login", "post"),
     ("/api/auth/logout", "post"),
