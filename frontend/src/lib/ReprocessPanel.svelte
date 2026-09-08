@@ -37,8 +37,11 @@ let {
 } = $props()
 
 // On by default: re-processing always fed the campaign glossary to the
-// provider, and turning it off is the deliberate choice.
-let useGlossary = $state(true)
+// provider, and turning it off is the deliberate choice. What is held is that
+// choice, not the resulting flag - null while the GM has no opinion yet - so
+// that "off because I said so" and "off because this model cannot take one"
+// stay two different things. See useGlossary below.
+let glossaryPick = $state<boolean | null>(null)
 let busy = $state(false)
 
 /** Re-processing replays stored audio, so it accepts every transcribe-capable
@@ -75,10 +78,13 @@ const glossaryBlocked = $derived(featureBlockedReason(selectedProvider?.kind, mo
 // original report came from: every utterance of a Gemini re-process failed
 // with a 400 and the GM had no way to see why beforehand.
 const glossaryWarning = $derived(glossaryDropsWarning(selectedProvider?.kind, model))
-
-$effect(() => {
-	if (useGlossary && glossaryBlocked) useGlossary = false
-})
+// Derived rather than cleared by an effect: a model that cannot receive a
+// glossary suppresses it for exactly as long as it is selected, and picking a
+// model that can take one again restores the standing intent. The effect that
+// used to do this only ever turned the toggle off, so passing through such a
+// model left the box unticked on the next model that could take the terms,
+// with the row claiming a deliberate choice nobody had made.
+const useGlossary = $derived(glossaryBlocked ? false : (glossaryPick ?? true))
 
 async function reprocess() {
 	if (!provider || !model) return
@@ -125,7 +131,7 @@ async function reprocess() {
 			<Checkbox
 				checked={useGlossary}
 				disabled={!!glossaryBlocked}
-				onCheckedChange={(v) => (useGlossary = v === true)}
+				onCheckedChange={(v) => (glossaryPick = v === true)}
 			/>
 			<span class={glossaryBlocked ? 'text-muted-foreground' : ''}>Use glossary</span>
 			{#if glossaryWarning && !glossaryBlocked}
