@@ -8,6 +8,7 @@ from loreline.monitoring.alerts import (
     AlertConfig,
     AlertLevel,
     AlertManager,
+    DeliveryResult,
     channel_token_secret,
 )
 from loreline.monitoring.health import disk_usage, overall_status
@@ -18,6 +19,7 @@ __all__ = [
     "AlertConfig",
     "AlertLevel",
     "AlertManager",
+    "DeliveryResult",
     "channel_token_secret",
     "disk_usage",
     "overall_status",

@@ -4,6 +4,32 @@
  */
 
 export interface paths {
+    "/api/system/livez": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Livez
+         * @description Say that this process is up. The one route here that needs no cookie.
+         *
+         *     Empty on purpose: it touches no disk, no database and no diarizer, so it
+         *     cannot fail for a reason that has nothing to do with the process being
+         *     alive, and it hands an anonymous caller nothing about the deployment. That
+         *     is what makes it safe to leave open for the installer's start-up poll and
+         *     for any uptime check pointed at the box.
+         */
+        get: operations["livez_api_system_livez_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/system/healthz": {
         parameters: {
             query?: never;
@@ -13,7 +39,14 @@ export interface paths {
         };
         /**
          * Healthz
-         * @description Return service health. Used by UI badge, push alerts, and external polling.
+         * @description Return the full operational snapshot, for the UI badge and push alerts.
+         *
+         *     Behind auth, unlike ``/livez`` above: the exact version, free disk, capture
+         *     state, the operator's own diarizer endpoint and the STT vendor's raw error
+         *     text add up to a reconnaissance report, and this app publishes its port on
+         *     the LAN. It also makes the shell's guard real - the SPA layout already
+         *     redirects to /login when this call answers 401, a branch that could not be
+         *     reached while the route was open.
          */
         get: operations["healthz_api_system_healthz_get"];
         put?: never;
@@ -233,7 +266,11 @@ export interface paths {
         put?: never;
         /**
          * Test Alert Channel
-         * @description Send a test notification to one channel.
+         * @description Send a test notification to one channel, and say why when it fails.
+         *
+         *     Always 200, failure included: the request itself succeeded, and the answer
+         *     to "did this channel take it" is the body. Turning a refused webhook into a
+         *     5xx here would make the page's own error path swallow the reason.
          */
         post: operations["test_alert_channel_api_system_alerts_channels__channel_id__test_post"];
         delete?: never;
@@ -335,9 +372,13 @@ export interface paths {
          * Login
          * @description Validate the shared password and set an auth cookie.
          *
-         *     Rate-limited per client IP (see ``LoginRateLimiter``): a shared password
-         *     with no backoff is a free brute-force target on a device that's LAN- (or
-         *     worse, internet-) reachable.
+         *     Rate-limited per client (see ``LoginRateLimiter``): a shared password with
+         *     no backoff is a free brute-force target on a device that's LAN- (or worse,
+         *     internet-) reachable. The key comes from ``client_address`` rather than the
+         *     socket's peer, because behind the bundled Caddy every browser at the table
+         *     arrives from the same container address and a limiter keyed on that is a
+         *     global one: anyone able to reach the box could hold the login shut for
+         *     everybody, five requests at a time.
          */
         post: operations["login_api_auth_login_post"];
         delete?: never;
@@ -1111,11 +1152,21 @@ export interface components {
         AlertLevel: "info" | "warning" | "error";
         /**
          * AlertTestResult
-         * @description Delivery outcome of a single channel test.
+         * @description Delivery outcome of a single channel test, and why it failed.
+         *
+         *     ``detail`` is the only diagnosis an alert channel ever offers: nothing
+         *     probes one periodically and the table carries no health column, so "Test
+         *     failed" on its own leaves an operator guessing between a typo, a closed
+         *     port and a rejected token. It holds the transport's own words or the status
+         *     plus the vendor's sentence, bounded and with the channel's credential
+         *     scrubbed out (see ``loreline.monitoring.alerts._scrub``). None on success:
+         *     there is nothing to explain.
          */
         AlertTestResult: {
             /** Ok */
             ok: boolean;
+            /** Detail */
+            detail?: string | null;
         };
         /**
          * AuthScheme
@@ -1375,6 +1426,24 @@ export interface components {
          * @enum {string}
          */
         JobStatus: "queued" | "running" | "done" | "error";
+        /**
+         * LivenessResponse
+         * @description The unauthenticated liveness answer: this process is up, and no more.
+         *
+         *     Its own model rather than a reuse of ``OkResponse`` because the two are
+         *     read by different callers and mean different things: ``ok`` acknowledges a
+         *     write to whoever made it, ``status`` is what an uptime check and the
+         *     installer's start-up poll look at from outside. Deliberately carries
+         *     nothing about the deployment; see ``/api/system/livez``.
+         */
+        LivenessResponse: {
+            /**
+             * Status
+             * @default ok
+             * @constant
+             */
+            status?: "ok";
+        };
         /**
          * LlmCapabilities
          * @description Per-model summarization surface.
@@ -2380,6 +2449,26 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    livez_api_system_livez_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LivenessResponse"];
+                };
+            };
+        };
+    };
     healthz_api_system_healthz_get: {
         parameters: {
             query?: never;

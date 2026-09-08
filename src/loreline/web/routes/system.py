@@ -362,8 +362,14 @@ async def delete_alert_channel(request: Request, channel_id: str) -> OkResponse:
 
 @router.post("/alerts/channels/{channel_id}/test", dependencies=_auth)
 async def test_alert_channel(request: Request, channel_id: str) -> AlertTestResult:
-    """Send a test notification to one channel."""
-    return AlertTestResult(ok=await get_state(request).alerts.test_channel(channel_id))
+    """Send a test notification to one channel, and say why when it fails.
+
+    Always 200, failure included: the request itself succeeded, and the answer
+    to "did this channel take it" is the body. Turning a refused webhook into a
+    5xx here would make the page's own error path swallow the reason.
+    """
+    result = await get_state(request).alerts.test_channel(channel_id)
+    return AlertTestResult(ok=result.ok, detail=result.detail)
 
 
 class ServiceLogs(BaseModel):
