@@ -15,6 +15,9 @@ sherpa-onnx's model loading.
 
 from __future__ import annotations
 
+import asyncio
+import threading
+
 import httpx
 import pytest
 
@@ -238,7 +241,14 @@ class _FakeNumpy:
     float32 = "float32"
 
     @staticmethod
-    def array(values: list[float], dtype: object = None) -> list[float]:
+    def asarray(values: list[float], dtype: object = None) -> list[float]:
+        """What the service calls on an already-decoded buffer.
+
+        ``asarray`` rather than ``array``: the real ``_read_wav`` hands back a
+        float32 array already, and copying a whole session of audio a second
+        time is exactly the kind of waste that made this service unreachable
+        while it worked (see its ``_read_wav`` docstring).
+        """
         _ = dtype
         return list(values)
 
@@ -474,3 +484,157 @@ async def test_every_answer_carries_this_process_generation(
     # The capability flag rides on the same answer: an older image accepts the
     # session_id form field and ignores it, which no status code can show.
     assert health.json()["session_memory"] is True
+
+
+# ---------------------------------------------------------------------------
+# One diarization at a time, and a service that keeps answering during one
+# ---------------------------------------------------------------------------
+# The incident these guard: a diarization the caller had already given up on
+# went on running, and while it did the service answered nothing at all - the
+# 2 s health probe included, so the app's badge went red and every further
+# press queued more work behind the pile. The model is faked with something
+# that simply stalls, since what is under test is the service's own
+# concurrency, not sherpa-onnx.
+
+# A stalled call gives up on its own rather than hanging the suite, so a
+# regression fails the test instead of the run.
+_STALL_LIMIT_S = 5.0
+
+
+class _StallingPipeline:
+    """Stands in for minutes of ONNX inference, and counts its own overlap.
+
+    ``entered`` fires as soon as a call is inside ``process``; ``release`` lets
+    every waiting call finish. ``peak`` is how many were inside at once, which
+    is the property :class:`~services.diarization.app.DiarizeSlot` exists to
+    hold at one.
+    """
+
+    def __init__(self, entered: threading.Event, release: threading.Event) -> None:
+        self._entered = entered
+        self._release = release
+        self._lock = threading.Lock()
+        self._inside = 0
+        self.peak = 0
+        self.calls = 0
+
+    def process(self, audio: list[float]) -> _FakeResult:
+        with self._lock:
+            self._inside += 1
+            self.calls += 1
+            self.peak = max(self.peak, self._inside)
+        self._entered.set()
+        self._release.wait(_STALL_LIMIT_S)
+        with self._lock:
+            self._inside -= 1
+        return _FakePipeline().process(audio)
+
+
+def _stall_the_model(
+    monkeypatch: pytest.MonkeyPatch, entered: threading.Event, release: threading.Event
+) -> _StallingPipeline:
+    """Stub the models, with a pipeline that stays inside ``process``."""
+    _stub_models(monkeypatch)
+    pipeline = _StallingPipeline(entered, release)
+    monkeypatch.setattr(
+        diarization_app, "_load_pipeline", lambda num_clusters=-1: (pipeline, _FakeNumpy())
+    )
+    return pipeline
+
+
+def _post_diarize(client: httpx.AsyncClient) -> asyncio.Task[httpx.Response]:
+    """Start a diarize request without waiting for it."""
+    return asyncio.create_task(
+        client.post(
+            "/diarize",
+            data={"sample_rate": str(_RATE)},
+            files={"file": ("audio.wav", b"1,2", "audio/wav")},
+        )
+    )
+
+
+async def test_healthz_answers_while_a_diarization_is_running(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The measured failure: a busy service read as a service that is gone.
+
+    The app probes this endpoint with a 2 s deadline while the UI polls, so a
+    health check that queues behind the audio reports the diarizer unreachable
+    for exactly as long as it is working - which is what happened on the box,
+    for four minutes, while the container was up and busy the whole time. The
+    deadline here is that same 2 s, so this fails by timing out rather than by
+    being slow.
+    """
+    entered, release = threading.Event(), threading.Event()
+    _stall_the_model(monkeypatch, entered, release)
+
+    async with httpx.AsyncClient(transport=_transport(), base_url="http://diar") as client:
+        diarizing = _post_diarize(client)
+        assert await asyncio.to_thread(entered.wait, _STALL_LIMIT_S)
+
+        health = await asyncio.wait_for(client.get("/healthz"), timeout=2.0)
+        assert health.status_code == 200
+        assert health.json()["status"] == "ok"
+
+        release.set()
+        assert (await diarizing).status_code == 200
+
+
+async def test_two_diarizations_are_served_one_after_the_other(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second caller queues, and is served, rather than racing the first.
+
+    Queueing is the right answer for the live path: it sends one short turn per
+    call and several turns can close at once, and two of them inside the model
+    together would take twice as long each and finish no sooner.
+    """
+    entered, release = threading.Event(), threading.Event()
+    pipeline = _stall_the_model(monkeypatch, entered, release)
+
+    async with httpx.AsyncClient(transport=_transport(), base_url="http://diar") as client:
+        first = _post_diarize(client)
+        assert await asyncio.to_thread(entered.wait, _STALL_LIMIT_S)
+        second = _post_diarize(client)
+        # Long enough for a second call to reach the model if nothing stopped
+        # it; the assertion below is what says nothing did.
+        await asyncio.sleep(0.05)
+        release.set()
+
+        assert (await first).status_code == 200
+        assert (await second).status_code == 200
+
+    assert pipeline.calls == 2
+    assert pipeline.peak == 1
+
+
+async def test_a_caller_that_would_wait_too_long_is_refused_with_a_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bounded queueing, because an unbounded one is the wedge itself.
+
+    A caller that waits out its own timeout in the queue leaves work behind
+    that the service still computes in full for nobody. 429 with a Retry-After
+    says so in the one place the caller can act on it.
+    """
+    monkeypatch.setattr(diarization_app, "_QUEUE_WAIT_S", 0.05)
+    entered, release = threading.Event(), threading.Event()
+    pipeline = _stall_the_model(monkeypatch, entered, release)
+
+    async with httpx.AsyncClient(transport=_transport(), base_url="http://diar") as client:
+        first = _post_diarize(client)
+        assert await asyncio.to_thread(entered.wait, _STALL_LIMIT_S)
+
+        refused = await client.post(
+            "/diarize",
+            data={"sample_rate": str(_RATE)},
+            files={"file": ("audio.wav", b"1,2", "audio/wav")},
+        )
+        assert refused.status_code == 429
+        assert "another diarization" in refused.json()["detail"]
+        assert refused.headers["retry-after"] == "30"
+
+        release.set()
+        assert (await first).status_code == 200
+
+    assert pipeline.calls == 1  # the refused call never reached the model
