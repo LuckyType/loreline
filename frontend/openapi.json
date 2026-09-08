@@ -2044,7 +2044,7 @@
           "reprocess"
         ],
         "summary": "Enqueue Reprocess",
-        "description": "Enqueue a post-session re-processing job.",
+        "description": "Enqueue a post-session re-processing job.\n\n503 for a diarizer that is not answering, because that is what it means:\nthe request is fine and the machine it needs is not there. It is also the\none refusal here that clears up by itself, so the message names the\nendpoint and invites another press rather than describing a bad request.",
         "operationId": "enqueue_reprocess_api_reprocess_post",
         "security": [
           {

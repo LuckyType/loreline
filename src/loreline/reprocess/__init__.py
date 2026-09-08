@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from loreline.reprocess.jobs import (
     AudioMissingError,
+    DiarizerProbe,
+    DiarizerUnreachableError,
     OriginalVersionError,
     ProviderNotFoundError,
     ReprocessManager,
@@ -15,6 +17,8 @@ from loreline.reprocess.jobs import (
 
 __all__ = [
     "AudioMissingError",
+    "DiarizerProbe",
+    "DiarizerUnreachableError",
     "OriginalVersionError",
     "ProviderNotFoundError",
     "ReprocessManager",

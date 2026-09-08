@@ -4,11 +4,16 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.exceptions import HTTPException
-from starlette.status import HTTP_404_NOT_FOUND, HTTP_409_CONFLICT
+from starlette.status import (
+    HTTP_404_NOT_FOUND,
+    HTTP_409_CONFLICT,
+    HTTP_503_SERVICE_UNAVAILABLE,
+)
 
 from loreline.models import ReprocessJob
 from loreline.reprocess import (
     AudioMissingError,
+    DiarizerUnreachableError,
     ProviderNotFoundError,
     SessionNotFoundError,
     TargetNotFoundError,
@@ -24,7 +29,13 @@ router = APIRouter(
 
 @router.post("", status_code=202)
 async def enqueue_reprocess(request: Request, body: ReprocessRequest) -> ReprocessJob:
-    """Enqueue a post-session re-processing job."""
+    """Enqueue a post-session re-processing job.
+
+    503 for a diarizer that is not answering, because that is what it means:
+    the request is fine and the machine it needs is not there. It is also the
+    one refusal here that clears up by itself, so the message names the
+    endpoint and invites another press rather than describing a bad request.
+    """
     manager = get_reprocess(request)
     try:
         return await manager.enqueue(body)
@@ -32,6 +43,8 @@ async def enqueue_reprocess(request: Request, body: ReprocessRequest) -> Reproce
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except AudioMissingError as exc:
         raise HTTPException(status_code=HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except DiarizerUnreachableError as exc:
+        raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
 
 
 @router.get("/{job_id}")

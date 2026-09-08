@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import cast
+
 import httpx
 import pytest
 from structlog.testing import capture_logs
@@ -50,6 +52,74 @@ async def test_remote_diarization_merges_onto_transcript() -> None:
     merged = assign_speakers(event, segments)
     assert merged.words[0].speaker == "Speaker 0"
     assert merged.words[1].speaker == "Speaker 1"
+
+
+async def test_the_request_timeout_grows_with_the_audio_sent() -> None:
+    """The flat 120 s that made every real diarization fail, replaced.
+
+    Read off the deadline the request actually carries rather than by waiting
+    for one: httpx records what it applied in the request's extensions, which
+    is the only place a timeout survives the call. Two lengths, because one
+    number cannot tell a floor from a multiple - and the assertion is on the
+    exact values, since "more than 120" would still pass for the constant this
+    exists to remove.
+    """
+    read_timeouts: list[float | None] = []
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        timeout = cast("dict[str, float | None]", request.extensions["timeout"])
+        read_timeouts.append(timeout["read"])
+        return httpx.Response(200, json={"segments": []})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(answer), base_url="http://diar"
+    ) as client:
+        diarizer = RemoteDiarizer("http://diar", client=client)
+        await diarizer.diarize(pcm_to_wav(b"\x01\x00" * 16000, sample_rate=16000))
+        await diarizer.diarize(pcm_to_wav(b"\x01\x00" * 16000 * 60, sample_rate=16000))
+
+    # 60 s floor + 4 s per second of audio: a second of speech, then a minute.
+    assert read_timeouts == [64.0, 300.0]
+
+
+async def test_a_payload_that_is_not_a_wav_still_gets_the_floor() -> None:
+    """Sizing the deadline must never be the thing that fails a diarization."""
+    read_timeouts: list[float | None] = []
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        timeout = cast("dict[str, float | None]", request.extensions["timeout"])
+        read_timeouts.append(timeout["read"])
+        return httpx.Response(200, json={"segments": []})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(answer), base_url="http://diar"
+    ) as client:
+        diarizer = RemoteDiarizer("http://diar", client=client)
+        await diarizer.diarize(b"")
+
+    assert read_timeouts == [60.0]
+
+
+async def test_forgetting_a_session_keeps_its_own_short_timeout() -> None:
+    """The delete is not sized by audio: it happens inside a session's stop,
+    and a hung service must not hold that open for as long as a diarization is
+    allowed to take."""
+    timeouts: list[float | None] = []
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        if request.method == "DELETE":
+            timeout = cast("dict[str, float | None]", request.extensions["timeout"])
+            timeouts.append(timeout["read"])
+        return httpx.Response(200, json={"segments": []})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(answer), base_url="http://diar"
+    ) as client:
+        diarizer = RemoteDiarizer("http://diar", client=client)
+        await diarizer.diarize(pcm_to_wav(b"\x01\x00" * 16000, sample_rate=16000), session_id="s")
+        await diarizer.aclose()
+
+    assert timeouts == [5.0]
 
 
 async def test_remote_diarizer_sends_the_session_id_and_drops_it_on_close() -> None:

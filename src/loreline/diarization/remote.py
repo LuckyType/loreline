@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import contextlib
+import io
+import wave
 from typing import cast
 
 import httpx
@@ -24,8 +26,36 @@ log = get_logger(__name__)
 # Much shorter than a diarization request's own timeout, and for the same
 # reason as the probe's below: closing the diarizer happens inside the
 # stop-session request, and a service that has hung must not hold a session's
-# shutdown open for two minutes to be told something it will forget by itself.
+# shutdown open for minutes to be told something it will forget by itself.
 _FORGET_TIMEOUT_S = 5.0
+
+# How long one /diarize call may take, as a floor plus a multiple of the audio
+# in it. It used to be a flat 120 s for every call, which is the defect this
+# replaces: the work is proportional to what is sent, so a constant is either
+# far too long for a two-second utterance or far too short for a session, and
+# on the deployment this was measured on it was the latter every single time.
+# A 125.9 s recording was still being worked on when the client gave up at
+# 120 s, and a 37-minute session never had a chance - the diarizer this repo
+# ships did not complete one run against its own primary use case.
+#
+# The floor is what a call costs before any audio is processed: the upload, and
+# a cold service's first request, which loads two ONNX models off disk.
+_TIMEOUT_FLOOR_S = 60.0
+# The multiple is the part with a measurement behind it, such as it is. The one
+# number this repo has says the service does not beat realtime: 125.9 s of audio
+# was unfinished after 120 s of waiting, so it runs at best at about 1x, on a
+# box that is also running the app and whatever STT it fronts. 4x is that
+# measurement with a fourfold margin, and the margin is generous on purpose
+# because the two failure modes are not symmetric. Too small fails a run that
+# would have succeeded, silently, which is exactly what shipped; too large only
+# delays the failure of a service that has genuinely hung. It stays bounded
+# either way, which is the property that matters: the deadline is a multiple of
+# the audio in the request, so a hung service still fails the job eventually
+# rather than holding it open for the rest of the evening.
+_TIMEOUT_PER_AUDIO_S = 4.0
+# 16-bit mono, which is what this app records and what the service is sent.
+# Only used to size a payload whose own header could not be read.
+_BYTES_PER_SAMPLE = 2
 
 
 class RemoteDiarizer:
@@ -53,7 +83,10 @@ class RemoteDiarizer:
         client: httpx.AsyncClient | None = None,
     ) -> None:
         self._endpoint = endpoint
-        self._http = ClientHandle(client, base_url=endpoint, timeout=120.0)
+        # The floor is the client-wide default, and every request below names
+        # its own timeout anyway: a diarization's scales with its audio (see
+        # _request_timeout_s), and the delete has its own much shorter one.
+        self._http = ClientHandle(client, base_url=endpoint, timeout=_TIMEOUT_FLOOR_S)
         self._client = self._http.client
         self._sessions: set[str] = set()
         self._generations: dict[str, str] = {}
@@ -76,7 +109,15 @@ class RemoteDiarizer:
             data["session_id"] = session_id
             self._sessions.add(session_id)
         files = {"file": ("audio.wav", wav, "audio/wav")}
-        response = await self._client.post("/diarize", data=data, files=files)
+        response = await self._client.post(
+            "/diarize",
+            data=data,
+            files=files,
+            # Sized from the audio actually on the wire rather than from what a
+            # caller says it is sending, so the deadline can never disagree
+            # with the request it belongs to.
+            timeout=_request_timeout_s(wav, sample_rate),
+        )
         raise_for_vendor_status(response)
         payload: object = response.json()
         if session_id is not None:
@@ -127,6 +168,34 @@ class RemoteDiarizer:
         self._sessions.clear()
         self._generations.clear()
         await self._http.aclose()
+
+
+def _request_timeout_s(wav: bytes, sample_rate: int) -> float:
+    """How long one ``/diarize`` call may take, for this much audio.
+
+    A floor plus a multiple of the audio's own length; see the constants above
+    for where both numbers come from and why this is not a constant.
+    """
+    return _TIMEOUT_FLOOR_S + _TIMEOUT_PER_AUDIO_S * _audio_seconds(wav, sample_rate)
+
+
+def _audio_seconds(wav: bytes, sample_rate: int) -> float:
+    """How many seconds of audio a payload holds, from its own header.
+
+    Both callers send a real WAV container (``loreline.audio.pcm_to_wav``), so
+    the header is the exact answer rather than an estimate. The fallback reads
+    the payload as raw 16-bit mono at the declared rate, and an empty or
+    unreadable one is worth zero seconds: sizing the timeout must never be the
+    thing that fails a diarization, and a payload this cannot measure still
+    gets the floor, which is what every call got before this existed.
+    """
+    with contextlib.suppress(wave.Error, EOFError, OSError), wave.open(io.BytesIO(wav), "rb") as f:
+        rate = f.getframerate()
+        if rate:
+            return f.getnframes() / rate
+    if sample_rate <= 0:
+        return 0.0
+    return len(wav) / (sample_rate * _BYTES_PER_SAMPLE)
 
 
 def _generation_of(payload: object) -> str | None:
