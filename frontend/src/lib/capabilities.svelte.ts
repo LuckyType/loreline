@@ -244,12 +244,53 @@ export function withoutHiddenRows<T extends { id: string }>(
 export function preferredModel(
 	provider: ProviderConfig | undefined,
 	pairedDefault: string,
+	interaction?: Interaction,
 ): string {
 	// No provider, no model: the filter below would otherwise wave a stored
 	// default through, since an unknown kind hides nothing.
 	if (!provider) return ''
-	const prefs = withoutHidden(provider.kind, [pairedDefault, ...provider.favorite_models])
+	// Favourites are one flat list per row while a row serves several
+	// interactions at once, so an OpenRouter entry's transcription favourites
+	// would otherwise seed the video picker with a speech model the picker no
+	// longer even offers - a trigger showing a value absent from its own list.
+	// The stored default is deliberately not filtered here: it is an explicit
+	// choice for this very pair, and ModelPicker offers it without consulting
+	// the fetched list for the same reason.
+	const favorites = interaction
+		? provider.favorite_models.filter((id) => !cannotServe(provider.kind, id, interaction))
+		: provider.favorite_models
+	const prefs = withoutHidden(provider.kind, [pairedDefault, ...favorites])
 	return prefs.filter(Boolean)[0] ?? ''
+}
+
+/** Whether this config positively says a model cannot serve `interaction`.
+ *
+ * The browser's copy of `_cannot_serve` in src/loreline/capabilities.py, and
+ * it has to stay its mirror: the server applies the same rule to the fetched
+ * list, so a seed computed by a looser rule here would name a model the list
+ * came back without.
+ *
+ * Two sources, either of which may say nothing. The model's own exact entry
+ * lists what it serves, so an entry omitting this interaction is a statement.
+ * Failing that, the name, which is a guess and treated as one. Glob patterns
+ * are read for what they grant elsewhere and deliberately not for what they
+ * withhold here: the self-hosted kind's catch-all would otherwise switch the
+ * name check off for every model on a server nobody has seen. Everything else
+ * is unknown, and unknown stays offered.
+ */
+export function cannotServe(
+	kind: ProviderKind | undefined,
+	modelId: string,
+	interaction: Interaction,
+): boolean {
+	if (!capabilities.provider(kind)) return false
+	const entry = annotationFor(kind, modelId)
+	if (isExactSpec(entry) && entry.interactions.length) {
+		return !entry.interactions.includes(interaction)
+	}
+	const markers = capabilities.config?.incompatible_name_markers?.[interaction] ?? []
+	const lowered = modelId.toLowerCase()
+	return markers.some((marker) => lowered.includes(marker))
 }
 
 /** Vendor-announced sunset date, or null. The model stays selectable: a GM

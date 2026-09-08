@@ -52,7 +52,7 @@ const sttDefault = $derived(actionSetup.pairedDefault('capture', primaryProvider
 // Seeded, not stored: a pick in the picker overrides these until the provider
 // changes, and a provider switch starts over (see preferredModel).
 let model = $derived(actionSetup.preferredModelFor('capture', primaryProvider))
-let fallbackModel = $derived(preferredModel(fallbackProvider, ''))
+let fallbackModel = $derived(preferredModel(fallbackProvider, '', 'transcribe'))
 // The stored mode, seeded the same way: a pick overrides it.
 let diarMode = $derived(actionSetup.defaults.diar_mode as DiarizationModeKind)
 // The picked model's catalogue entry, used only as the fallback for a model
