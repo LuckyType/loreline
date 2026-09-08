@@ -66,9 +66,16 @@ const hasAudio = $derived(!!detail.session.audio_path)
 
 let logsOpen = $state(false)
 let logsVersion = $state('original')
+// Which "Show logs" button opened the dialog. One dialog serves the whole
+// table, so nothing about it knows which row asked; without this, closing it
+// dropped focus on the "Transcriptions" fold header, one Space away from
+// collapsing the table the reader was working in.
+let logsTrigger = $state<HTMLElement | null>(null)
 
-/** Show the log lines one version was produced by. */
-function showLogs(version: string) {
+/** Show the log lines one version was produced by, remembering the control
+ *  that asked so focus can go back to it. */
+function showLogs(version: string, trigger: EventTarget | null) {
+	logsTrigger = trigger instanceof HTMLElement ? trigger : null
 	logsVersion = version
 	logsOpen = true
 }
@@ -87,10 +94,41 @@ const versionsDifferInShape = $derived(
 	transcribeJobs.length > 0 && detail.transcript.some((e) => e.turn_id),
 )
 
-// The most recent failure, surfaced under the table (there is no error column).
-const lastJobError = $derived(
-	jobs.filter((j) => j.error).sort((a, b) => b.created_at - a.created_at)[0],
+/** When a job failed, as best the row can say. `finished_at` is the moment
+ *  that matters; a job that died before it was ever marked finished still has
+ *  the moment it was queued. */
+function failedAt(job: ReprocessJob): number {
+	return job.finished_at ?? job.started_at ?? job.created_at
+}
+
+/** What a failed job says for itself.
+ *
+ * A run can fail without storing a message, and an empty message must not read
+ * as "no failure": naming the operation is the least that still tells the
+ * reader which button to look at. The logs for that version have the rest,
+ * which is what the Show logs button on the same row is for. */
+function failureText(job: ReprocessJob): string {
+	return job.error?.trim() || `the ${job.operation} run failed without recording a reason`
+}
+
+// The most recent failure, surfaced under the table (there is no error
+// column). Selected on `status === 'error'` rather than on there being an
+// error string: filtering on the message meant the newest *chatty* failure
+// won, so a fixed-and-superseded error sat on screen for minutes while a newer
+// run failed silently behind it. Ordered by when each failed, not when each
+// was created, and stamped with that time below - a failure with no date on it
+// reads as current however old it is.
+const lastFailure = $derived(
+	jobs.filter((j) => j.status === 'error').sort((a, b) => failedAt(b) - failedAt(a))[0],
 )
+/** That failure as the one sentence the table shows: which operation, when,
+ *  and what it said. Assembled here rather than in the markup so the timestamp
+ *  cannot drift away from the message it belongs to. */
+const lastFailureText = $derived.by(() => {
+	if (!lastFailure) return ''
+	const when = fmtWhen(failedAt(lastFailure))
+	return `Last failed job (${lastFailure.operation}, ${when}): ${failureText(lastFailure)}`
+})
 
 /** Whether a row can be opened. A running job counts: it publishes each
  *  segment as it is written, so its version is worth watching while it fills
@@ -136,18 +174,34 @@ async function deleteVersion(job: ReprocessJob) {
 	}
 }
 
-// What the table's Diarization column says about one version.
-function diarizeInfo(version: string): string {
+/**
+ * What the table's Diarization column says about one version.
+ *
+ * A successful pass wins over a failed one however recent the failure, because
+ * the labels on screen are that pass's and the cell describes what is showing.
+ * With nothing to show, a failed attempt is named here rather than only in the
+ * line under the table: the failure belongs next to the run it happened to,
+ * and this cell has the room. `note` carries the message as a tooltip, so the
+ * cell stays one word wide whatever the vendor wrote.
+ */
+function diarizeInfo(version: string): { text: string; failed: boolean; note?: string } {
 	const targeting = jobs.filter((j) => j.operation === 'diarize' && j.target === version)
 	// A running pass counts the segments it has relabeled so far, for the same
 	// reason a running transcription does: something has to move.
 	const running = targeting.find(inFlight)
-	if (running)
-		return running.segments_added > 0 ? `diarizing… ${running.segments_added}` : 'diarizing…'
+	if (running) {
+		const text = running.segments_added > 0 ? `diarizing… ${running.segments_added}` : 'diarizing…'
+		return { text, failed: false }
+	}
 	const done = targeting
 		.filter((j) => j.status === 'done' && j.segments_added > 0)
 		.sort((a, b) => (b.finished_at ?? 0) - (a.finished_at ?? 0))[0]
-	return done ? diarizerLabel(done) : '-'
+	if (done) return { text: diarizerLabel(done), failed: false }
+	const failed = targeting
+		.filter((j) => j.status === 'error')
+		.sort((a, b) => failedAt(b) - failedAt(a))[0]
+	if (failed) return { text: 'failed', failed: true, note: failureText(failed) }
+	return { text: '-', failed: false }
 }
 
 // Status of the "original" row. That version is the live capture itself, so
@@ -189,12 +243,15 @@ const originalStatus = $derived.by(() => {
               : ''}"
 					onclick={() => onselect?.('original')}
 				>
+					{@const diar = diarizeInfo('original')}
 					<TableCell><code>original</code></TableCell>
 					<TableCell
 						>{providerName(detail.session.primary_provider, actionSetup.providers)}</TableCell
 					>
 					<TableCell class="text-muted-foreground">-</TableCell>
-					<TableCell>{diarizeInfo('original')}</TableCell>
+					<TableCell class={diar.failed ? 'text-destructive' : ''} title={diar.note}>
+						{diar.text}
+					</TableCell>
 					<TableCell>{detail.transcript.length}</TableCell>
 					<TableCell class="text-muted-foreground">{fmtWhen(detail.session.started_at)}</TableCell>
 					<TableCell>
@@ -210,7 +267,7 @@ const originalStatus = $derived.by(() => {
 							title="The log lines this capture was recorded and transcribed by"
 							onclick={(e: MouseEvent) => {
 								e.stopPropagation() // the row click selects the version
-								showLogs('original')
+								showLogs('original', e.currentTarget)
 							}}
 						>
 							Show logs
@@ -226,10 +283,13 @@ const originalStatus = $derived.by(() => {
 						title={unselectableReason(j)}
 						onclick={() => selectable(j) && onselect?.(j.id)}
 					>
+						{@const diar = diarizeInfo(j.id)}
 						<TableCell><code>{j.id.slice(0, 8)}</code></TableCell>
 						<TableCell>{providerName(j.provider_id, actionSetup.providers)}</TableCell>
 						<TableCell>{j.model ?? '-'}</TableCell>
-						<TableCell>{diarizeInfo(j.id)}</TableCell>
+						<TableCell class={diar.failed ? 'text-destructive' : ''} title={diar.note}>
+							{diar.text}
+						</TableCell>
 						<TableCell>
 							{#if inFlight(j)}
 								<!-- Counts up as the run writes segments, next to the finished
@@ -250,7 +310,7 @@ const originalStatus = $derived.by(() => {
 						<TableCell class="text-muted-foreground">{fmtWhen(j.created_at)}</TableCell>
 						<TableCell>
 							<Badge
-								title={j.error ?? undefined}
+								title={j.status === 'error' ? failureText(j) : (j.error ?? undefined)}
 								variant={j.status === 'error'
                     ? 'destructive'
                     : j.status === 'done'
@@ -268,7 +328,7 @@ const originalStatus = $derived.by(() => {
 									title="The log lines this transcription was produced by"
 									onclick={(e: MouseEvent) => {
 										e.stopPropagation() // the row click selects the version
-										showLogs(j.id)
+										showLogs(j.id, e.currentTarget)
 									}}
 								>
 									Show logs
@@ -299,10 +359,8 @@ const originalStatus = $derived.by(() => {
 				recording's utterance boundaries, so segments will not line up one to one between versions.
 			</p>
 		{/if}
-		{#if lastJobError?.error}
-			<p class="text-xs text-destructive">
-				Last failed job ({lastJobError.operation}): {lastJobError.error}
-			</p>
+		{#if lastFailureText}
+			<p class="text-xs text-destructive">{lastFailureText}</p>
 		{/if}
 		<ReprocessPanel
 			{sessionId}
@@ -314,4 +372,4 @@ const originalStatus = $derived.by(() => {
 	</Foldable>
 </CardContent>
 
-<SessionLogsDialog bind:open={logsOpen} {sessionId} version={logsVersion} />
+<SessionLogsDialog bind:open={logsOpen} {sessionId} version={logsVersion} trigger={logsTrigger} />

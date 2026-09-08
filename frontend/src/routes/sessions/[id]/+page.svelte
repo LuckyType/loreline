@@ -252,10 +252,14 @@ onMount(async () => {
 		<p class="text-muted-foreground">Loading…</p>
 	{:else}
 		<Card class="min-h-0 flex-1">
+			<!-- The header exports, the summary card summarizes, and both act on
+			     the version selected below rather than on the capture: the page
+			     owns the selection, so it is the page that hands it to them. -->
 			<SessionHeader
 				sessionId={id}
 				session={detail.session}
 				audioDurationS={detail.audio_duration_s}
+				version={selectedVersion}
 			/>
 
 			<div class="shrink-0 border-t"></div>
@@ -297,6 +301,7 @@ onMount(async () => {
 				sessionId={id}
 				session={detail.session}
 				{speakers}
+				version={selectedVersion}
 				bind:open={sections.summary}
 				onsummarized={reloadDetail}
 				onerror={setError}
