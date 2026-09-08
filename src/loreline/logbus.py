@@ -30,16 +30,23 @@ class LogRecord:
     session_id: str | None = None
     job_id: str | None = None
 
-    def is_capture_line(self, active_session_id: str | None) -> bool:
-        """Whether this line came from the live capture of ``active_session_id``.
+    def is_capture_line(self, live_view_session_id: str | None) -> bool:
+        """Whether this line came from the live capture of that session.
 
         False for everything not tied to a session (startup, HTTP, provider
         edits) and for re-processing, which carries a ``job_id`` even when it
         replays the very session being captured.
+
+        The id to pass is ``SessionManager.live_view_session_id()``, not the
+        session capturing *right now*: the two differ for the whole of a
+        teardown, and a session writes some of its most-wanted lines in there -
+        the drain, the audio writer closing, ``session.stop`` itself. Matched
+        against the running capture instead, every one of those is dropped and
+        the dashboard's pane freezes on the line before Stop.
         """
         return (
-            active_session_id is not None
-            and self.session_id == active_session_id
+            live_view_session_id is not None
+            and self.session_id == live_view_session_id
             and self.job_id is None
         )
 

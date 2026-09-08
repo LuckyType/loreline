@@ -53,3 +53,27 @@ async def test_reliable_subscriber_never_drops() -> None:
             await bus.publish(i)  # unbounded -> nothing dropped
         got = [await anext(stream) for _ in range(10)]
     assert got == list(range(10))
+
+
+async def test_a_subscriber_filter_decides_when_the_item_is_published() -> None:
+    """The filter's timing is the reason it belongs to the bus.
+
+    ``live`` stands for anything a subscriber would otherwise re-read as it
+    reads the queue: here it flips between the two publishes, and a consumer
+    filtering in its own loop would judge both items against the flag as it
+    stands when it finally wakes up. Deciding at publish keeps the item that
+    was wanted when it was produced, which is the live log pane keeping the
+    last lines of a session's teardown.
+    """
+    bus: EventBus[int] = EventBus()
+    live = True
+
+    async with bus.subscribe(wanted=lambda _item: live) as stream:
+        await bus.publish(1)
+        live = False
+        await bus.publish(2)
+        # The close sentinel reaches every subscriber, filter or not, so this
+        # drains rather than blocking on an item that is never coming.
+        await bus.aclose()
+
+        assert [item async for item in stream] == [1]
