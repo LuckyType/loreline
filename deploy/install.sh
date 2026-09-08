@@ -432,7 +432,9 @@ fi
 msg_info "Waiting for the app to become healthy"
 HEALTHY=0
 for _ in $(seq 1 30); do
-  if curl -fsS "http://127.0.0.1:${LORELINE_PORT}/api/system/healthz" >/dev/null 2>&1; then
+  # /livez, not /healthz: the snapshot needs a session cookie, and this poll
+  # only asks whether the process is answering yet.
+  if curl -fsS "http://127.0.0.1:${LORELINE_PORT}/api/system/livez" >/dev/null 2>&1; then
     HEALTHY=1
     break
   fi

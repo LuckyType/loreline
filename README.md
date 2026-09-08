@@ -85,7 +85,8 @@ transcript and log panels follow the running capture only. Every transcript
 version, the live capture and each re-processing run, keeps its own log file,
 readable from the session page.
 
-**Ops.** JWT cookie auth, push alerts, a `/api/system/healthz` endpoint, and
+**Ops.** JWT cookie auth, push alerts, an open `/api/system/livez` liveness
+probe next to the authenticated `/api/system/healthz` snapshot, and
 self-update on the source deployment.
 
 ## Configuration
@@ -420,7 +421,7 @@ Start it:
 
 ```bash
 sudo systemctl start loreline
-curl http://127.0.0.1:8000/api/system/healthz
+curl http://127.0.0.1:8000/api/system/livez
 ```
 
 Autostart on boot is installed but disabled. Enable it from Settings, System in

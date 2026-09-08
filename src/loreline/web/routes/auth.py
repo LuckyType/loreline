@@ -6,7 +6,13 @@ from fastapi import APIRouter, Request, Response
 from fastapi.exceptions import HTTPException
 from starlette.status import HTTP_401_UNAUTHORIZED, HTTP_429_TOO_MANY_REQUESTS
 
-from loreline.web.auth import COOKIE_NAME, client_uses_https, issue_token, verify_password
+from loreline.web.auth import (
+    COOKIE_NAME,
+    client_address,
+    client_uses_https,
+    issue_token,
+    verify_password,
+)
 from loreline.web.deps import get_state
 from loreline.web.schemas import LoginRequest, OkResponse
 
@@ -17,13 +23,17 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 async def login(request: Request, body: LoginRequest, response: Response) -> OkResponse:
     """Validate the shared password and set an auth cookie.
 
-    Rate-limited per client IP (see ``LoginRateLimiter``): a shared password
-    with no backoff is a free brute-force target on a device that's LAN- (or
-    worse, internet-) reachable.
+    Rate-limited per client (see ``LoginRateLimiter``): a shared password with
+    no backoff is a free brute-force target on a device that's LAN- (or worse,
+    internet-) reachable. The key comes from ``client_address`` rather than the
+    socket's peer, because behind the bundled Caddy every browser at the table
+    arrives from the same container address and a limiter keyed on that is a
+    global one: anyone able to reach the box could hold the login shut for
+    everybody, five requests at a time.
     """
     state = get_state(request)
     settings = state.settings
-    key = request.client.host if request.client else "unknown"
+    key = client_address(request, settings)
     if not state.login_limiter.allowed(key):
         raise HTTPException(
             status_code=HTTP_429_TOO_MANY_REQUESTS, detail="too many attempts, try again shortly"

@@ -124,6 +124,55 @@ def client_uses_https(request: Request, settings: Settings) -> bool:
     return request.url.scheme == "https"
 
 
+def client_address(request: Request, settings: Settings) -> str:
+    """The address to attribute a request to, for anything counted per client.
+
+    ``request.client.host`` is whoever opened the socket, which behind the
+    bundled Caddy is the proxy container's address for every browser at the
+    table. Anything keyed on it - the login backoff being the one that matters -
+    then stops being per-client and becomes global: five wrong passwords from
+    one machine lock the whole LAN out of a login those machines can still
+    reach, which is a denial of service anyone in range can hold open for as
+    long as they care to.
+
+    ``X-Forwarded-For`` names the real client, but the client writes the first
+    entry of it itself, and this app's own port is published on the host (see
+    docker-compose.yml) so a LAN machine can send the header without passing
+    through any proxy at all. It is therefore read only from a peer the
+    operator listed in ``LORELINE_TRUSTED_PROXIES``, the same rule and the same
+    reasoning as ``client_uses_https`` above.
+
+    Of the entries it carries only the *rightmost* is used. Each hop appends
+    the address it saw, so the last entry was written by the trusted proxy
+    about its own peer: it is the only one a client cannot make up. Prefixing
+    the header with invented addresses therefore buys nothing, they all land in
+    the bucket the client's real address already owns.
+
+    A value that does not parse as an address is ignored rather than used as a
+    key, because junk is free to generate and would otherwise let one machine
+    mint a fresh, uncounted bucket per request. With no trusted proxy
+    configured - the default, and every bare-metal install - none of this
+    applies and the answer is the peer's address, exactly as before.
+    """
+    peer = request.client.host if request.client else "unknown"
+    if not _peer_is_trusted_proxy(request, settings):
+        return peer
+    # Repeated headers mean the same as one comma-joined value, so the entry
+    # the nearest proxy wrote is the last of the last, not the last of the first.
+    forwarded = request.headers.getlist("x-forwarded-for")
+    if not forwarded:
+        return peer
+    candidate = forwarded[-1].rsplit(",", 1)[-1].strip()
+    try:
+        ip_address(candidate)
+    except ValueError:
+        # Trimmed to the longest an address could have been, so a header of
+        # nonsense cannot write a line of nonsense the same length into the log.
+        log.warning("auth.forwarded_for.invalid", entry=candidate[:45])
+        return peer
+    return candidate
+
+
 def _password_fingerprint(settings: Settings) -> str:
     """Short digest of the current password, bound into issued tokens.
 
@@ -169,17 +218,29 @@ def verify_password(password: str, settings: Settings) -> bool:
 @dataclass(slots=True)
 class _Attempts:
     count: int = 0
-    locked_until: float = 0.0
+    expires_at: float = 0.0
+    """When this entry stops meaning anything, refreshed on every failure. It
+    is both the end of a lockout and the point the entry can be swept, which is
+    what keeps the table from being a per-key leak for the life of the process."""
 
 
 class LoginRateLimiter:
-    """Per-client-IP login backoff.
+    """Per-client login backoff.
 
     A single shared password with no rate limiting is a free brute-force
-    target. State lives in memory, keyed by client IP rather than globally,
-    so one bad actor probing the password can't lock the real users at the
-    table out of their own device. Not persisted across restarts - that's
-    fine, a restart is a rare enough reset vector for a LAN device.
+    target. State lives in memory, keyed by the address ``client_address``
+    attributes the request to rather than globally, so one bad actor probing
+    the password can't lock the real users at the table out of their own
+    device. Not persisted across restarts - that's fine, a restart is a rare
+    enough reset vector for a LAN device.
+
+    An entry expires ``lockout_seconds`` after the failure that last touched
+    it, and every failure sweeps the expired ones, so the table holds only the
+    clients currently failing rather than every address that ever mistyped the
+    password. That makes the threshold "``max_attempts`` within the window"
+    instead of "``max_attempts`` ever, since the last success", which concedes
+    an attacker nothing they did not already have: sitting out one lockout
+    dropped the count to zero before this too.
     """
 
     def __init__(self, *, max_attempts: int = 5, lockout_seconds: float = 30.0) -> None:
@@ -190,21 +251,38 @@ class LoginRateLimiter:
     def allowed(self, key: str) -> bool:
         """Return True if ``key`` may attempt a login right now."""
         entry = self._attempts.get(key)
-        if entry is None or not entry.locked_until:
+        if entry is None:
             return True
-        if entry.locked_until <= time.monotonic():
+        if entry.expires_at <= time.monotonic():
             del self._attempts[key]
             return True
-        return False
+        return entry.count < self._max_attempts
 
     def record_failure(self, key: str) -> None:
+        """Count one failed attempt for ``key`` and restart its window."""
+        now = time.monotonic()
+        self._prune(now)
         entry = self._attempts.setdefault(key, _Attempts())
         entry.count += 1
-        if entry.count >= self._max_attempts:
-            entry.locked_until = time.monotonic() + self._lockout_seconds
+        entry.expires_at = now + self._lockout_seconds
 
     def record_success(self, key: str) -> None:
         self._attempts.pop(key, None)
+
+    def __len__(self) -> int:
+        """How many clients are currently being counted.
+
+        Nothing in the app asks; it is here so the sweep below is something a
+        test can watch, a table that only ever grows being otherwise invisible
+        until the process runs out of memory.
+        """
+        return len(self._attempts)
+
+    def _prune(self, now: float) -> None:
+        """Forget the entries whose window has passed; they already read as absent."""
+        expired = [key for key, entry in self._attempts.items() if entry.expires_at <= now]
+        for key in expired:
+            del self._attempts[key]
 
 
 #: Declares the session cookie to OpenAPI so every route behind ``require_auth``
