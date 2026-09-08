@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.exceptions import HTTPException
@@ -21,6 +23,7 @@ from loreline.export import (
     EXPORTERS,
     canonical_transcript,
     final_rows,
+    has_version,
     relabel_speakers,
     to_txt,
     variant_view,
@@ -29,6 +32,7 @@ from loreline.llm import LLMError, summarize_transcript
 from loreline.models import (
     ORIGINAL_VERSION,
     Interaction,
+    JobStatus,
     Session,
     SessionStatus,
     TranscriptEvent,
@@ -58,9 +62,47 @@ from loreline.web.schemas import (
     VersionLogs,
 )
 
+if TYPE_CHECKING:
+    from loreline.web.app import AppState
+
 router = APIRouter(prefix="/api/session", tags=["sessions"], dependencies=[Depends(require_auth)])
 
 _MERGE_MIN_SESSIONS = 2
+
+
+def _version_rows(events: Sequence[TranscriptEvent], version: str) -> list[TranscriptEvent]:
+    """One version's settled rows, or a 404 naming the version that was asked for.
+
+    Every caller that turns a transcript into something a GM pays for or keeps
+    reads through here, so the "which version" decision is made once. The 404
+    is the point of it: falling back to the original for a version id that does
+    not exist would return a plausible file under the wrong name, which is
+    exactly the failure this replaced (see :func:`export_session`).
+    """
+    if not has_version(events, version):
+        raise HTTPException(
+            status_code=HTTP_404_NOT_FOUND,
+            detail=f"unknown transcript version {version!r}",
+        )
+    return final_rows(variant_view(events, version))
+
+
+async def _best_available_rows(state: AppState, session_id: str) -> list[TranscriptEvent]:
+    """A session's best text: its newest completed re-transcription, else the original.
+
+    "Newest that produced segments" rather than "newest": a job can finish
+    having written nothing (a provider that answered with silence, a version
+    whose rows were deleted afterwards), and an empty version is not an
+    improvement on the capture, it is the loss of it.
+    """
+    events = await state.transcripts.for_session(session_id)
+    for job in await state.reprocess_jobs.for_session(session_id):  # newest first
+        if job.operation != "transcribe" or job.status is not JobStatus.DONE:
+            continue
+        rows = final_rows(variant_view(events, job.id))
+        if rows:
+            return rows
+    return final_rows(canonical_transcript(events))
 
 
 class SessionDetail(BaseModel):
@@ -206,11 +248,23 @@ async def set_speaker_names(
 async def summarize_session(
     request: Request, session_id: str, body: SummarizeRequest
 ) -> SummarizeResult:
-    """Summarize a session's transcript with the chosen LLM provider + model."""
+    """Summarize one transcript version with the chosen LLM provider + model.
+
+    ``version`` names the version to summarize and defaults to the live
+    capture, so a client that predates the field keeps getting what it always
+    got. Everything else about the request is unchanged.
+
+    It exists because summarizing was the most expensive way this app could be
+    wrong: the route summarized the original with the version hard-coded, so a
+    session whose live capture died half way through and was re-transcribed
+    three times still fed the LLM the broken half-transcript - and the GM paid
+    for a summary of a session that mostly is not in it.
+    """
     state = get_state(request)
     session = await state.sessions.get(session_id)
     if session is None:
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="session not found")
+    version = body.version or ORIGINAL_VERSION
     provider = await state.providers.get(body.provider_id)
     if provider is None:
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="provider not found")
@@ -220,7 +274,7 @@ async def summarize_session(
             status_code=HTTP_400_BAD_REQUEST, detail="provider is not an LLM provider"
         )
     events = relabel_speakers(
-        final_rows(canonical_transcript(await state.transcripts.for_session(session_id))),
+        _version_rows(await state.transcripts.for_session(session_id), version),
         session.speaker_names,
     )
     if not events:
@@ -243,13 +297,34 @@ async def summarize_session(
     # The request's model is the only one there is, so what is recorded is by
     # construction what ran. This used to re-derive it here, duplicating the
     # chain inside summarize_transcript so the two could disagree.
-    await state.sessions.set_summary(session_id, summary, provider_id=provider.id, model=body.model)
+    # The version goes in with the provider and the model: a summary is only
+    # readable as evidence if the transcript it was made from can be named, and
+    # with five versions on a session "the summary" is otherwise ambiguous.
+    await state.sessions.set_summary(
+        session_id, summary, provider_id=provider.id, model=body.model, version=version
+    )
     return SummarizeResult(summary=summary)
 
 
 @router.get("/{session_id}/export")
-async def export_session(request: Request, session_id: str, fmt: str = "txt") -> Response:
-    """Export a session's transcript as txt/md/srt/vtt/json."""
+async def export_session(
+    request: Request, session_id: str, fmt: str = "txt", version: str = ORIGINAL_VERSION
+) -> Response:
+    """Export one transcript version as txt/md/srt/vtt/json.
+
+    ``version`` is the version the caller is looking at ("original" or a
+    transcribe job id), defaulting to the live capture so an old bookmark still
+    means what it meant.
+
+    The route had no such parameter at all, and rendered the original with the
+    version hard-coded. The whole point of re-transcribing a session with a
+    better model is the file you get out of it, so a GM who selected a 1346-
+    segment re-transcription and pressed Export got the 683-segment original
+    back, in every format, with nothing on screen saying which one it was.
+
+    An unknown version is a 404 rather than a fallback to the original, for the
+    same reason a wrong file with no warning is worse than no file.
+    """
     exporter = EXPORTERS.get(fmt)
     if exporter is None:
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail=f"unknown format {fmt!r}")
@@ -259,7 +334,7 @@ async def export_session(request: Request, session_id: str, fmt: str = "txt") ->
     if session is None:
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="session not found")
     transcript = relabel_speakers(
-        final_rows(canonical_transcript(await state.transcripts.for_session(session_id))),
+        _version_rows(await state.transcripts.for_session(session_id), version),
         session.speaker_names,
     )
     body = render(session, transcript)
@@ -310,6 +385,21 @@ async def merge_sessions(request: Request, body: SessionIds) -> Session:
     every source has stored audio (at one shared sample rate), the WAVs and
     utterance indexes are concatenated too, so the merged session can be
     re-processed, re-diarized, and downloaded like any other.
+
+    Each source contributes its **newest completed re-transcription that
+    produced segments**, falling back to its live capture when it has none (see
+    :func:`_best_available_rows`). This used to take every source's original
+    unconditionally, which threw away every re-transcription of every part: a
+    GM who re-ran two half-sessions through a better model and then merged them
+    got the two live captures back, with no way to tell from the merged row.
+
+    The alternative considered and not taken was a per-source version picker in
+    the request. It was rejected because the merge dialog does not ask and
+    should not have to: a GM merging the two halves of one evening is saying
+    "make this one session", not "and by the way use job 2680abb4 for the first
+    half". Taking the best text available is what that sentence means, and the
+    sources are left intact, so a merge made from the wrong version is undone by
+    deleting one row rather than by recovering anything.
     """
     state = get_state(request)
     sources = [s for s in [await state.sessions.get(i) for i in body.ids] if s is not None]
@@ -336,36 +426,62 @@ async def merge_sessions(request: Request, body: SessionIds) -> Session:
     # Blocking file I/O (copying whole session WAVs) off the event loop.
     durations = await asyncio.to_thread(_merge_audio)
 
+    parts = [await _best_available_rows(state, src.id) for src in sources]
+    # How far each part advances the merged clock. With merged audio that is the
+    # part's audio length, so the transcript stays aligned with the concatenated
+    # WAV; without it, the part's own last word is all there is to go on.
+    spans = (
+        durations
+        if durations is not None
+        else [max((e.end_ts for e in rows), default=0.0) for rows in parts]
+    )
+
     merged = Session(
         id=merged_id,
         status=SessionStatus.COMPLETED,
         started_at=sources[0].started_at,
+        # A merged session never had a stop button pressed, so nothing else was
+        # ever going to fill this in, and it was left null: the session page
+        # computes its duration only when ended_at is set, so a merge showed a
+        # start time and no length while the player under it held 37 minutes of
+        # audio. The merged timeline is what it runs to.
+        ended_at=sources[0].started_at + sum(spans),
         campaign_id=sources[0].campaign_id,
         primary_provider=sources[0].primary_provider,
         diarization=sources[0].diarization,
         audio_path=str(state.audio_store.wav_path(merged_id)) if durations is not None else None,
+        # What this row was made from, oldest first. Without it a merge is
+        # indistinguishable in the history list from its oldest source: same
+        # start time, same status, same provider, and the only way to tell them
+        # apart is to open both.
+        merged_from=[src.id for src in sources],
     )
     await state.sessions.create(merged)
 
     names: dict[str, str] = {}
     offset = 0.0
-    for i, src in enumerate(sources):
-        events = final_rows(canonical_transcript(await state.transcripts.for_session(src.id)))
-        for event in events:
+    for src, rows, span in zip(sources, parts, spans, strict=True):
+        for event in rows:
             shifted = rebase_transcript(event, -offset)  # negative offset shifts forward
             # The turn id goes with the source session. It is a replace key for
             # a turn still being revised, and these are settled copies that
             # nothing will revise again; carrying it over would only let two
             # merged sessions' turns collide on it.
+            # The source tag goes too: a part's rows may come from a re-
+            # transcription, and a `reprocess:<job id>` tag on the merged row
+            # would name a job belonging to a different session - a version the
+            # merged session does not have. They are the merged session's live
+            # text now, which is what an untagged row means.
             await state.transcripts.add(
-                shifted.model_copy(update={"session_id": merged_id, "turn_id": None})
+                shifted.model_copy(
+                    update={
+                        "session_id": merged_id,
+                        "turn_id": None,
+                        "source": src.primary_provider or src.id,
+                    }
+                )
             )
-        if durations is not None:
-            # With merged audio, parts advance by their audio length so the
-            # transcript stays aligned with the concatenated WAV.
-            offset += durations[i]
-        else:
-            offset += max((event.end_ts for event in events), default=0.0)
+        offset += span
         for label, name in src.speaker_names.items():
             names.setdefault(label, name)
     if names:

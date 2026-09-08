@@ -310,6 +310,17 @@ class Session(BaseModel):
     summary: str | None = None  # LLM-generated session summary (on demand)
     summary_provider: str | None = None  # provider id the summary came from
     summary_model: str | None = None  # model the summary was generated with
+    # Transcript version the summary was made from ("original" or a transcribe
+    # job id). None on a summary written before versions were recorded, which
+    # is not the same as "original" and is why it is nullable rather than
+    # defaulted: a session with five versions cannot be asked to guess which
+    # one an old summary read.
+    summary_version: str | None = None
+    # Source session ids a merged row was made from, oldest first; empty for a
+    # captured session. A merge otherwise looks exactly like its oldest source
+    # in the history list - same start time, same status, same provider - so
+    # this is what lets a reader tell the two apart without opening both.
+    merged_from: list[str] = Field(default_factory=list[str])
 
 
 class VideoModelInfo(BaseModel):

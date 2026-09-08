@@ -98,13 +98,20 @@ async def test_session_summary_roundtrip(db: Database) -> None:
     assert fresh is not None and fresh.summary is None  # default null
 
     await repo.set_summary(
-        "s1", "The party fought a dragon.", provider_id="llm-1", model="gpt-4o-mini"
+        "s1",
+        "The party fought a dragon.",
+        provider_id="llm-1",
+        model="gpt-4o-mini",
+        version="2680abb4",
     )
     loaded = await repo.get("s1")
     assert loaded is not None
     assert loaded.summary == "The party fought a dragon."
     assert loaded.summary_provider == "llm-1"
     assert loaded.summary_model == "gpt-4o-mini"
+    # The version belongs with the provider and the model: the same model over
+    # two versions of one session writes two different summaries.
+    assert loaded.summary_version == "2680abb4"
 
 
 async def test_mark_interrupted_fails_stuck_capturing_sessions(db: Database) -> None:

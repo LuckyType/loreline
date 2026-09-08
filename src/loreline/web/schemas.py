@@ -144,6 +144,11 @@ class SummarizeRequest(BaseModel):
     """How hard a reasoning model should think. Only meaningful for a model
     that advertises support (ModelInfo.supports_reasoning); ignored otherwise,
     and dropped automatically if the endpoint rejects it."""
+    version: str | None = None
+    """Transcript version to summarize ("original" or a transcribe job id).
+    None means the original, so a client that predates the field keeps working;
+    an id no version answers to is a 404 rather than a quiet fallback, because
+    summarizing the wrong transcript costs money and reads as if it worked."""
 
 
 class SummarizeResult(BaseModel):
