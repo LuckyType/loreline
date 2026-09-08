@@ -1,4 +1,5 @@
 import { goto } from '$app/navigation'
+import { loginUrlWithNext } from './loginRedirect'
 import { authed } from './stores'
 import type { ExportFormat } from './types'
 import type {
@@ -61,7 +62,11 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 		// (skip this for the login call itself - that 401 just means "wrong
 		// password" and the form shows it inline).
 		authed.set(false)
-		if (location.pathname !== '/login') void goto('/login')
+		// Carry the page that was being asked for, so signing in finishes the
+		// journey instead of dumping the visitor on the Dashboard.
+		if (location.pathname !== '/login') {
+			void goto(loginUrlWithNext(location.pathname + location.search))
+		}
 	}
 	if (!res.ok) {
 		let detail = res.statusText

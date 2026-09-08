@@ -10,6 +10,7 @@ import { capabilities, loadCapabilities } from '$lib/capabilities.svelte'
 import ConfirmDialog from '$lib/ConfirmDialog.svelte'
 import { Badge } from '$lib/components/ui/badge'
 import { Button } from '$lib/components/ui/button'
+import { loginUrlWithNext } from '$lib/loginRedirect'
 import { initMagicBento } from '$lib/magicBento'
 import { authed, health, logsWs, transcriptWs } from '$lib/stores'
 import type { ConnectionStatus } from '$lib/ws'
@@ -51,8 +52,37 @@ function closeMobileNav() {
 	mobileNavOpen = false
 }
 
+// The header's health popover used to open on hover alone, with a keyboard
+// fallback written as a variant that does not exist and so never compiled.
+// Hover is the wrong interaction here anyway: this app is mostly driven from a
+// phone, where there is no hover at all, so the whole diagnostic panel was
+// unreachable on its likeliest client. The dot is therefore a disclosure
+// button that toggles the panel, dismissed with Escape or a tap outside, and
+// the hover behaviour stays for pointers that have one.
+let healthOpen = $state(false)
+let healthEl: HTMLDivElement | undefined = $state()
+
+function toggleHealth() {
+	healthOpen = !healthOpen
+	// Opening refetches, which is what clicking the dot always did. While the
+	// panel is open the 5s poll keeps it current on its own, so there is
+	// nothing left for a second press to refresh.
+	if (healthOpen) void poll()
+}
+
 function handleWindowKeydown(e: KeyboardEvent) {
-	if (mobileNavOpen && e.key === 'Escape') closeMobileNav()
+	if (e.key !== 'Escape') return
+	if (mobileNavOpen) closeMobileNav()
+	if (healthOpen) healthOpen = false
+}
+
+/** Dismiss on a click anywhere but the popover itself, the same way Dropdown
+ *  closes its list. The dot lives inside healthEl, so its own click is left
+ *  for the toggle above rather than being closed out from under it. */
+function handleDocumentClick(e: MouseEvent) {
+	if (!healthOpen) return
+	if (healthEl?.contains(e.target as Node)) return
+	healthOpen = false
 }
 
 const nav = [
@@ -73,7 +103,11 @@ async function poll() {
 	} catch (err) {
 		if (err instanceof ApiError && err.status === 401) {
 			authed.set(false)
-			if (page.url.pathname !== '/login') goto('/login')
+			// Carry the page being read at the moment the session ran out, so
+			// signing back in returns to it rather than to the Dashboard.
+			if (page.url.pathname !== '/login') {
+				goto(loginUrlWithNext(page.url.pathname + page.url.search))
+			}
 		}
 	}
 }
@@ -132,6 +166,7 @@ function wsLabel(status: ConnectionStatus, liveWord: string): string {
 </script>
 
 <svelte:window onkeydown={handleWindowKeydown} />
+<svelte:document onclickcapture={handleDocumentClick} />
 
 {#if page.url.pathname === '/login'}
 	{@render children()}
@@ -175,17 +210,23 @@ function wsLabel(status: ConnectionStatus, liveWord: string): string {
 				</Badge>
 			{/if}
 			<div class="flex-1"></div>
-			<div class="group/health relative flex items-center">
+			<div class="group/health relative flex items-center" bind:this={healthEl}>
 				<button
+					type="button"
 					class="flex items-center rounded-md p-2 hover:bg-accent"
-					onclick={poll}
-					title="Service health - click to refresh"
-					aria-label="Service health - click to refresh"
+					onclick={toggleHealth}
+					title="Service health - show details and refresh"
+					aria-label="Service health - show details and refresh"
+					aria-expanded={healthOpen}
+					aria-controls="health-details"
 				>
 					<span class="size-3 rounded-full {healthColor}"></span>
 				</button>
 				<div
-					class="invisible absolute top-full right-0 z-30 mt-1.5 hidden w-60 rounded-lg border bg-popover p-3 text-sm shadow-lg group-hover/health:visible group-hover/health:block focus-within/health:visible focus-within/health:block"
+					id="health-details"
+					class="absolute top-full right-0 z-30 mt-1.5 w-60 rounded-lg border bg-popover p-3 text-sm shadow-lg {healthOpen
+						? 'visible block'
+						: 'invisible hidden group-hover/health:visible group-hover/health:block'}"
 				>
 					<div class="mt-0 mb-1 text-xs font-medium tracking-wider text-muted-foreground uppercase">
 						Client
