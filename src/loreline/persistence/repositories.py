@@ -130,8 +130,9 @@ class SessionRepository:
             """
             INSERT INTO sessions
                 (id, status, started_at, started_mono, ended_at, campaign_id,
-                 primary_provider, fallback_provider, diarization, audio_path)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                 primary_provider, fallback_provider, diarization, audio_path,
+                 merged_from)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
             """,
             (
                 session.id,
@@ -144,6 +145,10 @@ class SessionRepository:
                 session.fallback_provider,
                 session.diarization.model_dump_json(),
                 session.audio_path,
+                # Written at creation rather than by a setter, unlike the
+                # speaker map and the summary: what a row was merged from is
+                # true the instant it exists and never changes afterwards.
+                json.dumps(session.merged_from),
             ),
         )
         await self._db.connection.commit()
@@ -211,13 +216,21 @@ class SessionRepository:
         await self._db.connection.commit()
 
     async def set_summary(
-        self, session_id: str, summary: str, *, provider_id: str, model: str
+        self, session_id: str, summary: str, *, provider_id: str, model: str, version: str
     ) -> None:
-        """Persist the LLM-generated session summary and what produced it."""
+        """Persist the LLM-generated session summary and what produced it.
+
+        "What produced it" is three things, not two: the provider, the model,
+        and the transcript version that was fed in. A session carries the live
+        capture plus one version per re-transcription, and they differ by
+        hundreds of segments, so a summary that cannot name its version cannot
+        be judged - the same provider and model over two versions are two
+        different summaries.
+        """
         await self._db.connection.execute(
-            "UPDATE sessions SET summary = ?, summary_provider = ?, summary_model = ? "
-            "WHERE id = ?;",
-            (summary, provider_id, model, session_id),
+            "UPDATE sessions SET summary = ?, summary_provider = ?, summary_model = ?, "
+            "summary_version = ? WHERE id = ?;",
+            (summary, provider_id, model, version, session_id),
         )
         await self._db.connection.commit()
 
@@ -463,6 +476,8 @@ def _row_to_session(row: aiosqlite.Row) -> Session:
         summary=row["summary"],
         summary_provider=row["summary_provider"],
         summary_model=row["summary_model"],
+        summary_version=row["summary_version"],
+        merged_from=json.loads(row["merged_from"]),
     )
 
 

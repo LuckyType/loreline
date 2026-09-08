@@ -81,6 +81,91 @@ async def test_export_formats(client: AsyncClient) -> None:
     assert bad.status_code == 404
 
 
+class ModelNamingBackend(FakeBackend):
+    """FakeBackend whose text names the model that produced it.
+
+    Which is the only way to tell two versions of one session apart end to
+    end: the live capture and every re-transcription otherwise say the same
+    thing, so an export returning the wrong one would look right.
+    """
+
+    async def transcribe(
+        self,
+        utterance: Utterance,
+        *,
+        session_id: str,
+        glossary: object = None,
+    ) -> TranscriptEvent | None:
+        _ = glossary
+        return TranscriptEvent(
+            session_id=session_id,
+            source=self.config.id,
+            text=f"said by {self.model}",
+            start_ts=utterance.start,
+            end_ts=utterance.end,
+            is_final=True,
+        )
+
+
+async def test_export_returns_the_version_it_was_asked_for(tmp_path: Path) -> None:
+    """Export selects a transcript version, and refuses one that does not exist.
+
+    The route had no version parameter at all and rendered the original with
+    the version hard-coded, so re-transcribing a session with a better model
+    and pressing Export on that version handed back the live capture under the
+    new version's name, with nothing saying so.
+    """
+    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t")
+    app = create_app(
+        settings,
+        capture_factory=capture_factory,  # type: ignore[arg-type]
+        backend_factory=ModelNamingBackend,  # type: ignore[arg-type]
+        diarizer_factory=fake_diarizers,
+    )
+    async with LifespanManager(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            pid = await _provider(client)
+            start = await client.post(
+                "/api/session/start", json={"primary_provider": pid, "model": "live-model"}
+            )
+            sid = start.json()["id"]
+            await client.post("/api/session/stop")
+
+            enqueue = await client.post(
+                "/api/reprocess",
+                json={"session_id": sid, "provider_id": pid, "model": "nova-9000"},
+            )
+            version = enqueue.json()["id"]
+            ctx = app.state.ctx  # pyright: ignore[reportAny]
+            await ctx.reprocess.wait(version)
+
+            named = await client.get(
+                f"/api/session/{sid}/export", params={"fmt": "txt", "version": version}
+            )
+            assert named.status_code == 200
+            assert "said by nova-9000" in named.text
+            assert "live-model" not in named.text
+
+            # No version named is still the live capture, so an old bookmark
+            # keeps meaning what it meant.
+            default = await client.get(f"/api/session/{sid}/export", params={"fmt": "txt"})
+            assert "said by live-model" in default.text
+            assert "nova-9000" not in default.text
+            explicit = await client.get(
+                f"/api/session/{sid}/export", params={"fmt": "txt", "version": "original"}
+            )
+            assert explicit.text == default.text
+
+            # A version nobody produced is a 404, not the original wearing its
+            # name.
+            missing = await client.get(
+                f"/api/session/{sid}/export", params={"fmt": "txt", "version": "nope"}
+            )
+            assert missing.status_code == 404
+            assert "nope" in missing.json()["detail"]
+
+
 async def test_audio_download(client: AsyncClient) -> None:
     pid = await _provider(client)
     sid = await _run_session(client, pid)

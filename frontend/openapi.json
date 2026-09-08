@@ -1817,7 +1817,7 @@
           "sessions"
         ],
         "summary": "Summarize Session",
-        "description": "Summarize a session's transcript with the chosen LLM provider + model.",
+        "description": "Summarize one transcript version with the chosen LLM provider + model.\n\n``version`` names the version to summarize and defaults to the live\ncapture, so a client that predates the field keeps getting what it always\ngot. Everything else about the request is unchanged.\n\nIt exists because summarizing was the most expensive way this app could be\nwrong: the route summarized the original with the version hard-coded, so a\nsession whose live capture died half way through and was re-transcribed\nthree times still fed the LLM the broken half-transcript - and the GM paid\nfor a summary of a session that mostly is not in it.",
         "operationId": "summarize_session_api_session__session_id__summarize_post",
         "security": [
           {
@@ -1875,7 +1875,7 @@
           "sessions"
         ],
         "summary": "Export Session",
-        "description": "Export a session's transcript as txt/md/srt/vtt/json.",
+        "description": "Export one transcript version as txt/md/srt/vtt/json.\n\n``version`` is the version the caller is looking at (\"original\" or a\ntranscribe job id), defaulting to the live capture so an old bookmark still\nmeans what it meant.\n\nThe route had no such parameter at all, and rendered the original with the\nversion hard-coded. The whole point of re-transcribing a session with a\nbetter model is the file you get out of it, so a GM who selected a 1346-\nsegment re-transcription and pressed Export got the 683-segment original\nback, in every format, with nothing on screen saying which one it was.\n\nAn unknown version is a 404 rather than a fallback to the original, for the\nsame reason a wrong file with no warning is worse than no file.",
         "operationId": "export_session_api_session__session_id__export_get",
         "security": [
           {
@@ -1900,6 +1900,16 @@
               "type": "string",
               "default": "txt",
               "title": "Fmt"
+            }
+          },
+          {
+            "name": "version",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "original",
+              "title": "Version"
             }
           }
         ],
@@ -2024,7 +2034,7 @@
           "sessions"
         ],
         "summary": "Merge Sessions",
-        "description": "Merge the selected sessions' transcripts - and audio - into a new session.\n\nParts are concatenated oldest-first, each part's timestamps offset so they run\nback-to-back; speaker rename maps are unioned; originals are left intact. When\nevery source has stored audio (at one shared sample rate), the WAVs and\nutterance indexes are concatenated too, so the merged session can be\nre-processed, re-diarized, and downloaded like any other.",
+        "description": "Merge the selected sessions' transcripts - and audio - into a new session.\n\nParts are concatenated oldest-first, each part's timestamps offset so they run\nback-to-back; speaker rename maps are unioned; originals are left intact. When\nevery source has stored audio (at one shared sample rate), the WAVs and\nutterance indexes are concatenated too, so the merged session can be\nre-processed, re-diarized, and downloaded like any other.\n\nEach source contributes its **newest completed re-transcription that\nproduced segments**, falling back to its live capture when it has none (see\n:func:`_best_available_rows`). This used to take every source's original\nunconditionally, which threw away every re-transcription of every part: a\nGM who re-ran two half-sessions through a better model and then merged them\ngot the two live captures back, with no way to tell from the merged row.\n\nThe alternative considered and not taken was a per-source version picker in\nthe request. It was rejected because the merge dialog does not ask and\nshould not have to: a GM merging the two halves of one evening is saying\n\"make this one session\", not \"and by the way use job 2680abb4 for the first\nhalf\". Taking the best text available is what that sentence means, and the\nsources are left intact, so a merge made from the wrong version is undone by\ndeleting one row rather than by recovering anything.",
         "operationId": "merge_sessions_api_session_merge_post",
         "requestBody": {
           "content": {
@@ -4374,6 +4384,24 @@
               }
             ],
             "title": "Summary Model"
+          },
+          "summary_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Summary Version"
+          },
+          "merged_from": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Merged From"
           }
         },
         "type": "object",
@@ -4552,6 +4580,17 @@
               }
             ],
             "title": "Reasoning Effort"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version"
           }
         },
         "type": "object",
