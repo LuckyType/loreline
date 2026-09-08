@@ -12,6 +12,7 @@ import {
 	CardHeader,
 	CardTitle,
 } from '$lib/components/ui/card'
+import { Checkbox } from '$lib/components/ui/checkbox'
 import {
 	Table,
 	TableBody,
@@ -20,6 +21,7 @@ import {
 	TableHeader,
 	TableRow,
 } from '$lib/components/ui/table'
+import Dropdown from '$lib/Dropdown.svelte'
 import type { ServiceState } from '$lib/wire'
 
 let services = $state<ServiceState[]>([])
@@ -29,6 +31,34 @@ let logsFor = $state('')
 let logs = $state('')
 let logsLoading = $state(false)
 let timer: ReturnType<typeof setInterval> | null = null
+
+// How many lines to ask the daemon for. Adjustable because the default is not
+// enough on a chatty container: the app probes the diarizer's /healthz every
+// few seconds, so 200 lines of that service's log covers a quarter of an hour
+// and holds nothing else at all.
+const TAIL_CHOICES = [200, 1000, 5000]
+let tail = $state(TAIL_CHOICES[0])
+
+// The other half of the same problem, and the reason this defaults to on: the
+// probe lines are the ones nobody opens this panel to read, and dropping them
+// is what makes the handful of lines that matter visible without scrolling
+// past a wall of them. The count below always states the whole, so nothing is
+// hidden silently.
+let hideProbes = $state(true)
+
+/** A health-probe line, which every service here answers many times a minute. */
+function isProbe(line: string): boolean {
+	return line.includes('/healthz') || line.includes('/livez')
+}
+
+const logLines = $derived(logs ? logs.split('\n') : [])
+const shownLines = $derived(hideProbes ? logLines.filter((l) => !isProbe(l)) : logLines)
+const hiddenCount = $derived(logLines.length - shownLines.length)
+const hiddenNote = $derived(
+	`${shownLines.length} of ${logLines.length} lines shown, ${hiddenCount} health ${
+		hiddenCount === 1 ? 'probe' : 'probes'
+	} hidden.`,
+)
 
 // The app and the docker-proxy are what make this page work at all - showing
 // them separately from the optional services makes it obvious why they have
@@ -63,12 +93,19 @@ async function showLogs(name: string) {
 	logsLoading = true
 	logs = ''
 	try {
-		logs = (await api.serviceLogs(name)).logs || '(no output)'
+		logs = (await api.serviceLogs(name, tail)).logs || '(no output)'
 	} catch (err) {
 		logs = err instanceof ApiError ? err.message : 'failed to fetch logs'
 	} finally {
 		logsLoading = false
 	}
+}
+
+/** Re-fetch at the new depth, but only while a log is actually on screen: this
+ *  is a control on the open card, not a page-wide setting. */
+function setTail(value: string) {
+	tail = Number(value)
+	if (logsFor) void showLogs(logsFor)
 }
 
 onMount(() => {
@@ -184,8 +221,27 @@ onDestroy(() => timer && clearInterval(timer))
 	<Card class="mt-4">
 		<CardHeader>
 			<CardTitle>Logs - {logsFor}</CardTitle>
-			<CardDescription>Recent container output, newest last.</CardDescription>
-			<CardAction class="flex gap-1">
+			<CardDescription>
+				Recent container output, newest last.
+				{#if !logsLoading && hiddenCount > 0}
+					{hiddenNote}
+				{/if}
+			</CardDescription>
+			<CardAction class="flex flex-wrap items-center gap-2">
+				<label class="flex items-center gap-2 text-sm">
+					<Checkbox
+						checked={hideProbes}
+						onCheckedChange={(v) => (hideProbes = v === true)}
+						aria-label="Hide health checks"
+					/>
+					<span class="text-muted-foreground">Hide health checks</span>
+				</label>
+				<Dropdown
+					class="w-30"
+					value={String(tail)}
+					onpick={setTail}
+					options={TAIL_CHOICES.map((n) => ({ value: String(n), label: `${n} lines` }))}
+				/>
 				<Button variant="outline" size="sm" onclick={() => showLogs(logsFor)}>Refresh</Button>
 				<Button variant="ghost" size="sm" onclick={() => (logsFor = '')}>Close</Button>
 			</CardAction>
@@ -193,10 +249,16 @@ onDestroy(() => timer && clearInterval(timer))
 		<CardContent>
 			{#if logsLoading}
 				<p class="m-0 text-sm text-muted-foreground">Loading…</p>
+			{:else if shownLines.length === 0}
+				<p class="m-0 text-sm text-muted-foreground">
+					{logLines.length === 0
+						? '(no output)'
+						: 'Every line in this range is a health probe. Untick "Hide health checks" to see them, or ask for more lines.'}
+				</p>
 			{:else}
 				<pre
 					class="m-0 max-h-96 overflow-auto rounded-md bg-foreground/5 p-3 font-mono text-xs leading-relaxed"
-				>{logs}</pre>
+				>{shownLines.join('\n')}</pre>
 			{/if}
 		</CardContent>
 	</Card>
