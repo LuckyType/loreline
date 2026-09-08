@@ -266,7 +266,11 @@ export interface paths {
         put?: never;
         /**
          * Test Alert Channel
-         * @description Send a test notification to one channel.
+         * @description Send a test notification to one channel, and say why when it fails.
+         *
+         *     Always 200, failure included: the request itself succeeded, and the answer
+         *     to "did this channel take it" is the body. Turning a refused webhook into a
+         *     5xx here would make the page's own error path swallow the reason.
          */
         post: operations["test_alert_channel_api_system_alerts_channels__channel_id__test_post"];
         delete?: never;
@@ -1199,11 +1203,21 @@ export interface components {
         AlertLevel: "info" | "warning" | "error";
         /**
          * AlertTestResult
-         * @description Delivery outcome of a single channel test.
+         * @description Delivery outcome of a single channel test, and why it failed.
+         *
+         *     ``detail`` is the only diagnosis an alert channel ever offers: nothing
+         *     probes one periodically and the table carries no health column, so "Test
+         *     failed" on its own leaves an operator guessing between a typo, a closed
+         *     port and a rejected token. It holds the transport's own words or the status
+         *     plus the vendor's sentence, bounded and with the channel's credential
+         *     scrubbed out (see ``loreline.monitoring.alerts._scrub``). None on success:
+         *     there is nothing to explain.
          */
         AlertTestResult: {
             /** Ok */
             ok: boolean;
+            /** Detail */
+            detail?: string | null;
         };
         /**
          * AuthScheme
