@@ -520,6 +520,14 @@ export interface paths {
          *
          *     Entries carry price/context length only where the provider publishes them
          *     (OpenRouter); everywhere else it's the bare id, exactly as before.
+         *
+         *     An empty list is an answer, but not when there is a reason behind it. A
+         *     self-hosted base URL pointing at nothing produced ``200 []``, the same thing
+         *     a vendor listing no models produces, so the wizard's "Load models" button
+         *     said nothing at all and left the operator to guess between a wrong port, a
+         *     stopped service and a provider with nothing to offer. The probe already
+         *     knows which it was, so that sentence goes out as the error it is - 502,
+         *     because this app is fine and the endpoint behind it is not.
          */
         post: operations["provider_models_api_providers_models_post"];
         delete?: never;
@@ -1162,6 +1170,10 @@ export interface components {
             transcribe_name_markers?: string[];
             /** Realtime Name Markers */
             realtime_name_markers?: string[];
+            /** Incompatible Name Markers */
+            incompatible_name_markers?: {
+                [key: string]: string[];
+            };
         };
         /**
          * DeviceSetting

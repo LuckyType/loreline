@@ -15,7 +15,7 @@ from test_catalog_reader import CHAT_BODY
 from loreline import capabilities
 from loreline.models import Interaction, ModelInfo, ProviderKind
 from loreline.stt import catalog
-from loreline.stt.catalog import list_models
+from loreline.stt.catalog import list_catalog, list_models
 
 
 def _factory(handler: httpx.MockTransport) -> httpx.AsyncClient:
@@ -101,6 +101,46 @@ async def test_live_failure_falls_back_to_empty() -> None:
         client_factory=lambda: _factory(transport),
     )
     assert models == []  # openai_compat has no curated list; a failed fetch yields nothing
+
+
+async def test_an_empty_list_carries_why_it_is_empty() -> None:
+    """The list is the same one ``list_models`` returns; what is added is the
+    reason behind it, for the one caller that can act on it. A picker with
+    nothing to show cannot tell a wrong port from a vendor that lists nothing,
+    and the probe has known which since it was written."""
+    transport = httpx.MockTransport(lambda _r: httpx.Response(500))
+    listing = await list_catalog(
+        kind=ProviderKind.OPENAI_COMPAT,
+        base_url="http://x",
+        api_key=None,
+        client_factory=lambda: _factory(transport),
+    )
+    assert listing.models == []
+    assert listing.error is not None and "could not check" in listing.error
+
+
+async def test_a_curated_fallback_reports_no_error() -> None:
+    """``error`` is why a list is empty, not a general failure channel: a kind
+    with a curated catalogue has a real answer, and the failed live read stays
+    in the log where it always was."""
+    transport = httpx.MockTransport(lambda _r: httpx.Response(500))
+    listing = await list_catalog(
+        kind=ProviderKind.OPENAI,
+        base_url=None,
+        api_key="k",
+        client_factory=lambda: _factory(transport),
+    )
+    assert listing.models
+    assert listing.error is None
+
+
+async def test_nothing_to_ask_is_not_a_failure() -> None:
+    """A self-hosted row with no base URL has no catalogue address, so no probe
+    ran and nothing went wrong. An empty list here means "no models", and saying
+    anything else would send an operator hunting a fault that is not there."""
+    listing = await list_catalog(kind=ProviderKind.OPENAI_COMPAT, base_url=None, api_key=None)
+    assert listing.models == []
+    assert listing.error is None
 
 
 async def test_live_openai_compatible_chat_models() -> None:

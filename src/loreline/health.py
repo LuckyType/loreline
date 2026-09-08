@@ -59,6 +59,22 @@ SOCKET_READ_TIMEOUT_S = 5.0
 # Details go into a badge tooltip, so a provider that answers with a whole HTML
 # error page must not put all of it there.
 _MAX_DETAIL_CHARS = 300
+# What a request that could not even be serialised says, and it is not "the
+# endpoint is down": nothing was sent, so nothing was learned about the host.
+# httpx raises LocalProtocolError from h11 when a header value is illegal, and
+# on every request this app builds the only header carrying operator input is
+# the credential - a key with a trailing newline or nothing but spaces makes
+# "Bearer    " and h11 refuses to write it. That is an auth problem in the one
+# way the settings page distinguishes: a rejected key is fixed in the key
+# field, and grading it UNREACHABLE sent the GM to check the network instead.
+#
+# The exception's own text is deliberately not appended: it quotes the header
+# verbatim, which for a real key is the key, and this string ends up in a badge
+# tooltip and in the job log.
+_UNBUILDABLE_CREDENTIAL = (
+    "the stored API key is not a usable credential: it has whitespace or "
+    "characters an HTTP header cannot carry"
+)
 
 
 class HealthStatus(StrEnum):
@@ -130,8 +146,13 @@ def missing_credential(kind: ProviderKind, api_key: str | None) -> HealthReport 
 
     Returns None for a self-hosted kind, whose ``auth: optional`` server may
     well answer fine with no key at all, and for a kind that has one.
+
+    "Has one" is measured after trimming. A row whose stored key is whitespace
+    has nothing to authenticate with, and saying so costs a round trip that
+    could only ever come back as a malformed request anyway (see
+    :data:`_UNBUILDABLE_CREDENTIAL`).
     """
-    if api_key or not requires_api_key(kind):
+    if (api_key or "").strip() or not requires_api_key(kind):
         return None
     return HealthReport(HealthStatus.UNAUTHORIZED, "no API key stored for this provider")
 
@@ -184,6 +205,12 @@ async def probe_endpoint_response(
             response = await client.get(path, params=params, follow_redirects=True)
     except (TimeoutError, httpx.TimeoutException):
         return HealthReport(HealthStatus.UNREACHABLE, f"no answer within {timeout_s:.0f}s"), None
+    except httpx.LocalProtocolError:
+        # Checked before the transport cases below, which it is a subclass of.
+        # See _UNBUILDABLE_CREDENTIAL: nothing was sent, so nothing can be said
+        # about the endpoint, and the credential is the only part of a probe
+        # that carries operator input into a header.
+        return HealthReport(HealthStatus.UNAUTHORIZED, _UNBUILDABLE_CREDENTIAL), None
     except httpx.HTTPError as exc:
         return HealthReport(HealthStatus.UNREACHABLE, _transport_detail(exc)), None
     except Exception as exc:
@@ -549,8 +576,18 @@ def classify_request_error(exc: BaseException) -> RequestFailure:
     * **A transport failure is transient here.** The probe calls it
       ``UNREACHABLE`` and a GM fixes the URL; mid-run it is far more often a
       dropped socket or a slow upload, and one bad minute must not end a
-      session that would have recovered on the next utterance.
+      session that would have recovered on the next utterance. A request that
+      could not be *built* is not one of those, and is graded first below.
     """
+    if isinstance(exc, httpx.LocalProtocolError):
+        # The request was never sent, so this says nothing about the provider
+        # and everything about the credential - see _UNBUILDABLE_CREDENTIAL.
+        # Terminal because the next utterance builds the identical header from
+        # the identical stored key: retrying is pure waste, and failing over is
+        # the only useful move.
+        return RequestFailure(
+            terminal=True, status=HealthStatus.UNAUTHORIZED, detail=_UNBUILDABLE_CREDENTIAL
+        )
     answer = _http_answer(exc)
     if answer is None:
         # No status: a timeout, a refused or dropped connection, a protocol
