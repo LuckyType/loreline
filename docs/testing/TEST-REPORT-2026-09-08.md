@@ -14,6 +14,61 @@ OpenRouter, Speaches local), 5 stored sessions (1 errored), diarizer healthy at
 (core) and diarization/speaches (optional, both running), stored defaults with
 `strict_model_filtering: false`.
 
+## Fix status, added 2026-09-08 after the run
+
+Everything below was found by the test run and is written as it was observed on
+the deployed 0.1.0 image. It is left in the past tense on purpose: it is the
+record of what the audit saw, not a description of the code as it stands now.
+This table is the only part that tracks what was done about it.
+
+All 29 are fixed on branch `t3code/7587409d`. The checks are green: ruff,
+pyright, 1091 pytest tests (49 of them new), the capability check, the OpenAPI
+document, and the frontend lint, type check and build.
+
+| # | Fixed by |
+| --- | --- |
+| F-01 | The health dot is a real disclosure button: click, Enter, Space and touch all open it, Escape and an outside click close it, `aria-expanded` is honest, and hover still works for a mouse. |
+| F-02 | The capture row is `grid-cols-1 sm:grid-cols-[1fr_1fr_auto]` with a full-width Start below `sm`. |
+| F-03 | The glossary stores the GM's choice, not the flag: `glossaryPick` plus a derived `useGlossary`, so a model that cannot take one no longer erases the default. Same fix in `ReprocessPanel`. |
+| F-04 | New `client_address()` keys the limiter on the rightmost `X-Forwarded-For` entry when the peer is a trusted proxy, validated as an IP, falling back to the peer. Expired entries are now pruned. |
+| F-05 | `healthz` requires auth; new unauthenticated `GET /api/system/livez` returns only `{"status":"ok"}`. `deploy/install.sh`, README and CONTRIBUTING follow it. |
+| F-06 | The capture card fetches the device list once on mount and flags a stored device that is gone, in the summary line, linking to Settings. It warns rather than blocks, deliberately. |
+| F-07 | Two bugs, both fixed: the manager grew `live_view_session_id()` that survives teardown, and `EventBus.subscribe()` now takes a predicate applied at publish time, so the filter is decided where the record is written rather than whenever the socket task happens to run. |
+| F-08 | `LogLine` splits on ` key=` boundaries, so a value keeps its spaces. |
+| F-09 | `subtitle_cues()` sorts, clamps each end to the next start, and splits long rows on real word timings where the provider returned them. |
+| F-10 | Merge sets `ended_at` from the sum of the parts' spans. |
+| F-11 | `GET /export?version=` and a `version` field on the summarize body, both 404 on an unknown version; merge takes each source's newest completed re-transcription; new `summary_version` and `merged_from` columns. The UI passes the selected version and names it in the Export menu, the Summarize dialog and the Summary meta line. |
+| F-12 | The seeding guard tests `!prompt.trim()`, plus an explicit "Reset to summary" button. |
+| F-13 | New `Markdown.svelte` renders headings, lists and inline emphasis by building typed spans, never an HTML string, so there is nothing to sanitise and no dependency was added. |
+| F-14 | A character count under the prompt, with an over-limit warning where the capability config publishes a limit and an amber nudge past 1200 characters where it does not. |
+| F-15 | Every re-processing run now writes `reprocess.start`, `reprocess.finished` with segments and elapsed time, and on failure the message plus the traceback, to its own version log. |
+| F-16 | The logs dialog remembers its trigger and restores focus to it on close. |
+| F-17 | `filter_models` narrows every interaction. Summarize and video are narrowed negatively by a new `incompatible_name_markers` list in the YAML plus a model's own declared interactions; unknown models stay offered. |
+| F-18 | `ModelPicker` filters favourites against the interaction's own catalogue, and `preferredModel` now takes an interaction so seeding cannot pick one either. |
+| F-19 | The key is trimmed client-side, `ProviderCreate` normalises a blank-after-trim key to none and `SecretWrite` refuses one, `secrets.hint()` stops rendering an already-stored blank as credentialed, and a malformed header grades `unauthorized` rather than `unreachable`. |
+| F-20 | `list_catalog` carries the reason a list is empty; the wizard shows it beside the button, red when nothing loaded, amber when one catalogue of several failed, and a plain note when the vendor genuinely returned none. |
+| F-21 | The timeout is `60s + 4x audio seconds` instead of a flat 120s, and a failed job never stores an empty message. |
+| F-22 | The banner selects on `status === 'error'` rather than on having text, prefers the newest failure, carries a timestamp, and a failed diarize pass is also marked in its own row. |
+| F-23 | The log viewer hides health probes by default, says how many it hid, and offers 200 / 1000 / 5000 lines. |
+| F-24 | An ntfy server and a webhook URL must be an absolute http(s) URL, validated field-wise on the server (so the 422 body cannot echo the token) and mirrored in the form. |
+| F-25 | `AlertTestResult` gained `detail`, populated with the transport error or the vendor's sentence, scrubbed of the channel's token before it is logged or returned. This also closed a pre-existing token leak into the logs. |
+| F-26 | The diarization service takes an explicit one-at-a-time semaphore that `/healthz` never waits on, queues a second caller for 30s then answers 429, drops a `.tolist()` that built ~35 million Python floats per long session, and shuts down within its grace period. The app also refuses to queue a diarize job against a diarizer it knows is unreachable. |
+| F-27 | `merged_from` on the wire drives a "merged" badge, and History gained a Duration column. |
+| F-28 | Both redirect paths carry a sanitised `next`, rejecting anything that is not a single-slash same-origin path. |
+| F-29 | `txt` and `md` drop the speaker entirely when nothing in the transcript has one, and keep "Unknown" in the mixed case. |
+
+Two notes on the three analysis documents beside this one
+(`analysis-backend-api.md`, `analysis-capabilities.md`,
+`analysis-session-lifecycle.md`): they describe the code as it was before these
+fixes, so a few passages are now superseded, most visibly the ones about
+`healthz` being open and about export following `canonical_transcript`.
+
+None of this is deployed. The box at 10.10.50.55 runs
+`ghcr.io/luckytype/loreline:latest` and still has every behaviour described
+below.
+
+---
+
 ## Summary
 
 29 findings. Four are high severity and would each cost a user real work.
