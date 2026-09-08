@@ -54,16 +54,22 @@ def test_paths_outside_the_store_are_refused(tmp_path: Path) -> None:
     assert list(tmp_path.rglob("*.log")) == []
 
 
-def test_records_belong_to_the_running_capture_only() -> None:
-    """What the dashboard's log socket filters on (see logs_ws)."""
+def test_records_belong_to_the_live_session_only() -> None:
+    """What the dashboard's log socket filters on (see logs_ws).
+
+    The id it is handed is the session the live view is about, which outlives
+    the capture by a whole teardown (``SessionManager.live_view_session_id``);
+    this predicate only ever asks whether a record belongs to whichever session
+    that is.
+    """
     capture = LogRecord(seq=1, line="l", session_id="A")
     job = LogRecord(seq=2, line="l", session_id="A", job_id="j1")
     untagged = LogRecord(seq=3, line="l")
 
     assert capture.is_capture_line("A") is True
-    # Session A's line while session B is the one at the microphone.
+    # Session A's line while session B is the one on show.
     assert capture.is_capture_line("B") is False
-    # Nothing at all when no capture is running.
+    # Nothing at all once no session is live.
     assert capture.is_capture_line(None) is False
     # Re-processing carries a job id even when it replays the live session.
     assert job.is_capture_line("A") is False
