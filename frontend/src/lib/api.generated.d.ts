@@ -4,6 +4,32 @@
  */
 
 export interface paths {
+    "/api/system/livez": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Livez
+         * @description Say that this process is up. The one route here that needs no cookie.
+         *
+         *     Empty on purpose: it touches no disk, no database and no diarizer, so it
+         *     cannot fail for a reason that has nothing to do with the process being
+         *     alive, and it hands an anonymous caller nothing about the deployment. That
+         *     is what makes it safe to leave open for the installer's start-up poll and
+         *     for any uptime check pointed at the box.
+         */
+        get: operations["livez_api_system_livez_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/system/healthz": {
         parameters: {
             query?: never;
@@ -13,7 +39,14 @@ export interface paths {
         };
         /**
          * Healthz
-         * @description Return service health. Used by UI badge, push alerts, and external polling.
+         * @description Return the full operational snapshot, for the UI badge and push alerts.
+         *
+         *     Behind auth, unlike ``/livez`` above: the exact version, free disk, capture
+         *     state, the operator's own diarizer endpoint and the STT vendor's raw error
+         *     text add up to a reconnaissance report, and this app publishes its port on
+         *     the LAN. It also makes the shell's guard real - the SPA layout already
+         *     redirects to /login when this call answers 401, a branch that could not be
+         *     reached while the route was open.
          */
         get: operations["healthz_api_system_healthz_get"];
         put?: never;
@@ -335,9 +368,13 @@ export interface paths {
          * Login
          * @description Validate the shared password and set an auth cookie.
          *
-         *     Rate-limited per client IP (see ``LoginRateLimiter``): a shared password
-         *     with no backoff is a free brute-force target on a device that's LAN- (or
-         *     worse, internet-) reachable.
+         *     Rate-limited per client (see ``LoginRateLimiter``): a shared password with
+         *     no backoff is a free brute-force target on a device that's LAN- (or worse,
+         *     internet-) reachable. The key comes from ``client_address`` rather than the
+         *     socket's peer, because behind the bundled Caddy every browser at the table
+         *     arrives from the same container address and a limiter keyed on that is a
+         *     global one: anyone able to reach the box could hold the login shut for
+         *     everybody, five requests at a time.
          */
         post: operations["login_api_auth_login_post"];
         delete?: never;
@@ -742,7 +779,17 @@ export interface paths {
         put?: never;
         /**
          * Summarize Session
-         * @description Summarize a session's transcript with the chosen LLM provider + model.
+         * @description Summarize one transcript version with the chosen LLM provider + model.
+         *
+         *     ``version`` names the version to summarize and defaults to the live
+         *     capture, so a client that predates the field keeps getting what it always
+         *     got. Everything else about the request is unchanged.
+         *
+         *     It exists because summarizing was the most expensive way this app could be
+         *     wrong: the route summarized the original with the version hard-coded, so a
+         *     session whose live capture died half way through and was re-transcribed
+         *     three times still fed the LLM the broken half-transcript - and the GM paid
+         *     for a summary of a session that mostly is not in it.
          */
         post: operations["summarize_session_api_session__session_id__summarize_post"];
         delete?: never;
@@ -760,7 +807,20 @@ export interface paths {
         };
         /**
          * Export Session
-         * @description Export a session's transcript as txt/md/srt/vtt/json.
+         * @description Export one transcript version as txt/md/srt/vtt/json.
+         *
+         *     ``version`` is the version the caller is looking at ("original" or a
+         *     transcribe job id), defaulting to the live capture so an old bookmark still
+         *     means what it meant.
+         *
+         *     The route had no such parameter at all, and rendered the original with the
+         *     version hard-coded. The whole point of re-transcribing a session with a
+         *     better model is the file you get out of it, so a GM who selected a 1346-
+         *     segment re-transcription and pressed Export got the 683-segment original
+         *     back, in every format, with nothing on screen saying which one it was.
+         *
+         *     An unknown version is a 404 rather than a fallback to the original, for the
+         *     same reason a wrong file with no warning is worse than no file.
          */
         get: operations["export_session_api_session__session_id__export_get"];
         put?: never;
@@ -829,6 +889,21 @@ export interface paths {
          *     every source has stored audio (at one shared sample rate), the WAVs and
          *     utterance indexes are concatenated too, so the merged session can be
          *     re-processed, re-diarized, and downloaded like any other.
+         *
+         *     Each source contributes its **newest completed re-transcription that
+         *     produced segments**, falling back to its live capture when it has none (see
+         *     :func:`_best_available_rows`). This used to take every source's original
+         *     unconditionally, which threw away every re-transcription of every part: a
+         *     GM who re-ran two half-sessions through a better model and then merged them
+         *     got the two live captures back, with no way to tell from the merged row.
+         *
+         *     The alternative considered and not taken was a per-source version picker in
+         *     the request. It was rejected because the merge dialog does not ask and
+         *     should not have to: a GM merging the two halves of one evening is saying
+         *     "make this one session", not "and by the way use job 2680abb4 for the first
+         *     half". Taking the best text available is what that sentence means, and the
+         *     sources are left intact, so a merge made from the wrong version is undone by
+         *     deleting one row rather than by recovering anything.
          */
         post: operations["merge_sessions_api_session_merge_post"];
         delete?: never;
@@ -1376,6 +1451,24 @@ export interface components {
          */
         JobStatus: "queued" | "running" | "done" | "error";
         /**
+         * LivenessResponse
+         * @description The unauthenticated liveness answer: this process is up, and no more.
+         *
+         *     Its own model rather than a reuse of ``OkResponse`` because the two are
+         *     read by different callers and mean different things: ``ok`` acknowledges a
+         *     write to whoever made it, ``status`` is what an uptime check and the
+         *     installer's start-up poll look at from outside. Deliberately carries
+         *     nothing about the deployment; see ``/api/system/livez``.
+         */
+        LivenessResponse: {
+            /**
+             * Status
+             * @default ok
+             * @constant
+             */
+            status?: "ok";
+        };
+        /**
          * LlmCapabilities
          * @description Per-model summarization surface.
          *
@@ -1895,6 +1988,10 @@ export interface components {
             summary_provider?: string | null;
             /** Summary Model */
             summary_model?: string | null;
+            /** Summary Version */
+            summary_version?: string | null;
+            /** Merged From */
+            merged_from?: string[];
         };
         /**
          * SessionDetail
@@ -1966,6 +2063,8 @@ export interface components {
             model: string;
             /** Reasoning Effort */
             reasoning_effort?: string | null;
+            /** Version */
+            version?: string | null;
         };
         /**
          * SummarizeResult
@@ -2380,6 +2479,26 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    livez_api_system_livez_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LivenessResponse"];
+                };
+            };
+        };
+    };
     healthz_api_system_healthz_get: {
         parameters: {
             query?: never;
@@ -3608,6 +3727,7 @@ export interface operations {
         parameters: {
             query?: {
                 fmt?: string;
+                version?: string;
             };
             header?: never;
             path: {
