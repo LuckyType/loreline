@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Literal, Self
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from loreline.models import (
     ORIGINAL_VERSION,
@@ -19,6 +19,27 @@ class LoginRequest(BaseModel):
     """Password login payload."""
 
     password: str
+
+
+def _credential(value: str | None) -> str | None:
+    """A credential as it will be sent, or None when there is none to send.
+
+    Surrounding whitespace is stripped rather than trusted: a key is pasted, and
+    a browser field, a password manager and a terminal all bring a trailing
+    space or newline along with it. Every surface here spends the key on an HTTP
+    header, and a header value cannot start or end with whitespace - h11 refuses
+    to serialise one - so the untrimmed copy is not a credential at all, it is a
+    request that cannot be built.
+
+    Blank after trimming is therefore None, not "": three spaces typed into the
+    key field used to save as a real key, mask itself as "•••" in the table and
+    say "blank = keep current" on the way back in, while every request built
+    from it died with ``Illegal header value b'Bearer    '``. Answering None
+    makes that case identical to the empty one, which has always behaved
+    correctly (no secret written, and the row honestly shows none).
+    """
+    trimmed = (value or "").strip()
+    return trimmed or None
 
 
 class ProviderCreate(BaseModel):
@@ -39,11 +60,40 @@ class ProviderCreate(BaseModel):
         description="Optional API key set at create/update time; stored write-only.",
     )
 
+    @field_validator("api_key")
+    @classmethod
+    def _usable_key_or_none(cls, value: str | None) -> str | None:
+        """Normalise here, so the API is safe whichever client is calling.
+
+        The routes store the key with a bare ``if body.api_key``, which is the
+        right rule; it was simply being handed something truthy that was not a
+        key. Fixing it at the schema covers create and update in one place, and
+        covers a client that is not this app's own wizard.
+        """
+        return _credential(value)
+
 
 class SecretWrite(BaseModel):
     """Write-only secret value for a provider's API key."""
 
     value: str
+
+    @field_validator("value")
+    @classmethod
+    def _reject_a_blank_secret(cls, value: str) -> str:
+        """Refuse a value that is not a credential, rather than storing it.
+
+        This route means "store this key", and there is nothing to normalise a
+        blank one into: writing it would leave the row reporting a stored
+        secret it cannot authenticate with, and silently writing nothing while
+        answering ``ok`` would be the same lie by another route. Deleting the
+        key is a different request (DELETE the provider's secret is the
+        provider delete), so this simply refuses.
+        """
+        credential = _credential(value)
+        if credential is None:
+            raise ValueError("an API key cannot be blank")
+        return credential
 
 
 class GlossaryWrite(BaseModel):

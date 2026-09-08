@@ -7,13 +7,13 @@ import uuid
 from fastapi import APIRouter, Depends, Request
 from fastapi.exceptions import HTTPException
 from pydantic import BaseModel
-from starlette.status import HTTP_404_NOT_FOUND
+from starlette.status import HTTP_404_NOT_FOUND, HTTP_502_BAD_GATEWAY
 
 from loreline.health import HealthReport, HealthStatus
 from loreline.health_probe import probe_provider
 from loreline.models import Interaction, ModelInfo, ProviderConfig, ProviderKind
 from loreline.secrets import SecretStore
-from loreline.stt.catalog import list_models
+from loreline.stt.catalog import list_catalog
 from loreline.web.auth import require_auth
 from loreline.web.deps import get_state, load_action_defaults
 from loreline.web.schemas import OkResponse, ProviderCreate, SecretWrite
@@ -167,6 +167,14 @@ async def provider_models(request: Request, body: ProviderModelsRequest) -> list
 
     Entries carry price/context length only where the provider publishes them
     (OpenRouter); everywhere else it's the bare id, exactly as before.
+
+    An empty list is an answer, but not when there is a reason behind it. A
+    self-hosted base URL pointing at nothing produced ``200 []``, the same thing
+    a vendor listing no models produces, so the wizard's "Load models" button
+    said nothing at all and left the operator to guess between a wrong port, a
+    stopped service and a provider with nothing to offer. The probe already
+    knows which it was, so that sentence goes out as the error it is - 502,
+    because this app is fine and the endpoint behind it is not.
     """
     state = get_state(request)
     api_key = body.api_key
@@ -175,10 +183,13 @@ async def provider_models(request: Request, body: ProviderModelsRequest) -> list
         if existing is not None and existing.auth_ref:
             api_key = state.secrets.get(existing.auth_ref)
     defaults = await load_action_defaults(state)
-    return await list_models(
+    listing = await list_catalog(
         kind=body.kind,
         base_url=body.base_url,
         api_key=api_key,
         interaction=body.interaction,
         strict_filtering=defaults.strict_model_filtering,
     )
+    if listing.error:
+        raise HTTPException(status_code=HTTP_502_BAD_GATEWAY, detail=listing.error)
+    return listing.models

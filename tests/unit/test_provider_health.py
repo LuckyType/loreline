@@ -218,6 +218,44 @@ async def test_probe_reports_a_dead_host_as_unreachable() -> None:
     assert "Name or service not known" in report.detail
 
 
+async def test_a_credential_that_cannot_be_put_in_a_header_is_an_auth_failure() -> None:
+    """Reproduced end to end: three spaces typed into the API key field saved as
+    a real key, and Test came back red with ``unreachable`` and the tooltip
+    ``could not connect: Illegal header value b'Bearer    '``.
+
+    That is the one failure this page's two red states must not confuse. Nothing
+    was ever sent - h11 refuses to serialise the header - so nothing at all was
+    learned about the host, while the credential is provably unusable. Grading
+    it UNREACHABLE sent the GM to check a network that was fine.
+    """
+
+    def refuse(_request: httpx.Request) -> httpx.Response:
+        raise httpx.LocalProtocolError("Illegal header value b'Bearer    '")
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(refuse), base_url="https://api.example.test"
+    ) as client:
+        report = await probe_endpoint(client, "/models")
+
+    assert report.status is HealthStatus.UNAUTHORIZED
+    # The vendor's own words are what the badge tooltip carries elsewhere; here
+    # there are none, and the exception's text quotes the header verbatim - i.e.
+    # the key - so it says what to fix without reprinting the secret.
+    assert report.detail is not None
+    assert "API key" in report.detail
+    assert "Bearer" not in report.detail
+
+
+def test_a_malformed_credential_ends_a_run_rather_than_being_retried() -> None:
+    """The same fault graded for the request path, where it also has to be
+    terminal: the next utterance builds the identical header from the identical
+    stored key, so retrying is two doomed calls per utterance."""
+    failure = classify_request_error(httpx.LocalProtocolError("Illegal header value b'Bearer  '"))
+    assert failure.status is HealthStatus.UNAUTHORIZED
+    assert failure.terminal is True
+    assert "API key" in failure.detail
+
+
 async def test_probe_never_raises_and_never_calls_a_provider_broken() -> None:
     """An exception from inside the probe is our bug, not the provider's fault.
 
@@ -278,6 +316,17 @@ def test_missing_credential_leaves_a_self_hosted_kind_to_the_endpoint() -> None:
     may accept anonymous calls, so "no key" is not a verdict there."""
     assert missing_credential(ProviderKind.OPENAI_COMPAT, None) is None
     assert missing_credential(ProviderKind.GEMINI, "a-key") is None
+
+
+def test_a_whitespace_key_is_no_key_at_all() -> None:
+    """Nothing writes one any more, but rows saved before that fix have one, and
+    a probe with it can only come back as a request that could not be built.
+    Saying "no API key stored" without the round trip is both cheaper and the
+    truer sentence: there is nothing here to authenticate with."""
+    report = missing_credential(ProviderKind.OPENAI, "   ")
+    assert report is not None
+    assert report.status is HealthStatus.UNAUTHORIZED
+    assert report.detail == "no API key stored for this provider"
 
 
 # --- detail extraction ------------------------------------------------------

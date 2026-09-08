@@ -524,6 +524,21 @@ def test_load_reads_a_file(tmp_path: Path) -> None:
     assert load(path).version == 1
 
 
+def test_transcribe_may_not_be_narrowed_by_both_marker_lists() -> None:
+    """One list per question, or nothing states which of them wins.
+
+    Transcription is narrowed positively (what a name *is*); summarize and video
+    negatively (what it is not), because nothing names a chat model. Listing
+    transcribe under the negative markers would put two gates on one list, which
+    is the shape of bug capabilities.yaml exists to prevent, so the loader
+    refuses it rather than quietly ignoring the entry.
+    """
+    with pytest.raises(ValidationError, match="must not list transcribe"):
+        CapabilityConfig.model_validate(
+            {"version": 1, "providers": {}, "incompatible_name_markers": {"transcribe": ["asr"]}}
+        )
+
+
 def test_shipped_config_is_valid() -> None:
     """The real file must always parse. This is the CI guard on hand edits."""
     config = load()

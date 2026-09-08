@@ -1204,7 +1204,7 @@
           "providers"
         ],
         "summary": "Provider Models",
-        "description": "List a provider's available models (live /v1/models, else a curated set).\n\nEntries carry price/context length only where the provider publishes them\n(OpenRouter); everywhere else it's the bare id, exactly as before.",
+        "description": "List a provider's available models (live /v1/models, else a curated set).\n\nEntries carry price/context length only where the provider publishes them\n(OpenRouter); everywhere else it's the bare id, exactly as before.\n\nAn empty list is an answer, but not when there is a reason behind it. A\nself-hosted base URL pointing at nothing produced ``200 []``, the same thing\na vendor listing no models produces, so the wizard's \"Load models\" button\nsaid nothing at all and left the operator to guess between a wrong port, a\nstopped service and a provider with nothing to offer. The probe already\nknows which it was, so that sentence goes out as the error it is - 502,\nbecause this app is fine and the endpoint behind it is not.",
         "operationId": "provider_models_api_providers_models_post",
         "requestBody": {
           "content": {
@@ -2825,6 +2825,19 @@
             },
             "type": "array",
             "title": "Realtime Name Markers"
+          },
+          "incompatible_name_markers": {
+            "additionalProperties": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "propertyNames": {
+              "$ref": "#/components/schemas/Interaction"
+            },
+            "type": "object",
+            "title": "Incompatible Name Markers"
           }
         },
         "additionalProperties": false,

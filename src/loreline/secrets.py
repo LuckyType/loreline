@@ -84,9 +84,16 @@ class SecretStore:
         Reveals only the leading and trailing characters so the UI can identify
         *which* key is stored without exposing it. Short values are masked more
         aggressively. Honors the environment override like ``get``.
+
+        Whitespace answers None, the same as no value at all. Nothing writes
+        such a value any more (see ``_credential`` in loreline.web.schemas), but
+        rows saved before that fix have one on disk, and this hint is what the
+        settings table renders as a stored key and what the edit form reads as
+        "blank = keep current": three spaces must not go on presenting
+        themselves as a credential no request can even be built from.
         """
         value = self.get(name)
-        if not value:
+        if not value or not value.strip():
             return None
         n = len(value)
         if n <= 4:  # noqa: PLR2004 - too short to reveal safely

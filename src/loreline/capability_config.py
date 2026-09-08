@@ -868,6 +868,30 @@ class CapabilityConfig(_Strict):
     # so adding a marker is a yaml edit, not a code change.
     transcribe_name_markers: list[str] = Field(default_factory=list[str])
     realtime_name_markers: list[str] = Field(default_factory=list[str])
+    # The negative of the list above, per interaction: names that mark a model
+    # as built for another job. Separate rather than derived from it because
+    # the two are asked different questions - "does this name say transcription"
+    # offers a model, "does this name say something else" withholds one - and
+    # the second has to be the more cautious list. See the yaml for the trade.
+    incompatible_name_markers: dict[Interaction, list[str]] = Field(
+        default_factory=dict[Interaction, list[str]]
+    )
+
+    @model_validator(mode="after")
+    def _transcribe_is_narrowed_by_one_list_only(self) -> Self:
+        """Refuse a transcribe entry in the negative markers.
+
+        Transcription already has a positive list, and a model would then be
+        judged by both with no stated precedence: exactly the two-gates-on-one-
+        list shape this file exists to prevent (see ``curated_models``).
+        Ignoring the entry silently would be worse - it would read as applied.
+        """
+        if Interaction.TRANSCRIBE in self.incompatible_name_markers:
+            raise ValueError(
+                "incompatible_name_markers must not list transcribe: "
+                "transcribe_name_markers is the one list that narrows it"
+            )
+        return self
 
     @model_validator(mode="after")
     def _every_kind_covered(self) -> Self:

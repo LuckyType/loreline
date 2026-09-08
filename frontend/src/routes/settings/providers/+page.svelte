@@ -186,6 +186,11 @@ const TEST_BADGE: Record<
 let form = $state<Complete<ProviderCreate>>(blank())
 let availableModels = $state<ModelInfo[]>([])
 let modelsLoading = $state(false)
+/** What the last "Load models" ran into, or '' when it has nothing to report.
+ *  A failed catalogue read used to be indistinguishable from a vendor that
+ *  lists nothing: the button said "Loading…", went back to "Load models" and
+ *  left no trace either way. See loadModels. */
+let modelsError = $state('')
 let modelFilter = $state('')
 let step = $state(1)
 let hosting = $state<Hosting>('cloud')
@@ -383,6 +388,7 @@ async function loadModels() {
 	// again rather than trusted to the template alone.
 	if (keyMissing) return
 	modelsLoading = true
+	modelsError = ''
 	try {
 		// Favourites are one flat list shared by every picker, while a provider
 		// can now serve several interactions at once (an OpenRouter entry does
@@ -398,28 +404,63 @@ async function loadModels() {
 						kind: form.kind,
 						interaction,
 						base_url: form.base_url || null,
-						api_key: form.api_key || null,
+						// Trimmed for the same reason save() trims it: whitespace
+						// makes a header the client cannot even serialise, and the
+						// probe behind this button would fail on it.
+						api_key: form.api_key?.trim() || null,
 						provider_id: editing,
 					})
-					// One unreachable catalogue must not lose the others.
-					.catch(() => []),
+					.then((models) => ({ models, error: '' }))
+					// One unreachable catalogue must not lose the others - but it
+					// must not vanish either. The reason travels alongside the
+					// empty list so the button can say which of the two happened.
+					.catch((err) => ({
+						models: [] as ModelInfo[],
+						error: err instanceof ApiError ? err.message : 'the request failed',
+					})),
 			),
 		)
 		const seen = new Set<string>()
 		// Hidden models are dropped here as well as in the list below, so one can
 		// never survive as a stored favourite either.
 		availableModels = catalogues
-			.flat()
+			.flatMap((c) => c.models)
 			.filter((m) => !seen.has(m.id) && seen.add(m.id) && !isHiddenModel(form.kind, m.id))
 		if (availableModels.length) {
 			const present = new Set(availableModels.map((m) => m.id))
 			form.favorite_models = form.favorite_models.filter((m) => present.has(m))
 		}
-	} catch {
+		modelsError = catalogMessage(
+			catalogues.map((c) => c.error).filter(Boolean),
+			availableModels.length,
+		)
+	} catch (err) {
+		// Nothing above throws any more, so this is a bug in this component
+		// rather than a provider's answer - say so instead of blaming the
+		// endpoint, exactly as testOne() does for a failed call to our own API.
 		availableModels = []
+		modelsError = err instanceof Error ? err.message : 'the model list could not be loaded'
 	} finally {
 		modelsLoading = false
 	}
+}
+
+/**
+ * What to say beside the Load models button, or '' when there is nothing to
+ * say. "The request failed" and "the vendor lists nothing" are different
+ * problems with different fixes, and rendering both as silence is what left an
+ * operator unable to tell a wrong port from a working endpoint with an empty
+ * catalogue. The vendor's own sentence rides along, the way the Test badge
+ * already carries it in its tooltip.
+ *
+ * A self-hosted row gets the base URL named as well: this wizard is the one
+ * place that address is typed, so it is where a typo should be caught.
+ */
+function catalogMessage(failures: string[], found: number): string {
+	if (!failures.length) return found ? '' : 'This provider returned no models.'
+	if (found) return `Some of this provider's model lists could not be read: ${failures[0]}`
+	const hint = form.base_url ? ' Check the base URL and that the service is running.' : ''
+	return `Could not read this provider's model list: ${failures[0]}${hint}`
 }
 
 function toggleFavorite(model: string) {
@@ -453,7 +494,15 @@ async function save() {
 			// Routing is an OpenRouter body extension - never store it on the
 			// seven STT kinds or on a plain OpenAI-compatible endpoint.
 			routing: form.kind === 'openrouter' ? form.routing : null,
-			api_key: form.api_key || null,
+			// Trimmed, so whitespace is the same as nothing typed - which is
+			// what every other signal on this form already says it is:
+			// hasUsableKey trims, so the "no key saved" warning stays up and
+			// Load models stays disabled. Sending it untrimmed saved three
+			// spaces as a real key, masked as "•••" in the table, reported as
+			// "keep current" on the way back in, and failed every request with
+			// `Illegal header value b'Bearer    '`. The server refuses it too
+			// now; this keeps the two ends telling the same story.
+			api_key: form.api_key?.trim() || null,
 		}
 		if (editing) await api.updateProvider(editing, body)
 		else await api.createProvider(body)
@@ -469,6 +518,7 @@ function openWizard() {
 	selectedKind = null
 	form = blank()
 	availableModels = []
+	modelsError = ''
 	modelFilter = ''
 	step = 1
 	wizardOpen = true
@@ -487,6 +537,11 @@ function pickProvider(meta: ProviderChoice) {
 	// per request instead, and capabilities.yaml carries the one default a
 	// connector still needs when nobody chose (the health probe).
 	form = { ...blank(), kind: meta.kind }
+	// Stepping back and picking a different vendor must not leave the previous
+	// one's list, or its complaint, sitting under the new one's button.
+	availableModels = []
+	modelsError = ''
+	modelFilter = ''
 	step = 3
 }
 
@@ -514,6 +569,7 @@ function edit(p: ProviderConfig) {
 		api_key: '',
 	}
 	availableModels = []
+	modelsError = ''
 	modelFilter = ''
 	step = 3
 	wizardOpen = true
@@ -927,6 +983,15 @@ onMount(load)
 							{modelsLoading ? 'Loading…' : 'Load models'}
 						</Button>
 					</div>
+					{#if modelsError}
+						<!-- Red when nothing loaded at all, amber when one catalogue of
+						     several could not be read: the first is a URL or a service to
+						     fix before this row is worth saving, the second is a caveat on
+						     a list that is otherwise usable. -->
+						<span class="text-xs {availableModels.length ? 'text-amber-500' : 'text-destructive'}">
+							{modelsError}
+						</span>
+					{/if}
 					{#if availableModels.length}
 						<Input placeholder="filter…" bind:value={modelFilter} />
 						<div class="max-h-45 overflow-auto rounded-md border p-1.5">
