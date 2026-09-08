@@ -928,6 +928,11 @@ export interface paths {
         /**
          * Enqueue Reprocess
          * @description Enqueue a post-session re-processing job.
+         *
+         *     503 for a diarizer that is not answering, because that is what it means:
+         *     the request is fine and the machine it needs is not there. It is also the
+         *     one refusal here that clears up by itself, so the message names the
+         *     endpoint and invites another press rather than describing a bad request.
          */
         post: operations["enqueue_reprocess_api_reprocess_post"];
         delete?: never;
