@@ -5,11 +5,10 @@
  * A merged session copies its oldest source's start, status, campaign and
  * primary provider, so on Started/Status/Primary/Campaign alone the merge and
  * the part it was built from are the same row twice and only opening both
- * tells them apart. Duration is what separates them without a new field: a
- * captured session ran from its start to its stop, while a merge is assembled
- * rather than recorded and has no end of its own. It is worth a column on its
- * own terms anyway - "which of these is the long one" is the question this
- * table gets asked most.
+ * tells them apart. Two things separate them here. `merged_from` names the
+ * parts, so the merge says outright what it is. Duration says which row is the
+ * long one, which is the question this table gets asked most and is worth a
+ * column whether or not anything was ever merged.
  */
 
 import { onMount } from 'svelte'
@@ -158,7 +157,19 @@ onMount(reload)
 						<TableCell>
 							<Checkbox bind:checked={selected[s.id]} aria-label="Select session" />
 						</TableCell>
-						<TableCell>{when(s.started_at)}</TableCell>
+						<TableCell>
+							<span class="flex flex-wrap items-center gap-2">
+								{when(s.started_at)}
+								{#if s.merged_from.length}
+									<Badge
+										variant="outline"
+										title="Assembled from {s.merged_from.length} sessions, which are still here in their own right."
+									>
+										merged
+									</Badge>
+								{/if}
+							</span>
+						</TableCell>
 						<!-- A dash, not a blank: "nothing to say" has to look deliberate
 						     next to the rows that do say something. -->
 						<TableCell class="text-muted-foreground">
