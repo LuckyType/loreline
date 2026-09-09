@@ -247,8 +247,22 @@ def curated_models(kind: ProviderKind, interaction: Interaction) -> list[str]:
     lists meant a model could be curated in one and withheld by the other, and
     which one won depended on the code path.
     """
+    return [m.id for m in curated_entries(kind, interaction)]
+
+
+def curated_entries(kind: ProviderKind, interaction: Interaction) -> list[ModelSpec]:
+    """The same offered models as :func:`curated_models`, entries and not ids.
+
+    For the callers that need more of the entry than its name: the generate
+    video dialog builds a catalogue row out of the model's ``label`` and its
+    whole ``video`` block, and a list of ids would send it back to the config
+    for the rest. Both functions read one list, so there is still exactly one
+    place where ``hidden`` is applied - a caller walking the provider's models
+    itself would have to remember to apply it, and that flag is the release
+    gate for a connector nobody has verified against the real API.
+    """
     spec = _provider(kind)
-    return [m.id for m in spec.models_for(interaction)] if spec else []
+    return list(spec.models_for(interaction)) if spec else []
 
 
 def _transcribe_annotations(kind: ProviderKind) -> list[ModelSpec | ModelPattern]:

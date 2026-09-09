@@ -702,8 +702,10 @@ Steps:
 
 ## F20 `GenerateVideoDialog.svelte`
 
-Provider list = video-capable rows (OpenRouter). Model list from the video
-catalogue, loaded when the dialog opens. The prompt is seeded from the summary
+Provider list = video-capable rows (OpenRouter, xAI). Model list from the video
+catalogue, loaded when the dialog opens, falling back to the models
+`capabilities.yaml` curates for the kind where the vendor publishes no
+catalogue (xAI) or cannot be read. The prompt is seeded from the summary
 on first open and never overwritten while open. Length, Resolution and Aspect
 ratio dropdowns appear only when the model offers those, and switching model
 drops any value the new model does not support. "Generate audio" appears only
@@ -717,9 +719,11 @@ Steps:
 3. Blank the prompt `[neg]`, confirm Generate is disabled.
 4. Switch models, confirm the parameter dropdowns change and that a value the
    new model does not offer is replaced by its first supported one.
-5. `[obs]` Confirm the model list shows "Loading models…" and then options, and
-   that a provider with a bad key shows
-   "No video models available - check the provider's API key."
+5. `[obs]` Confirm the model list shows "Loading models…" and then options, on
+   an xAI row as well as an OpenRouter one: xAI's single model comes from the
+   curated fallback, and it is what an empty picker used to blame on the key.
+   "No video models available - check the provider's API key." now needs a kind
+   that curates nothing, which neither video kind does.
 6. `[obs]` Confirm a deprecated video model shows the amber retirement note.
 7. Press Generate, confirm the dialog closes, a job row appears as "Generating…"
    and the list polls about every 5s.
