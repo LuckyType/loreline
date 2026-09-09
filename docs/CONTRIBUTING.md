@@ -88,6 +88,24 @@ does, so a release that skipped it would commit and tag perfectly cleanly and
 then fail every image build from that tag onwards. `uv lock --check` runs as a
 post-bump hook so that cannot happen quietly.
 
+Four, and there is no fifth. The number the running app reports about itself,
+`loreline.__version__`, is not written down anywhere: it is read out of the
+installed distribution's metadata, which the build backend fills from
+`pyproject.toml`, so bumping the file of record is what moves it. That is worth
+saying out loud, because it was a hardcoded constant in
+`src/loreline/__init__.py` until shortly after v0.2.0 was cut, the release
+tooling had no idea the constant existed, and the image shipped from that tag
+reported `v0.2.0` under Settings > Client while the header beside the app name
+still read `0.1.0`. Putting a literal back there is how that returns.
+
+`frontend/openapi.json` is not a fifth one either, and deliberately so. Its
+`info.version` describes the API the document specifies, not the build that
+serves it, so it is pinned to a constant in `src/loreline/web/app.py`
+(`OPENAPI_DOCUMENT_VERSION`) rather than tracking releases. Letting the release
+version in would mean every bump invalidated a committed generated file that
+pre-commit and CI both diff on every push. The comment on that constant has the
+full argument.
+
 ### What drives the bump
 
 `fix:` is a patch and `feat:` would ordinarily be a minor. Those two are also
@@ -175,6 +193,10 @@ pre-commit hook compares the committed document against the live one and,
 where `frontend/node_modules` is installed, the types against the document.
 CI does the same in halves: the backend job checks the document, the frontend
 job's `npm run check` checks the types. The fix for either is that one command.
+
+One thing in the document is not generated from the routes: `info.version` is a
+constant, not the release version, so a document reading `"version": "1"` under
+a 0.2.x build is current rather than stale. "Cutting a release" above says why.
 
 ## How a transcription request travels
 

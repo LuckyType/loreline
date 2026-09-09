@@ -56,6 +56,26 @@ module.exports = {
 		{ filename: 'uv.lock', updater: 'scripts/version-uv-lock.cjs' },
 	],
 
+	// Two files that look like they belong in the list above and deliberately
+	// do not, recorded here because both have been argued for once already.
+	//
+	// src/loreline/__init__.py used to hold `__version__` as a literal, and
+	// that is precisely what went wrong: nothing here bumped it, so the v0.2.0
+	// image reported `v0.2.0` under Settings > Client and `0.1.0` in the
+	// header. The fix was not to add a fifth entry. `__version__` now comes
+	// from the installed distribution's metadata, which the build backend
+	// fills from pyproject.toml, so the file at the top of this list is the
+	// only one that has to move. A copy that tooling keeps in step is still a
+	// copy, and the one that gets forgotten next time is the one nobody
+	// remembered to add.
+	//
+	// frontend/openapi.json carries an `info.version`, which is the version of
+	// the API the document describes rather than of the build that serves it.
+	// It is pinned to a constant in src/loreline/web/app.py for that reason.
+	// Bumping it here would put the release version back into a committed
+	// generated file that scripts/check-openapi.sh and CI diff on every push,
+	// which turns a forgotten `npm run gen:api` into a red build for everyone.
+
 	// Stated rather than left to the default, because this value is load
 	// bearing well outside this file. The deployed build reports
 	// `git describe --tags --always` in Settings > Client, so the tag's spelling

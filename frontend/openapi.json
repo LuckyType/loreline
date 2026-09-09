@@ -3,7 +3,7 @@
   "info": {
     "title": "Loreline",
     "summary": "Tabletop session transcriber - capture + STT orchestration.",
-    "version": "0.1.0"
+    "version": "1"
   },
   "paths": {
     "/api/system/livez": {

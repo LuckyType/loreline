@@ -61,6 +61,30 @@ from loreline.web.routes import (
 )
 from loreline.web.spa import SpaStaticFiles, spa_directory
 
+# The version the OpenAPI document declares about itself, and deliberately not
+# the application's version. It should almost never change.
+#
+# The two were the same string until `__version__` stopped being a literal.
+# Once it is read from the installed distribution it moves on every release,
+# and `info.version` is not free to move: frontend/openapi.json is committed,
+# and both the `openapi-current` pre-commit hook and CI diff it against a fresh
+# dump on every push (scripts/check-openapi.sh). Feeding the release version in
+# here would mean every `npm run release` silently invalidated a committed
+# generated file and left the next push red until somebody remembered to run
+# `npm run gen:api`. That is the same drift `__version__` was just cured of,
+# moved one file over, and with a worse failure mode: a red build for everyone
+# rather than a wrong number for one reader.
+#
+# Splitting them costs nothing, because the number was never describing the
+# build. OpenAPI's `info.version` is the version of the API that the document
+# describes, and the wire contract does not change because a fix shipped. What
+# the build is stays answerable at runtime, where it cannot go stale:
+# /api/system/healthz carries `__version__`, the web header renders it, and
+# Settings > Client shows the `git describe` baked into the image beside it.
+# Bump this when the wire contract breaks, which is a different event with a
+# different audience, and regenerate the document when you do.
+OPENAPI_DOCUMENT_VERSION = "1"
+
 
 @dataclass(slots=True)
 class AppState:
@@ -328,7 +352,7 @@ def create_app(
     # (see `session_cookie` in web/auth.py).
     app = FastAPI(
         title="Loreline",
-        version=__version__,
+        version=OPENAPI_DOCUMENT_VERSION,
         summary="Tabletop session transcriber - capture + STT orchestration.",
         lifespan=lifespan,
         swagger_ui_parameters={"withCredentials": True},
