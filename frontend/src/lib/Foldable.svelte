@@ -20,11 +20,15 @@
  * The row wraps, which is the whole phone story. The toggle asks for 10rem
  * before it will share a line, so once the actions no longer fit beside that
  * they drop to a line of their own rather than squeezing the title to an
- * ellipsis or pushing the last button off a 320px screen. Nothing then pushes
- * that second line to the right: what right-aligns the actions while they
- * share a line is the toggle growing into everything they leave, so once they
- * are on a line of their own they start where every other line on the phone
- * starts, at the left margin.
+ * ellipsis or pushing the last button off a 320px screen. They sit at the
+ * right edge whichever line they land on, because `ml-auto` on the actions
+ * eats the free space of *their* line rather than the row's: sharing the
+ * toggle's line there is none left to eat and the toggle has already pushed
+ * them right, and wrapped to a line of their own it is all theirs. So the
+ * controls are in the same place on a phone as on a desktop, under the right
+ * end of the header instead of restarting under the title, and `justify-end`
+ * says the same thing once more for the case where the actions are numerous
+ * enough to wrap within themselves.
  */
 
 import { ChevronDown } from '@lucide/svelte'
@@ -81,7 +85,7 @@ let {
 		{/if}
 	</button>
 	{#if actions}
-		<div class="flex flex-wrap items-center gap-2">
+		<div class="ml-auto flex flex-wrap items-center justify-end gap-2">
 			{@render actions()}
 		</div>
 	{/if}
