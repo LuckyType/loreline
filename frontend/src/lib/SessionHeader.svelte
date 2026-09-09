@@ -21,9 +21,24 @@
  * for: a session can hold several, so each entry names what made it apart from
  * the others. They come from the page rather than from a fetch of this card's
  * own, because the summary card is already polling that same list.
+ *
+ * The way back out leads the band rather than ending it, as an icon button in
+ * the corner every app puts one in - a text link with a literal arrow in it
+ * sat at the far right, which is where a phone user's thumb finds it but not
+ * where anybody's eye looks for it. It is still an `<a href>` wearing the
+ * button's classes, because it navigates: a `<button>` with a handler would
+ * cost the middle-click, the long-press and the "open in new tab" that a link
+ * gets for free.
+ *
+ * Below `sm` the date and duration drop to a line of their own. Four things
+ * cannot share a 320px row, and of the four it is the one nobody clicks and
+ * the one that reads perfectly well on a line by itself, so it is the one that
+ * gets sent down there. Export is pushed to the far end by the space between,
+ * which puts a control at each edge of the band and matches the sections
+ * below, whose own actions right-align the same way.
  */
 
-import { ChevronDown } from '@lucide/svelte'
+import { ArrowLeft, ChevronDown } from '@lucide/svelte'
 import { api } from '$lib/api'
 import { Badge } from '$lib/components/ui/badge'
 import { Button } from '$lib/components/ui/button'
@@ -102,80 +117,84 @@ function exportVideo(jobId: string) {
 const durationText = $derived(fmtDuration(session.started_at, session.ended_at))
 </script>
 
-<CardContent class="flex shrink-0 flex-wrap items-center justify-between gap-3">
-	<div class="flex flex-wrap items-center gap-3">
-		<h1 class="m-0 text-base font-semibold">Session</h1>
-		<Badge variant="outline">{session.status}</Badge>
-		<span class="text-muted-foreground">
-			{fmtWhen(session.started_at)}{durationText ? ` · ${durationText}` : ''}
-		</span>
-		<div class="relative">
-			<Button variant="outline" size="sm" onclick={() => (exportOpen = !exportOpen)}>
-				Export <ChevronDown class="size-4" />
-			</Button>
-			{#if exportOpen}
-				<button
-					class="fixed inset-0 z-20 cursor-default"
-					aria-label="Close export menu"
-					onclick={() => (exportOpen = false)}
-				></button>
-				<div
-					class="absolute top-full left-0 z-30 mt-1.5 flex w-56 flex-col rounded-lg border bg-popover p-1 shadow-lg"
-				>
-					<!-- Which transcript is about to be written, named before the
-					     formats rather than after the download. The audio entry below
-					     is deliberately outside this claim: there is one recording,
-					     and every version describes that same one. -->
-					<span class="px-3 py-1.5 text-xs text-muted-foreground">
-						Transcript <code>{versionLabel(version)}</code>
-					</span>
-					{#each formats as fmt (fmt)}
-						<button
-							class="rounded px-3 py-1.5 text-left hover:bg-accent"
-							onclick={() => exportAs(fmt)}
-						>
-							{formatLabels[fmt]}
-						</button>
-					{/each}
-					{#if hasAudio}
-						<button
-							class="mt-1 rounded border-t px-3 py-1.5 pt-2 text-left {audioEmpty
-								? 'cursor-not-allowed text-muted-foreground'
-								: 'hover:bg-accent'}"
-							disabled={audioEmpty}
-							title={audioEmpty ? EMPTY_AUDIO_NOTE : undefined}
-							onclick={() => {
-								exportOpen = false
-								window.location.href = api.audioUrl(sessionId)
-							}}
-						>
-							{audioEmpty ? 'Audio (empty)' : 'Audio (.wav)'}
-						</button>
-					{/if}
-					<!-- Numbered, oldest first, because the number is the only part
-					     guaranteed to differ; the muted line under it says which model
-					     and at what settings, truncated rather than wrapped so one long
-					     model id cannot stretch the menu. Like the audio entry, these
-					     are outside the "Transcript <version>" claim above: a video is
-					     made from the summary, not from a transcript. -->
-					{#each videos as job, i (job.id)}
-						<button
-							class={[
-								'flex w-full flex-col items-start rounded px-3 py-1.5 text-left hover:bg-accent',
-								// The group's own rule, drawn once above the first entry.
-								i === 0 && 'mt-1 border-t pt-2',
-							]}
-							onclick={() => exportVideo(job.id)}
-						>
-							<span>Video {i + 1} (.mp4)</span>
-							<span class="max-w-full truncate text-xs text-muted-foreground">
-								{videoDetail(job)}
-							</span>
-						</button>
-					{/each}
-				</div>
-			{/if}
-		</div>
+<CardContent class="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1">
+	<Button href="/sessions" variant="ghost" size="icon-sm" aria-label="Back" title="Back">
+		<ArrowLeft />
+	</Button>
+	<h1 class="m-0 text-base font-semibold">Session</h1>
+	<Badge variant="outline">{session.status}</Badge>
+	<!-- `basis-full` is what drops this under the title on a phone, and `order`
+	     is what keeps Export up on the line it left rather than stranded below
+	     a full-width line it cannot share. Both are `max-sm` only: there is
+	     room for all four on one row from `sm` up, in the order they read. -->
+	<span class="text-muted-foreground max-sm:order-1 max-sm:basis-full">
+		{fmtWhen(session.started_at)}{durationText ? ` · ${durationText}` : ''}
+	</span>
+	<div class="relative ml-auto">
+		<Button variant="outline" size="sm" onclick={() => (exportOpen = !exportOpen)}>
+			Export <ChevronDown class="size-4" />
+		</Button>
+		{#if exportOpen}
+			<button
+				class="fixed inset-0 z-20 cursor-default"
+				aria-label="Close export menu"
+				onclick={() => (exportOpen = false)}
+			></button>
+			<div
+				class="absolute top-full left-0 z-30 mt-1.5 flex w-56 flex-col rounded-lg border bg-popover p-1 shadow-lg"
+			>
+				<!-- Which transcript is about to be written, named before the
+				     formats rather than after the download. The audio entry below
+				     is deliberately outside this claim: there is one recording,
+				     and every version describes that same one. -->
+				<span class="px-3 py-1.5 text-xs text-muted-foreground">
+					Transcript <code>{versionLabel(version)}</code>
+				</span>
+				{#each formats as fmt (fmt)}
+					<button
+						class="rounded px-3 py-1.5 text-left hover:bg-accent"
+						onclick={() => exportAs(fmt)}
+					>
+						{formatLabels[fmt]}
+					</button>
+				{/each}
+				{#if hasAudio}
+					<button
+						class="mt-1 rounded border-t px-3 py-1.5 pt-2 text-left {audioEmpty
+							? 'cursor-not-allowed text-muted-foreground'
+							: 'hover:bg-accent'}"
+						disabled={audioEmpty}
+						title={audioEmpty ? EMPTY_AUDIO_NOTE : undefined}
+						onclick={() => {
+							exportOpen = false
+							window.location.href = api.audioUrl(sessionId)
+						}}
+					>
+						{audioEmpty ? 'Audio (empty)' : 'Audio (.wav)'}
+					</button>
+				{/if}
+				<!-- Numbered, oldest first, because the number is the only part
+				     guaranteed to differ; the muted line under it says which model
+				     and at what settings, truncated rather than wrapped so one long
+				     model id cannot stretch the menu. Like the audio entry, these
+				     are outside the "Transcript <version>" claim above: a video is
+				     made from the summary, not from a transcript. -->
+				{#each videos as job, i (job.id)}
+					<button
+						class={[
+							'flex w-full flex-col items-start rounded px-3 py-1.5 text-left hover:bg-accent',
+							// The group's own rule, drawn once above the first entry.
+							i === 0 && 'mt-1 border-t pt-2',
+						]}
+						onclick={() => exportVideo(job.id)}
+					>
+						<span>Video {i + 1} (.mp4)</span>
+						<span class="max-w-full truncate text-xs text-muted-foreground">
+							{videoDetail(job)}
+						</span>
+					</button>
+				{/each}
+			</div>
+		{/if}
 	</div>
-	<a class="text-primary text-sm hover:underline" href="/sessions">← Back</a>
 </CardContent>
