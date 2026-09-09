@@ -170,6 +170,8 @@ class Updater:
         in_container: bool | None = None,
         updater_url: str = "",
         updater_token: str = "",
+        build_commit: str = "",
+        build_described: str = "",
         client: httpx.AsyncClient | None = None,
     ) -> None:
         self._app_dir = app_dir
@@ -179,12 +181,61 @@ class Updater:
         self._in_container = in_container if in_container is not None else _DOCKER_MARKER.exists()
         self._updater_url = updater_url.rstrip("/")
         self._updater_token = updater_token
+        self._build_commit = build_commit
+        self._build_described = build_described
         self._client = client
 
     async def current_revision(self) -> str | None:
-        """Return the current git HEAD commit, or None if unavailable."""
-        result = await self._run(["git", "rev-parse", "HEAD"], cwd=str(self._app_dir))
-        return result.stdout.strip() if result.ok else None
+        """The full commit SHA this deployment is running, or None if unknown.
+
+        Which source is authoritative depends on where this is running, and the
+        two cases are opposites rather than a preference:
+
+        In a container git cannot answer at all. The image copies the source in
+        without a .git directory (see .dockerignore), so ``git rev-parse`` fails
+        every single time, and the value baked in at build time is the only
+        truth there is. Shelling out here would be a subprocess spent to be told
+        nothing, on a path the UI hits on every visit to Settings > Client, so a
+        container does not try - it reads what the Dockerfile put in the
+        environment and stops.
+
+        Outside one there is a real checkout and it is the live truth: it moves
+        with every ``git pull`` this box does, while a baked value would be
+        frozen at whenever the package was built. So git goes first, and the
+        baked value is only the fallback for the cases where it still fails -
+        git not installed, or a checkout this process cannot read.
+        """
+        return await self._revision(["git", "rev-parse", "HEAD"], self._build_commit)
+
+    async def current_described(self) -> str | None:
+        """``git describe --tags --always`` for this deployment, or None.
+
+        The same precedence as ``current_revision``, and for the same reasons;
+        this is the half meant for a human to read. One string carries the last
+        reachable tag, how far past it this is, and the short SHA
+        (``v0.2.0-93-ge57029c``), and it degrades to a bare short SHA where no
+        tag is reachable - which is the normal case on the shallow clone
+        deploy/install.sh makes, and still names the build exactly.
+
+        Kept separate from ``current_revision`` rather than replacing it: the
+        SHA is an identifier that ``UpdateResult.previous_commit``/``new_commit``
+        and ``/api/system/rollback`` all mean literally, and a described string
+        is not one of those.
+        """
+        return await self._revision(
+            ["git", "describe", "--tags", "--always"], self._build_described
+        )
+
+    async def _revision(self, argv: list[str], baked: str) -> str | None:
+        """Answer one revision question, git-first or baked-only; see current_revision."""
+        if self._in_container:
+            return baked or None
+        result = await self._run(argv, cwd=str(self._app_dir))
+        # An empty stdout counts as a failure too: `ok` only reports the exit
+        # status, and a value of "" would replace a perfectly good baked
+        # fallback with nothing.
+        found = result.stdout.strip() if result.ok else ""
+        return found or baked or None
 
     async def _message_result(self, message: str, *, ok: bool = False) -> UpdateResult:
         """Report ``message`` against the current revision, having changed nothing."""

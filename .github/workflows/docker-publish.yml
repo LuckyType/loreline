@@ -45,7 +45,24 @@ jobs:
       # there is no secret to create, store or rotate for any of this.
       packages: write
     steps:
+      # fetch-depth: 0, because `git describe --tags` below needs both the tags
+      # and enough history to reach one. The default checkout is shallow
+      # (depth 1, no tags), where describe has nothing to describe against and
+      # the whole point of the step is lost. It costs a fuller clone of a repo
+      # whose history is measured in tens of megabytes, against a build that is
+      # measured in tens of minutes, so this is not a trade worth agonising
+      # over.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # The revision this image will report in Settings > Client. `--always`
+      # matters: it degrades to a bare short SHA rather than failing when no
+      # tag is reachable, which is this repo's situation until someone cuts the
+      # first `v*` tag. The commit itself comes from github.sha below rather
+      # than from git, since Actions already knows it exactly.
+      - id: revision
+        run: echo "described=$(git describe --tags --always)" >>"$GITHUB_OUTPUT"
 
       # binfmt handlers, so the runner can execute arm64 binaries at all.
       # (ci.yml's arm64-smoke job still pins this action at v3. Bumping it is
@@ -94,6 +111,12 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # Baked into the image, because a container cannot ask git what it is
+          # running. Declared last in the Dockerfile precisely so that these
+          # changing on every push does not invalidate the cache below.
+          build-args: |
+            LORELINE_BUILD_COMMIT=${{ github.sha }}
+            LORELINE_BUILD_DESCRIBED=${{ steps.revision.outputs.described }}
           # Layer cache, so a push that only changed application code does not
           # reinstall and byte-compile torch under emulation all over again.
           # Caveat worth knowing rather than discovering: the Actions cache is

@@ -109,7 +109,7 @@
           "system"
         ],
         "summary": "Revision",
-        "description": "Return the currently deployed git commit.",
+        "description": "Return the deployed commit, and `git describe`'s name for it.\n\nBoth, rather than one: the SHA is what /rollback takes and what the update\nresult reports, while the described string is the only one of the two worth\nreading off a screen. Either can be null where this deployment cannot know\nit - a Docker image built without the revision baked in - and the UI is\nwritten to show a dash for that instead of a wrong answer.",
         "operationId": "revision_api_system_revision_get",
         "responses": {
           "200": {
@@ -4234,11 +4234,22 @@
               }
             ],
             "title": "Commit"
+          },
+          "described": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Described"
           }
         },
         "type": "object",
         "title": "RevisionResponse",
-        "description": "Current deployed git revision."
+        "description": "Current deployed revision: the commit, and the name git gives it."
       },
       "RollbackRequest": {
         "properties": {

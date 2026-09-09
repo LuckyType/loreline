@@ -446,8 +446,30 @@ PROFILES=()
 [[ $ENABLE_STT == yes ]] && PROFILES+=(--profile local-stt)
 [[ $ENABLE_DIAR == yes ]] && PROFILES+=(--profile diarization)
 
+# The revision the built image will report in Settings > Client. It has to be
+# handed in at build time because git cannot be asked from inside the container
+# (the image has no .git - see the Dockerfile), and this is the last moment
+# anything knows it.
+#
+# Both are best-effort. A checkout is not guaranteed here - somebody may have
+# unpacked a tarball - and an empty value is read as "unknown" and shown as a
+# dash, which is the honest answer, so `|| true` rather than `die`.
+#
+# `git describe --tags` will usually find no tag on this box and fall back to
+# the short SHA, which `--always` is there to guarantee: the clone above is
+# --depth 1, so no tag is reachable from HEAD. That is expected, not a fault,
+# and a short SHA still names the build exactly. `git fetch --unshallow --tags`
+# in ${APP_DIR} and a rebuild is what turns it into a tag name.
+BUILD_COMMIT="$(git -C "$APP_DIR" rev-parse HEAD 2>/dev/null || true)"
+BUILD_DESCRIBED="$(git -C "$APP_DIR" describe --tags --always 2>/dev/null || true)"
+
 msg_info "Building and starting the stack (first build takes a few minutes)"
-as_root docker compose "${PROFILES[@]}" up -d --build
+# Passed through `env` rather than exported, because as_root is `sudo` on a
+# non-root box and sudo does not carry the caller's environment across by
+# default - an export here would arrive at Compose unset, and the build args in
+# docker-compose.yml would quietly take their empty defaults.
+as_root env "LORELINE_BUILD_COMMIT=${BUILD_COMMIT}" "LORELINE_BUILD_DESCRIBED=${BUILD_DESCRIBED}" \
+  docker compose "${PROFILES[@]}" up -d --build
 msg_ok "Stack is up"
 
 # Create (but don't start) any optional service not selected above, so

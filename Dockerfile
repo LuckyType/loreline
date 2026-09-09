@@ -67,6 +67,27 @@ RUN uv sync --frozen --no-dev --extra audio --extra providers
 # "/" when frontend/build/index.html exists (see loreline.web.spa).
 COPY --from=frontend-builder /app/frontend/build ./frontend/build
 
+# The revision this image was built from, and deliberately the last thing in
+# the file. Everything above is cached on content that changes rarely; these
+# change on every single commit, and a cache miss here is not cheap - this
+# image installs torch, torchaudio and onnxruntime and byte-compiles all of it
+# (UV_COMPILE_BYTECODE above), and CI builds the arm64 half under QEMU
+# emulation, so busting anything earlier costs tens of minutes per push. A
+# build arg only invalidates from the first instruction that *uses* it, so
+# declared here they cost the metadata layers below and nothing else.
+#
+# Baked because git cannot answer from inside: .dockerignore excludes .git, so
+# `git rev-parse` in this container fails every time (see
+# loreline.updater.Updater.current_revision, which therefore does not run it
+# here at all). Filled by .github/workflows/docker-publish.yml, and by
+# deploy/install.sh and deploy/update.sh via docker-compose.yml's `args:`.
+# Empty is a valid value, and is what a plain `docker build` with no
+# --build-arg gets: the UI reads it as an unknown revision and shows a dash.
+ARG LORELINE_BUILD_COMMIT=""
+ARG LORELINE_BUILD_DESCRIBED=""
+ENV LORELINE_BUILD_COMMIT=${LORELINE_BUILD_COMMIT} \
+    LORELINE_BUILD_DESCRIBED=${LORELINE_BUILD_DESCRIBED}
+
 EXPOSE 8000
 ENV LORELINE_HOST=0.0.0.0
 CMD ["uv", "run", "loreline", "run"]
