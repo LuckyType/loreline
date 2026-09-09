@@ -33,7 +33,7 @@ from loreline.persistence import (
     TranscriptRepository,
     VideoRepository,
 )
-from loreline.reprocess import ReprocessManager
+from loreline.reprocess import DiarizerProbe, ReprocessManager
 from loreline.secrets import SecretStore
 from loreline.services import ServiceManager
 from loreline.session import SessionManager
@@ -99,6 +99,7 @@ def _build_state(
     capture_factory: CaptureFactory | None,
     backend_factory: BackendFactory | None,
     diarizer_factory: BuildDiarizer | None,
+    diarizer_probe: DiarizerProbe | None,
     command_runner: CommandRunner | None,
     alert_client_factory: ClientFactory | None,
     video_client_factory: VideoClientFactory | None,
@@ -156,6 +157,7 @@ def _build_state(
         transcript_bus=transcript_bus,
         backend_factory=backend_factory,
         diarizer_factory=diarizers,
+        diarizer_probe=diarizer_probe,
     )
     video_manager = VideoManager(
         providers=provider_repo,
@@ -228,6 +230,7 @@ def create_app(
     capture_factory: CaptureFactory | None = None,
     backend_factory: BackendFactory | None = None,
     diarizer_factory: BuildDiarizer | None = None,
+    diarizer_probe: DiarizerProbe | None = None,
     command_runner: CommandRunner | None = None,
     alert_client_factory: ClientFactory | None = None,
     video_client_factory: VideoClientFactory | None = None,
@@ -235,7 +238,11 @@ def create_app(
     """Create and configure the Loreline FastAPI app.
 
     The ``*_factory`` overrides let tests run the session pipeline without audio
-    hardware or live STT endpoints.
+    hardware or live STT endpoints. ``diarizer_probe`` is there for the same
+    reason and for one caller: enqueueing a diarize job first asks whether its
+    diarizer answers (see ``ReprocessManager.enqueue``), and a test that
+    substitutes a diarizer has no service at that endpoint for a real probe to
+    reach.
     """
     settings = settings or get_settings()
     broadcaster = LogBroadcaster()
@@ -257,6 +264,7 @@ def create_app(
             capture_factory=capture_factory,
             backend_factory=backend_factory,
             diarizer_factory=diarizer_factory,
+            diarizer_probe=diarizer_probe,
             command_runner=command_runner,
             alert_client_factory=alert_client_factory,
             video_client_factory=video_client_factory,

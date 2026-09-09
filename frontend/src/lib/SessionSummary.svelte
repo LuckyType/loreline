@@ -6,6 +6,17 @@
  * triggers live here and both are disabled with the reason when the thing they
  * need is missing: an LLM provider, or a summary to work from.
  *
+ * A session has one summary but several transcripts, so the meta line says
+ * which version this one was read from alongside the provider and model that
+ * wrote it - and the dialog behind the button says which version the next one
+ * would read, before it is written. Summaries stored before that was recorded
+ * say so rather than guessing at 'original'.
+ *
+ * The recap itself is markdown: every current chat model answers "write a
+ * summary" with headings and bullets, and the built-in prompt does not ask it
+ * not to, so this renders it (see Markdown.svelte) instead of showing the
+ * reader the literal `##`.
+ *
  * Open, the section takes an equal share of the card's leftover height and
  * scrolls inside it, so a long recap and a stack of generated videos push
  * neither the transcript nor the player off the screen.
@@ -19,7 +30,8 @@ import { CardContent } from '$lib/components/ui/card'
 import { confirm } from '$lib/confirm.svelte'
 import Foldable from '$lib/Foldable.svelte'
 import GenerateVideoDialog from '$lib/GenerateVideoDialog.svelte'
-import { providerName } from '$lib/stores'
+import Markdown from '$lib/Markdown.svelte'
+import { providerName, versionLabel } from '$lib/stores'
 import SummarizeDialog from '$lib/SummarizeDialog.svelte'
 import { cn } from '$lib/utils'
 import type { Session, VideoJob } from '$lib/wire'
@@ -28,6 +40,7 @@ let {
 	sessionId,
 	session,
 	speakers,
+	version,
 	open = $bindable(true),
 	onsummarized,
 	onerror,
@@ -36,6 +49,9 @@ let {
 	session: Session
 	/** The distinct speaker labels in the shown transcript. */
 	speakers: string[]
+	/** The transcript version the page is showing: what a new summary would be
+	 *  read from, which is not necessarily what the stored one was. */
+	version: string
 	/** Fold state, kept by the page across visits. */
 	open?: boolean
 	/** A summary was stored: the caller refetches the session. */
@@ -46,6 +62,19 @@ let {
 
 const llmProviders = $derived(actionSetup.providersFor('summarize'))
 let summarizeOpen = $state(false)
+
+/** The fold header's one line about the stored summary: who wrote it, with
+ *  what, and from which transcript. A summary written before the version was
+ *  recorded says exactly that - claiming 'original' would be a guess, and on a
+ *  session with five versions it is the guess most likely to be wrong. */
+const summaryMeta = $derived.by(() => {
+	if (!session.summary || !session.summary_model) return ''
+	const provider = providerName(session.summary_provider, actionSetup.providers)
+	const from = session.summary_version
+		? `from ${versionLabel(session.summary_version)}`
+		: 'version not recorded'
+	return `${provider} · ${session.summary_model} · ${from}`
+})
 
 async function openSummarize() {
 	if (
@@ -101,14 +130,12 @@ onMount(async () => {
 <CardContent class={cn('flex flex-col gap-2', open ? 'min-h-0 flex-1' : 'shrink-0')}>
 	<Foldable
 		title="Summary"
-		meta={session.summary && session.summary_model
-			? `${providerName(session.summary_provider, actionSetup.providers)} · ${session.summary_model}`
-			: ''}
+		meta={summaryMeta}
 		bind:open
 		bodyClass="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto"
 	>
 		{#if session.summary}
-			<p class="m-0 leading-relaxed whitespace-pre-wrap">{session.summary}</p>
+			<Markdown source={session.summary} />
 		{:else if llmProviders.length === 0}
 			<p class="m-0 text-muted-foreground">
 				Add an LLM provider (OpenAI-compatible chat) in Settings to enable summaries.
@@ -185,4 +212,4 @@ onMount(async () => {
 	onqueued={refreshVideoJobs}
 />
 
-<SummarizeDialog bind:open={summarizeOpen} {sessionId} {speakers} {onsummarized} />
+<SummarizeDialog bind:open={summarizeOpen} {sessionId} {speakers} {version} {onsummarized} />

@@ -73,6 +73,63 @@ realtime_name_markers:
   - live
   - realtime
 
+# The mirror image of transcribe_name_markers, per interaction: names that mark
+# a model as built for some *other* job. Needed because the marker list above
+# cannot simply be turned around - there is no name that says "chat model",
+# vendors call them anything - so the only honest narrowing a summary or video
+# picker can apply is a negative one.
+#
+# Without it the "only show compatible models" switch did nothing whatsoever for
+# summaries: an OpenAI row offered tts-1, gpt-image-2, text-embedding-3-small,
+# omni-moderation-latest and sora-2 as models to write a session summary with,
+# and one of them could be picked and saved as the summary default, failing only
+# when a summary was finally run.
+#
+# Read only for a model with no entry of its own (an entry wins, in both
+# directions), applied only to the mixed catalogues that publish no capability
+# data at all, and never allowed to empty a picker - the same three rules the
+# positive list follows. Kept to families whose name says what the model is
+# *for*, and deliberately narrower than the list above: a match there only
+# offers a model, a match here withholds one. That is why "nova" and "voxtral"
+# are absent (vendor brand names, and Voxtral is an audio-input chat model that
+# does summarize) and why the image families are spelled out rather than matched
+# on the bare word "image", which would swallow an image-to-video model.
+incompatible_name_markers:
+  # Speech, image, embedding, moderation, ranking and video: none of them
+  # writes a summary.
+  summarize:
+    - whisper
+    - transcribe
+    - parakeet
+    - asr
+    - stt
+    - chirp
+    - tts
+    - dall-e
+    - gpt-image
+    - embed
+    - moderation
+    - rerank
+    - sora
+  # The same families minus the video one, which is the job being picked for.
+  # A chat model cannot be ruled out by name, so it stays offered here; nothing
+  # is lost by that today, because no OpenAI-shaped kind declares the video
+  # interaction at all, and this is what the filter would apply the day one
+  # does rather than a rule running now.
+  video:
+    - whisper
+    - transcribe
+    - parakeet
+    - asr
+    - stt
+    - chirp
+    - tts
+    - dall-e
+    - gpt-image
+    - embed
+    - moderation
+    - rerank
+
 providers:
   deepgram:
     label: Deepgram

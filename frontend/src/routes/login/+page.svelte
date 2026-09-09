@@ -1,6 +1,8 @@
 <script lang="ts">
 import { goto } from '$app/navigation'
+import { page } from '$app/state'
 import { api, ApiError } from '$lib/api'
+import { sanitizeNext } from '$lib/loginRedirect'
 import { authed } from '$lib/stores'
 import { Button } from '$lib/components/ui/button'
 import { Input } from '$lib/components/ui/input'
@@ -11,6 +13,13 @@ let password = $state('')
 let error = $state('')
 let busy = $state(false)
 
+// Where the visitor was heading when the session ran out, put there by
+// whichever of the two bouncers sent them here (the 401 handler in api.ts, or
+// the layout's health poll). Sanitized on the way in as well as on the way
+// out: the value arrives from the address bar, so it is never trusted, and
+// anything that is not a plain same-origin path becomes the Dashboard.
+const next = $derived(sanitizeNext(page.url.searchParams.get('next')))
+
 async function submit(e: Event) {
 	e.preventDefault()
 	busy = true
@@ -18,7 +27,7 @@ async function submit(e: Event) {
 	try {
 		await api.login(password)
 		authed.set(true)
-		goto('/')
+		goto(next)
 	} catch (err) {
 		error = err instanceof ApiError ? err.message : 'login failed'
 	} finally {

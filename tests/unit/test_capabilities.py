@@ -411,11 +411,91 @@ class TestModelFiltering:
         )
         assert [m.id for m in kept] == [m.id for m in listed]
 
-    def test_summarize_and_video_are_never_name_filtered(self) -> None:
+    def test_a_modality_scoped_list_passes_through_for_every_interaction(self) -> None:
+        """OpenRouter's summarize and video lists come from their own endpoints,
+        so they are already correct and nothing here may touch them."""
         listed = _models("anthropic/claude-sonnet-4.5", "openai/gpt-4o")
         for interaction in (Interaction.SUMMARIZE, Interaction.VIDEO):
             kept = filter_models(listed, kind=ProviderKind.OPENROUTER, interaction=interaction)
             assert [m.id for m in kept] == [m.id for m in listed]
+
+    def test_openai_summary_picker_drops_the_models_that_cannot_write_one(self) -> None:
+        """The switch used to narrow transcription pickers only.
+
+        Verified in the live UI with "only show compatible models" on: the
+        transcription picker went from 131 models to the 9 that transcribe,
+        while the summary picker still listed all 131 - tts-1, gpt-image-2 and
+        text-embedding-3-small among them, any of which could be picked and
+        saved as the summary default, to fail only when a summary was run.
+        """
+        listed = _models(
+            "gpt-5.6-luna",
+            "tts-1",
+            "tts-1-hd",
+            "gpt-image-2",
+            "text-embedding-3-small",
+            "omni-moderation-latest",
+            "sora-2",
+            "whisper-1",
+        )
+        kept = filter_models(listed, kind=ProviderKind.OPENAI, interaction=Interaction.SUMMARIZE)
+        assert [m.id for m in kept] == ["gpt-5.6-luna"]
+
+    def test_an_unannotated_model_still_reaches_the_summary_picker(self) -> None:
+        """The fail-soft half, and the half that matters most: the negative test
+        may only remove what this file says is something else. A model released
+        after the last edit to capabilities.yaml is unknown, and unknown is
+        offered - hiding one the operator needs is the worse failure."""
+        listed = _models("gpt-5.7-something", "acme/experimental-chat", "tts-1")
+        kept = filter_models(listed, kind=ProviderKind.OPENAI, interaction=Interaction.SUMMARIZE)
+        assert [m.id for m in kept] == ["gpt-5.7-something", "acme/experimental-chat"]
+
+    def test_a_curated_transcription_model_is_not_offered_to_summarize_with(self) -> None:
+        """An exact entry is believed in both directions: gpt-transcribe says
+        ``interactions: [transcribe]``, which is a statement that it cannot
+        write a summary, and no name marker is needed to read it."""
+        listed = _models("gpt-transcribe", "gpt-4o-transcribe-diarize", "gpt-5.5")
+        kept = filter_models(listed, kind=ProviderKind.OPENAI, interaction=Interaction.SUMMARIZE)
+        assert [m.id for m in kept] == ["gpt-5.5"]
+
+    def test_a_self_hosted_catch_all_does_not_switch_the_name_check_off(self) -> None:
+        """The self-hosted kind annotates every model through one ``*`` glob
+        claiming transcribe and summarize, which is a permissive default for a
+        server nobody has seen rather than a fact about any model on it. Reading
+        it as one would have let a Speaches box's TTS voices go on being offered
+        as models to write a summary with."""
+        listed = _models("llama3", "Systran/faster-whisper-large-v3", "speaches-ai/piper-tts-en")
+        kept = filter_models(
+            listed, kind=ProviderKind.OPENAI_COMPAT, interaction=Interaction.SUMMARIZE
+        )
+        assert [m.id for m in kept] == ["llama3"]
+
+    def test_a_summary_filter_that_would_empty_the_list_is_discarded_too(self) -> None:
+        """The same last-resort rule the transcription path has: an endpoint
+        whose whole catalogue looks wrong is far more likely to be named in a
+        way nobody here anticipated than to be genuinely unusable."""
+        listed = _models("nova-tts", "chirp-tts")
+        kept = filter_models(listed, kind=ProviderKind.OPENAI, interaction=Interaction.SUMMARIZE)
+        assert [m.id for m in kept] == ["nova-tts", "chirp-tts"]
+
+    def test_turning_the_switch_off_restores_every_summarize_model(self) -> None:
+        listed = _models("gpt-5.6-luna", "tts-1", "text-embedding-3-small")
+        kept = filter_models(
+            listed,
+            kind=ProviderKind.OPENAI,
+            interaction=Interaction.SUMMARIZE,
+            strict=False,
+        )
+        assert [m.id for m in kept] == [m.id for m in listed]
+
+    def test_a_video_picker_drops_what_the_data_says_is_not_video(self) -> None:
+        """No OpenAI-shaped kind declares the video interaction today, so this
+        pins the rule rather than a live picker: the same two sources answer,
+        and a model curated for another interaction is ruled out by its entry
+        while the speech and image families are ruled out by name."""
+        listed = _models("gpt-5.6-luna", "whisper-1", "dall-e-3", "sora-2", "acme/unknown-1")
+        kept = filter_models(listed, kind=ProviderKind.OPENAI, interaction=Interaction.VIDEO)
+        assert [m.id for m in kept] == ["sora-2", "acme/unknown-1"]
 
 
 class TestStrictToggle:

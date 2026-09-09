@@ -13,6 +13,12 @@ offline speaker diarization behind the HTTP contract expected by Loreline's
 - ``DELETE /sessions/{session_id}`` -> ``{"deleted": bool}``, forgetting one
   session's remembered speakers
 
+One diarization runs at a time (see :class:`DiarizeSlot`): a second one waits,
+and is answered ``429`` with a ``Retry-After`` if the wait would be long. The
+service is CPU bound with one set of ONNX sessions, so that costs nothing in
+throughput and is what keeps ``/healthz`` answering while a long recording is
+being worked on.
+
 Two fields in those answers exist for the caller rather than for a human:
 ``session_memory`` says this build understands ``session_id`` at all, since an
 older image accepts the field and ignores it and so reads as a perfectly
@@ -34,6 +40,7 @@ absent (e.g. lint/typecheck in the main project CI).
 
 from __future__ import annotations
 
+import contextlib
 import io
 import math
 import os
@@ -41,7 +48,7 @@ import secrets
 import threading
 import time
 import wave
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from typing import cast
 
@@ -422,6 +429,80 @@ class SessionBanks:
 _LOAD_RETRY_S = 60.0
 
 
+# How long a caller waits for the one diarization slot before being turned
+# away. Long enough that the live path queues rather than fails - it sends one
+# turn at a time, a few seconds of audio each, and several can close together -
+# and far shorter than a whole-session re-processing run, so a caller that
+# arrives behind one of those is told to come back instead of spending its own
+# (much longer, see ``loreline.diarization.remote``) timeout sitting in a line
+# it cannot see the front of.
+_QUEUE_WAIT_S = 30.0
+# What a refused caller is told to come back after, in the Retry-After header.
+# The same order as the wait it just spent, because what it is waiting for is
+# the diarization that was already running when it arrived.
+_RETRY_AFTER_S = 30
+
+
+class DiarizeSlot:
+    """One heavy diarization at a time, with a bounded queue in front of it.
+
+    Deliberate rather than incidental, which is the whole point of this class
+    existing. The service used to serialize by accident: the model ran on the
+    request thread, so a second call simply waited, and so did ``/healthz``,
+    and so did everything else. A 2 s health probe against a service busy with
+    a 37-minute session therefore reported it *unreachable*, the app's badge
+    went red, and each further press queued more work behind the pile - a
+    measured incident, not a hypothetical (see ``docs/testing``). What was
+    wanted from that accident is only the serialization: this is a CPU service
+    with one set of ONNX sessions, so two inferences at once take twice as long
+    each and finish no sooner, while everything else it serves is cheap and has
+    no business waiting behind either of them.
+
+    So: a semaphore of one around the model, and nothing else. ``/healthz``
+    does not take it, which is what lets it answer in milliseconds while a
+    session is being diarized.
+
+    Queue *and* refuse, rather than one or the other. A caller that would be
+    served within :data:`_QUEUE_WAIT_S` waits, because the live path sends one
+    short turn per call and several turns can close at once, and refusing those
+    would drop speaker labels for no reason. A caller that would wait longer is
+    refused with 429 and a ``Retry-After``, because the alternative is a
+    growing queue of requests whose callers have already timed out and gone
+    away, each of which the service would still faithfully compute in full.
+
+    What this cannot do is stop work that has already started. The inference is
+    a native call on a worker thread with no cancellation point in it, so a
+    caller that gives up leaves its diarization running to completion. Bounding
+    who may start one is the containment that is actually available.
+
+    A waiting caller does occupy one of Starlette's threadpool threads, which
+    is why the wait is bounded and not merely long: the queue drains on its own
+    within :data:`_QUEUE_WAIT_S` of the arrivals stopping, rather than growing
+    for as long as somebody keeps pressing.
+    """
+
+    def __init__(self, *, wait_s: float | None = None) -> None:
+        self._semaphore = threading.BoundedSemaphore(1)
+        self._wait_s = _QUEUE_WAIT_S if wait_s is None else wait_s
+
+    @contextlib.contextmanager
+    def hold(self) -> Iterator[None]:
+        """Hold the slot for the block, or raise 429 having waited for it."""
+        if not self._semaphore.acquire(timeout=self._wait_s):
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    "another diarization is already running on this service, and this "
+                    f"request waited {self._wait_s:.0f}s for it - retry once it finishes"
+                ),
+                headers={"Retry-After": str(_RETRY_AFTER_S)},
+            )
+        try:
+            yield
+        finally:
+            self._semaphore.release()
+
+
 class ModelCache:
     """The models this process has loaded, and the ones it has failed to load.
 
@@ -523,14 +604,27 @@ def _resolve_num_clusters(min_speakers: int | None, max_speakers: int | None) ->
     return -1
 
 
-def _read_wav(data: bytes) -> tuple[list[float], int]:
+def _read_wav(data: bytes):
+    """Decode a mono 16-bit WAV into the float32 buffer the models take.
+
+    The numpy array itself, never a Python list of samples, and that one word
+    is a real bug that was here: ``.tolist()`` on a 37-minute session builds 35
+    million Python floats, which costs over a gigabyte of objects and tens of
+    seconds inside a single GIL-holding loop - during which this process
+    answers nothing at all, ``/healthz`` included, before a frame of audio has
+    reached a model. The caller turned the list straight back into an array,
+    so the whole detour bought nothing but the stall.
+
+    Unannotated on purpose, like ``_load_pipeline``: numpy is imported inside
+    the function so this module still imports where the native wheels are
+    absent, which is how the main project's lint and typecheck run it.
+    """
     with wave.open(io.BytesIO(data), "rb") as wav:
         rate = wav.getframerate()
         frames = wav.readframes(wav.getnframes())
     import numpy as np  # noqa: PLC0415
 
-    samples = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
-    return samples.tolist(), rate
+    return np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0, rate
 
 
 def _embed(extractor, audio, rate: int, start: float, end: float) -> list[float] | None:
@@ -615,6 +709,9 @@ def create_app() -> FastAPI:
     app = FastAPI(title="loreline-diarization")
     models = ModelCache()
     banks = SessionBanks()
+    # Per app rather than per process, so a test building two services gets two
+    # of these; a deployment runs one app in one container either way.
+    slot = DiarizeSlot()
 
     def _ensure_pipeline(num_clusters: int) -> tuple[object, object]:
         """Return the cached pipeline for ``num_clusters``, loading it once.
@@ -638,6 +735,12 @@ def create_app() -> FastAPI:
         # file IO plus ONNX init), which is exactly the synchronous, possibly
         # slow work the comment on `/diarize` below already offloads to the
         # threadpool rather than run on the event loop.
+        #
+        # It deliberately does not take the diarization slot, which is the
+        # point of there being one: this is what the app polls to decide
+        # whether the diarizer is there at all, and a probe that queued behind
+        # a session being diarized would report the service down for as long as
+        # the service was busiest - which is exactly what it used to do.
         #
         # The extractor is loaded here as well as the pipeline, and it is a
         # second, separate model load reached only by a call that carries a
@@ -664,11 +767,26 @@ def create_app() -> FastAPI:
         max_speakers: int | None = Form(None),
         session_id: str | None = Form(None),
     ) -> JSONResponse:
-        # A plain `def` route runs in Starlette's threadpool instead of the
-        # event loop: pipeline.process() below is synchronous ONNX inference
-        # that can take real wall-clock time, and this service has no other
-        # concurrent work worth protecting the loop for, so offloading it is
-        # strictly better than blocking every other in-flight request on it.
+        """Diarize one clip, one at a time, off the event loop.
+
+        A plain ``def`` route, so Starlette runs the whole body in its
+        threadpool rather than on the loop: every call below is synchronous and
+        ``pipeline.process`` is ONNX inference that takes real wall-clock time.
+
+        That was already true when this service wedged for four minutes under a
+        single long diarization, so it is worth saying what the threadpool does
+        and does not buy. It keeps the loop free of the inference itself. It did
+        not keep the loop free of decoding the audio, which used to build a
+        Python list of every sample and hold the GIL for the whole of it (see
+        ``_read_wav``), and it put no bound on how many of these ran at once, so
+        a box with every core inside an ONNX session had nothing left to answer
+        a 2 s health probe with. :class:`DiarizeSlot` is the bound; the decode
+        no longer leaves numpy.
+
+        The slot is taken *after* the readiness check, so a misconfigured
+        service still answers 503 immediately rather than queueing behind
+        somebody else's audio to say the same thing.
+        """
         num_clusters = -1 if session_id else _resolve_num_clusters(min_speakers, max_speakers)
         try:
             pipeline, np = _ensure_pipeline(num_clusters)
@@ -676,16 +794,18 @@ def create_app() -> FastAPI:
         except (RuntimeError, ImportError) as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
 
-        samples, rate = _read_wav(file.file.read())
-        audio = np.array(samples, dtype=np.float32)
-        result = pipeline.process(audio).sort_by_start_time()
-        spans = [(float(seg.start), float(seg.end), int(seg.speaker)) for seg in result]
-        if session_id and extractor is not None:
-            labels = _session_labels(
-                banks, session_id, extractor, audio, rate, spans, min_speakers, max_speakers
-            )
-        else:
-            labels = _local_labels(spans)
+        payload = file.file.read()
+        with slot.hold():
+            samples, rate = _read_wav(payload)
+            audio = np.asarray(samples, dtype=np.float32)
+            result = pipeline.process(audio).sort_by_start_time()
+            spans = [(float(seg.start), float(seg.end), int(seg.speaker)) for seg in result]
+            if session_id and extractor is not None:
+                labels = _session_labels(
+                    banks, session_id, extractor, audio, rate, spans, min_speakers, max_speakers
+                )
+            else:
+                labels = _local_labels(spans)
         # A cluster missing from `labels` is one this session could not place,
         # and its segments are left out rather than given a number that would
         # name somebody else. The caller's merge already handles words no

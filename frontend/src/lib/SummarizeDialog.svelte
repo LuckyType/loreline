@@ -7,6 +7,11 @@
  * effort is the one control that comes and goes: only the levels this model
  * accepts are offered, and a model that reasons without exposing levels gets
  * no selector at all rather than a dead one.
+ *
+ * What it reads is the transcript version the page is showing, and it says so
+ * before the pickers: a session has one summary but several transcripts, and
+ * this used to summarize the live capture no matter which re-transcription was
+ * on screen, silently.
  */
 
 import { actionSetup } from '$lib/actionSetup.svelte'
@@ -25,11 +30,13 @@ import { Label } from '$lib/components/ui/label'
 import Dropdown from '$lib/Dropdown.svelte'
 import { modelInfoFor } from '$lib/modelCatalog.svelte'
 import ModelPicker from '$lib/ModelPicker.svelte'
+import { versionLabel } from '$lib/stores'
 
 let {
 	open = $bindable(false),
 	sessionId,
 	speakers,
+	version,
 	onsummarized,
 }: {
 	open?: boolean
@@ -37,6 +44,10 @@ let {
 	/** The distinct speaker labels in the shown transcript: with none, the
 	 *  summary cannot say who said what, and the dialog warns about it. */
 	speakers: string[]
+	/** The transcript version to summarize: 'original', or a re-transcription's
+	 *  job id. Whatever the page is showing, which is the one the reader was
+	 *  looking at when they pressed the button. */
+	version: string
 	/** A summary was stored: the caller refetches the session. Awaited, so the
 	 *  dialog only closes once the summary behind it is on screen. */
 	onsummarized?: () => Promise<void> | void
@@ -89,6 +100,9 @@ async function runSummarize() {
 			provider_id: sumProvider,
 			model: sumModel,
 			reasoning_effort: sumEfforts.length ? sumEffort || null : null,
+			// The endpoint spells "the live capture" as null rather than as the
+			// string 'original', so say it the way the contract says it.
+			version: version === 'original' ? null : version,
 		})
 		await onsummarized?.()
 		open = false
@@ -104,6 +118,12 @@ async function runSummarize() {
 	<DialogContent class="sm:max-w-md">
 		<DialogHeader>
 			<DialogTitle>Summarize session</DialogTitle>
+			<!-- Named at the point of action, not after the fact: on a session with
+			     five transcripts this is the only thing that says which one the
+			     recap will be about. -->
+			<DialogDescription>
+				Reads transcript <code>{versionLabel(version)}</code>, the version on screen.
+			</DialogDescription>
 			{#if speakers.length === 0}
 				<DialogDescription class="text-destructive">
 					No diarized speakers - the summary won't distinguish who said what.

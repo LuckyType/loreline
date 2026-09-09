@@ -397,6 +397,52 @@ def _looks_like_transcription(model_id: str) -> bool:
     return any(marker in lowered for marker in config().transcribe_name_markers)
 
 
+def _names_another_job(model_id: str, interaction: Interaction) -> bool:
+    """Whether the model's own name marks it as built for a different job.
+
+    The mirror of :func:`_looks_like_transcription`, and negative because there
+    is no positive marker for a chat model. See ``incompatible_name_markers`` in
+    the yaml for which families are listed and why that list is the more
+    cautious of the two.
+    """
+    lowered = model_id.lower()
+    markers = config().incompatible_name_markers.get(interaction, [])
+    return any(marker in lowered for marker in markers)
+
+
+def _cannot_serve(kind: ProviderKind, model_id: str, interaction: Interaction) -> bool:
+    """Whether this file positively says the model cannot serve ``interaction``.
+
+    Two sources, in order, and both may answer "no idea":
+
+    * the model's own exact entry. A :class:`ModelSpec` lists the interactions
+      it serves, so one that omits this interaction is a statement rather than a
+      silence: whisper-1 is ``[transcribe]``, and it cannot write a summary.
+    * failing that, the name, which is a guess and is treated as one.
+
+    Glob patterns are read for what they *grant* elsewhere in this module and
+    deliberately not for what they withhold here, the same call the browser
+    makes (``isExactSpec`` in frontend/src/lib/capabilities.svelte.ts): a family
+    glob knows far less than an id, and the self-hosted kind's is a catch-all
+    ``*`` claiming transcribe and summarize for every model on a server nobody
+    has seen. Believing it in both directions would let that one line switch the
+    name check off for the whole kind, and a Speaches box's TTS voices would go
+    on being offered as models to write a summary with.
+
+    False for everything else, which is the point: a model nobody has annotated
+    whose name gives nothing away is *unknown*, and unknown is offered. Hiding a
+    model the operator needs is worse than offering one that will not work, the
+    same trade the rest of this module makes.
+    """
+    spec = _provider(kind)
+    if spec is None:
+        return False
+    entry = spec.find(model_id)
+    if isinstance(entry, ModelSpec) and entry.interactions:
+        return interaction not in entry.interactions
+    return _names_another_job(model_id, interaction)
+
+
 def filter_models(
     models: list[ModelInfo],
     *,
@@ -409,25 +455,40 @@ def filter_models(
     Only applies to the OpenAI-style catalogues that mix every capability into
     one ``/models`` response. Everywhere else the list is already scoped -
     OpenRouter is fetched from a modality-specific endpoint, and the curated
-    per-kind lists contain nothing but transcription models - so it passes
-    straight through.
+    per-kind lists contain nothing but the models of that one interaction - so
+    it passes straight through.
 
-    ``strict=False`` disables the narrowing entirely: the markers are a
-    hand-maintained guess, and a model released tomorrow, or an endpoint nobody
-    has seen, will not match them. The setting behind this
+    The test differs per interaction because the available evidence does.
+    Transcription models have a name that says so, so that list is narrowed
+    *positively*: keep what looks like one. Nothing names a chat model, so
+    summarize and video are narrowed *negatively*: drop only what this file
+    says is something else, by the model's own curated entry first and by name
+    second (:func:`_cannot_serve`). Anything unknown stays in both directions.
+
+    That asymmetry is the fix for a switch that only ever worked one way round.
+    This function used to return early for every interaction but transcription,
+    so "only show compatible models" narrowed an OpenAI transcription picker
+    from 131 models to 9 while leaving the summary picker showing all 131,
+    text-embedding-3-small included: pickable, savable as the summary default,
+    and failing only once a summary was actually run.
+
+    ``strict=False`` disables the narrowing entirely: both tests are
+    hand-maintained guesses, and a model released tomorrow, or an endpoint
+    nobody has seen, will not match them. The setting behind this
     (``ActionDefaults.strict_model_filtering``, on by default) is the escape
     hatch that keeps this file from becoming a gate on what the operator runs.
 
     Even when strict, a filter that would remove *everything* is discarded and
-    the unfiltered list returned. That case means the markers simply do not
+    the unfiltered list returned. That case means the file simply does not
     recognise this server's naming, and an empty picker would strand an
     operator whose models are perfectly good.
     """
     if not strict:
         return models
-    if interaction is not Interaction.TRANSCRIBE:
-        return models
     if kind not in (ProviderKind.OPENAI, ProviderKind.OPENAI_COMPAT):
         return models
-    matching = [m for m in models if _looks_like_transcription(m.id)]
+    if interaction is Interaction.TRANSCRIBE:
+        matching = [m for m in models if _looks_like_transcription(m.id)]
+    else:
+        matching = [m for m in models if not _cannot_serve(kind, m.id, interaction)]
     return matching or models

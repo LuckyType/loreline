@@ -411,6 +411,9 @@ class SessionManager:
         self._backend_factory = backend_factory or create_backend
         self._diarizer_factory = diarizer_factory
         self._runtime: _Runtime | None = None
+        # Set beside the runtime and cleared a teardown later, which is the
+        # whole difference between the two (see live_view_session_id).
+        self._live_view_session_id: str | None = None
         self._lock = asyncio.Lock()
         # Holds the task that finalizes a session whose capture died on its own
         # (see _router_finished); asyncio only keeps a weak reference to a task,
@@ -434,7 +437,36 @@ class SessionManager:
         return SessionStatus.CAPTURING if self._runtime is not None else SessionStatus.IDLE
 
     def current_session_id(self) -> str | None:
+        """The session with the microphone open right now, or None.
+
+        Strictly "is a capture running": it goes to None the moment Stop takes
+        the runtime out of its slot, before a single line of the teardown has
+        been written. Callers that guard the recording itself want exactly that
+        (a merge must refuse the growing WAV, an index rebuild must skip it).
+        Callers showing a GM what the session is *doing* want
+        :meth:`live_view_session_id` instead.
+        """
         return self._runtime.session.id if self._runtime is not None else None
+
+    def live_view_session_id(self) -> str | None:
+        """The session the dashboard's live panes are currently about, or None.
+
+        The same id as :meth:`current_session_id` while a capture runs, and it
+        stays set for the whole of the teardown that follows - which is the
+        only difference, and the reason both exist. Everything a session says
+        on its way out is said after the runtime is gone: the settled finals
+        the drain squeezes out of open streaming turns, the trailing gap
+        marker, ``audio.capture.stop``, ``session.stop`` itself. Filtered on
+        "a capture is running right now", the panes drop all of it - the log
+        pane freezes on the line before Stop and a dimmed interim row stays
+        dimmed for good, while the card above it promises "Transcribing what is
+        still queued and closing the recording".
+
+        None again once the teardown ends, so an idle dashboard is silent: this
+        says which session the live view belongs to, never that the process is
+        busy.
+        """
+        return self._live_view_session_id
 
     def stt_degraded_since(self) -> float | None:
         """Epoch time the active session's transcription started failing, or None."""
@@ -652,6 +684,10 @@ class SessionManager:
                 audio_writer=audio_writer,
                 stats=stats,
             )
+            # From here until this session has finished ending, the dashboard's
+            # panes are about it - teardown included, which the runtime above
+            # does not cover (see live_view_session_id).
+            self._live_view_session_id = session.id
             # Nothing else awaits this task between here and stop(), so without
             # a callback a capture that dies mid-session would keep reporting
             # "capturing" until someone pressed Stop and waited out the drain.
@@ -748,15 +784,58 @@ class SessionManager:
             raise SessionConfigError(msg) from exc
 
     async def stop(self) -> Session | None:
-        """Stop the active session and finalize persistence."""
+        """Stop the active session and finalize persistence.
+
+        The runtime is still taken out of its slot first thing under the lock,
+        because that swap is what makes a teardown owned by exactly one caller:
+        whoever empties the slot runs it, and :meth:`_end_unattended` finding it
+        already empty knows stop() got there first.
+
+        What changed is that the teardown now runs *while the lock is still
+        held*. Finalizing outside it left the slot free for a Start arriving in
+        those seconds, with the old capture still holding the microphone, still
+        patching its WAV header and still writing its last rows - so the new
+        session pre-flighted a device that had not been given back, and two
+        capture loops could overlap. "One session at a time" has to mean until
+        the previous one has finished ending, not until it has stopped
+        recording. The price is that a second Stop, or a Start from another
+        tab, waits rather than being answered instantly; the wait is the drain
+        timeout at worst, plus finalizing steps that are each a bounded write
+        or a call with its own timeout, and it ends with a session that can
+        actually record.
+        """
         async with self._lock:
             runtime = self._runtime
             if runtime is None:
                 return None
             self._runtime = None
+            with self._tearing_down(runtime.session.id):
+                return await self._finish(runtime)
 
-        with log_context(session_id=runtime.session.id):
-            return await self._finish(runtime)
+    @contextlib.contextmanager
+    def _tearing_down(self, session_id: str) -> Generator[None, None, None]:
+        """Keep a session's log context and its live view up for the teardown.
+
+        Both outlive the runtime for the same reason: they are about what a
+        session *says* on the way out, not about whether it is still recording.
+        The lines come from code holding no session id at all (the drain, the
+        audio writer, the router shutting its backends), so the context binds it
+        on their behalf; and the dashboard's panes stay pointed at this session
+        until the last of those lines and the last settled final have gone out
+        (see :meth:`live_view_session_id`).
+
+        The live view is dropped in a ``finally`` so a teardown step that raises
+        cannot leave the panes stuck on a session that ended, and only if this
+        session is still the one on show - defensive today, since the lock is
+        held throughout, but the alternative if that ever changes is blanking
+        the pane of whichever session took over.
+        """
+        with log_context(session_id=session_id):
+            try:
+                yield
+            finally:
+                if self._live_view_session_id == session_id:
+                    self._live_view_session_id = None
 
     def _live_finished(self, task: asyncio.Task[None]) -> None:
         """Notice a capture that ended itself, and end the session with it.
@@ -782,10 +861,11 @@ class SessionManager:
     async def _end_unattended(self, task: asyncio.Task[None]) -> None:
         """Finalize a session nobody asked to stop (see :meth:`_live_finished`).
 
-        Deliberately the same teardown ``stop()`` runs: ``_finish`` re-awaits the
-        live task, so the exception that killed it decides the stored status
-        and fires the "Session error" alert, exactly as it would have done had
-        the GM pressed Stop.
+        Deliberately the same teardown ``stop()`` runs, under the same lock and
+        the same :meth:`_tearing_down` scope: ``_finish`` re-awaits the live
+        task, so the exception that killed it decides the stored status and
+        fires the "Session error" alert, exactly as it would have done had the
+        GM pressed Stop, and the dashboard sees the ending either way.
         """
         async with self._lock:
             runtime = self._runtime
@@ -793,23 +873,25 @@ class SessionManager:
                 return  # stop() got there first
             self._runtime = None
 
-        with log_context(session_id=runtime.session.id):
-            # A full disk is not a death: the capture stopped on purpose because
-            # there was nowhere left to write, and _finish logs it as such.
-            if not isinstance(task.exception(), DiskFullError):
-                log.error("session.capture.died", session_id=runtime.session.id)
-            try:
-                await self._finish(runtime)
-            except Exception:  # pragma: no cover - defensive: this task has no caller
-                log.exception("session.finish.failed", session_id=runtime.session.id)
+            with self._tearing_down(runtime.session.id):
+                # A full disk is not a death: the capture stopped on purpose
+                # because there was nowhere left to write, and _finish logs it
+                # as such.
+                if not isinstance(task.exception(), DiskFullError):
+                    log.error("session.capture.died", session_id=runtime.session.id)
+                try:
+                    await self._finish(runtime)
+                except Exception:  # pragma: no cover - defensive: this task has no caller
+                    log.exception("session.finish.failed", session_id=runtime.session.id)
 
     async def _finish(self, runtime: _Runtime) -> Session:
         """Drain, close and finalize a stopped session's runtime.
 
         Split out of :meth:`stop` only so the whole teardown runs inside one
-        ``log_context``: the lines it produces (a drain timeout, a router
-        crash, the capture source closing) belong to the session that is ending
-        even though none of the code emitting them is holding its id.
+        :meth:`_tearing_down` scope: the lines it produces (a drain timeout, a
+        router crash, the capture source closing) belong to the session that is
+        ending, and reach its log file and the dashboard, even though none of
+        the code emitting them is holding its id.
         """
         runtime.source.stop()
         session_id = runtime.session.id

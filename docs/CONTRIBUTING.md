@@ -9,7 +9,7 @@ Loreline is a Python 3.12 FastAPI backend with a SvelteKit frontend.
 uv sync                      # base deps + dev group
 uv run loreline version
 uv run loreline run --reload # http://127.0.0.1:8000
-curl http://127.0.0.1:8000/api/system/healthz
+curl http://127.0.0.1:8000/api/system/livez
 ```
 
 Audio capture needs the native extra, and PortAudio has to be present on the

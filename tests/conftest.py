@@ -26,3 +26,22 @@ async def client(settings: Settings) -> AsyncIterator[AsyncClient]:
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
             yield ac
+
+
+@pytest.fixture
+def auth_settings(tmp_path: Path) -> Settings:
+    """Settings with a password set, so every auth check is actually live."""
+    return Settings(
+        data_dir=tmp_path / "data",
+        auth_password="hunter2",
+        jwt_secret="test-secret",
+    )
+
+
+@pytest_asyncio.fixture
+async def auth_client(auth_settings: Settings) -> AsyncIterator[AsyncClient]:
+    app = create_app(auth_settings)
+    async with LifespanManager(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            yield ac

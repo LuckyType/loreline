@@ -18,8 +18,11 @@ from loreline.audio.chunker import SpeechDetector, Utterance
 from loreline.diarization import openai_diarizer
 from loreline.diarization.base import DiarizationProvider
 from loreline.models import (
+    REPROCESS_SOURCE_PREFIX,
     DiarizationConfig,
+    JobStatus,
     ProviderConfig,
+    ReprocessJob,
     Session,
     SessionStatus,
     SpeakerSegment,
@@ -27,7 +30,7 @@ from loreline.models import (
 )
 from loreline.secrets import SecretStore
 from loreline.settings import Settings
-from loreline.web.app import create_app
+from loreline.web.app import AppState, create_app
 
 # Any model id: the fake backend never looks at it, but the API requires one -
 # a provider row carries no model, so the request is where it is decided.
@@ -705,3 +708,122 @@ async def test_capture_keeps_recording_when_transcription_dies(
             ctx = app.state.ctx  # pyright: ignore[reportAny]
             assert ctx.audio_store.exists(session_id)
             assert (await client.get("/api/system/healthz")).json()["stt_error"] is None
+
+
+async def _row(ctx: AppState, session_id: str, source: str, text: str, end: float) -> None:
+    await ctx.transcripts.add(
+        TranscriptEvent(
+            session_id=session_id,
+            source=source,
+            text=text,
+            start_ts=0.0,
+            end_ts=end,
+            is_final=True,
+        )
+    )
+
+
+async def _done_job(ctx: AppState, session_id: str, job_id: str, created_at: float) -> None:
+    await ctx.reprocess_jobs.create(
+        ReprocessJob(
+            id=job_id,
+            session_id=session_id,
+            provider_id="p",
+            model="nova-9000",
+            status=JobStatus.DONE,
+            created_at=created_at,
+        )
+    )
+
+
+async def test_merge_takes_each_source_s_newest_re_transcription(tmp_path: Path) -> None:
+    """A merge is a GM saying "make this one session", so each part
+    contributes the best text it has: its newest completed re-transcription
+    that produced segments, and its live capture only when it has none.
+
+    Merging used to copy every source's original unconditionally, which threw
+    away every re-transcription of every part - the exact thing the parts were
+    re-transcribed for - and left nothing on the merged row to say so.
+    """
+    settings = Settings(data_dir=tmp_path / "d", auth_password="", jwt_secret="t")
+    app = create_app(settings)
+    async with LifespanManager(app):
+        ctx = app.state.ctx  # pyright: ignore[reportAny]
+        await ctx.sessions.create(Session(id="a", status=SessionStatus.COMPLETED, started_at=100.0))
+        await ctx.sessions.create(Session(id="b", status=SessionStatus.COMPLETED, started_at=200.0))
+
+        await _row(ctx, "a", "p", "a original", 5.0)
+        await _row(ctx, "a", f"{REPROCESS_SOURCE_PREFIX}older", "a older", 4.0)
+        await _row(ctx, "a", f"{REPROCESS_SOURCE_PREFIX}newer", "a newer", 6.0)
+        # A job that finished having written nothing, and a job that failed
+        # after writing some: newer than the winner, and neither is an
+        # improvement on it.
+        await _row(ctx, "a", f"{REPROCESS_SOURCE_PREFIX}broken", "a broken", 9.0)
+        await _done_job(ctx, "a", "older", 10.0)
+        await _done_job(ctx, "a", "newer", 20.0)
+        await _done_job(ctx, "a", "empty", 30.0)
+        await ctx.reprocess_jobs.create(
+            ReprocessJob(
+                id="broken",
+                session_id="a",
+                provider_id="p",
+                status=JobStatus.ERROR,
+                created_at=40.0,
+            )
+        )
+        # b was never re-transcribed at all, so its live capture is its best.
+        await _row(ctx, "b", "p", "b original", 3.0)
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            merged = (await client.post("/api/session/merge", json={"ids": ["b", "a"]})).json()
+
+            detail = (await client.get(f"/api/session/{merged['id']}")).json()
+            rows = sorted(detail["transcript"], key=lambda e: e["start_ts"])  # pyright: ignore[reportAny]
+            assert [e["text"] for e in rows] == ["a newer", "b original"]
+            # b is shifted past a's chosen version, not past a's original.
+            assert [e["start_ts"] for e in rows] == [0.0, 6.0]
+
+            # The merged rows are the merged session's own live text: a
+            # `reprocess:<job id>` tag carried over would name a job belonging
+            # to another session, and the merged session's default view would
+            # then be empty.
+            assert all(e["source"] == "a" or e["source"] == "b" for e in rows)
+
+            # A merge never has a stop button pressed, so nothing else was
+            # going to fill ended_at in and the header showed a start time and
+            # no duration. It runs to the end of the merged timeline.
+            assert merged["ended_at"] == 100.0 + 6.0 + 3.0
+
+            # And the row says what it was made from, which is the only thing
+            # that tells it apart from its oldest source in the history list.
+            assert merged["merged_from"] == ["a", "b"]
+
+
+async def test_merge_ends_where_the_merged_audio_does(tmp_path: Path) -> None:
+    """With merged audio the parts advance by their audio length, so that is
+    what the merged session runs to - the transcript may stop short of it."""
+    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t")
+    app = create_app(
+        settings,
+        capture_factory=capture_factory,  # type: ignore[arg-type]
+        backend_factory=FakeBackend,  # type: ignore[arg-type]
+        diarizer_factory=fake_diarizers,
+    )
+    async with LifespanManager(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            pid = await _create_provider(client)
+            ids: list[str] = []
+            for _ in range(2):
+                start = await client.post(
+                    "/api/session/start", json={"primary_provider": pid, "model": _MODEL}
+                )
+                ids.append(start.json()["id"])
+                await client.post("/api/session/stop")
+
+            store = app.state.ctx.audio_store  # pyright: ignore[reportAny]
+            total = sum(store.duration_s(i) for i in ids)
+            merged = (await client.post("/api/session/merge", json={"ids": ids})).json()
+
+            assert merged["ended_at"] is not None
+            assert abs(merged["ended_at"] - (merged["started_at"] + total)) < 1e-6

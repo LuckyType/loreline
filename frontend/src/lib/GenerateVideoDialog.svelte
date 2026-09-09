@@ -8,6 +8,9 @@
  * 1. The prompt is *seeded* from the summary, never bound to it. The GM edits
  *    what actually gets sent, and a summary is a recap, not a shot
  *    description - it almost always wants trimming before it is a good prompt.
+ *    Which is why the box carries a character count and a Reset button: an
+ *    eight-hour session's recap seeds several thousand characters, and there
+ *    is no way to put it back once it has been cut about.
  * 2. The parameter controls are built from the chosen model. Video models
  *    differ in which durations, resolutions and aspect ratios they accept
  *    (some accept no duration at all), and a model handed a parameter it does
@@ -95,10 +98,32 @@ const aspectRatios = $derived(
 const audioOffered = $derived(caps?.audio ?? model?.generate_audio === true)
 const sunset = $derived(deprecationNote(providerKind, modelId))
 
+// Long enough that a video model is being handed a chapter rather than a shot.
+// Not a vendor limit (promptMax below is one, when the config knows one) -
+// just the point past which the dialog's own advice is worth repeating.
+const PROMPT_LONG_CHARS = 1200
+
+// What this model will accept, when anyone has published a number. Today every
+// video entry in capabilities.yaml sets this to null on purpose - OpenRouter
+// documents no prompt length limit for any of them - so in practice the count
+// below is a plain count and the note is the guidance. The moment a vendor
+// does publish one, the config carries it and the warning appears with it,
+// which beats learning the limit from a failed background job.
+const promptMax = $derived(caps?.prompt_max_chars ?? null)
+const promptOverMax = $derived(promptMax !== null && prompt.length > promptMax)
+const promptLong = $derived(promptMax === null && prompt.length > PROMPT_LONG_CHARS)
+/** Whether the box still holds exactly what the summary seeded, which is when
+ *  there is nothing for Reset to put back. */
+const promptIsSummary = $derived(prompt === summary)
+
 // Re-seed the prompt each time the dialog opens, but never while it is open -
-// that would wipe an edit in progress.
+// that would wipe an edit in progress. Emptiness is measured after trimming:
+// a box holding a single space is "nothing the GM wrote" every bit as much as
+// an empty one, and testing the raw string left that space seeded forever -
+// Generate disabled on !prompt.trim(), Cancel and reopen changing nothing, and
+// no way back to the summary short of reloading the page.
 $effect(() => {
-	if (open && !prompt) prompt = summary
+	if (open && !prompt.trim()) prompt = summary
 })
 
 // The list is wanted the moment the dialog shows, not when the model dropdown
@@ -193,11 +218,50 @@ async function submit() {
 				</div>
 
 				<div class="flex flex-col gap-2">
-					<Label for="video-prompt">Prompt</Label>
+					<div class="flex items-center justify-between gap-2">
+						<Label for="video-prompt">Prompt</Label>
+						<!-- The one way back to the seed. Re-opening only re-seeds an empty
+						     box, by design: it must not wipe an edit in progress. -->
+						<Button
+							variant="ghost"
+							size="sm"
+							onclick={() => (prompt = summary)}
+							disabled={!summary || promptIsSummary}
+							title={summary
+								? 'Put the session summary back in the box, discarding your edits'
+								: 'This session has no summary to reset to'}
+						>
+							Reset to summary
+						</Button>
+					</div>
 					<Textarea id="video-prompt" rows={8} bind:value={prompt} />
-					<span class="text-xs text-muted-foreground">
-						Seeded from the session summary - edit freely before generating.
-					</span>
+					<div class="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+						<span class="text-xs text-muted-foreground">
+							Seeded from the session summary - a short, shot-like description of one scene
+							generates better than a whole recap.
+						</span>
+						<span
+							class="shrink-0 text-xs {promptOverMax
+								? 'text-destructive'
+								: promptLong
+									? 'text-amber-500'
+									: 'text-muted-foreground'}"
+						>
+							{prompt.length}{promptMax === null ? '' : ` / ${promptMax}`}
+							characters
+						</span>
+					</div>
+					{#if promptOverMax}
+						<span class="text-xs text-destructive">
+							Longer than this model accepts ({promptMax}
+							characters) - it will be rejected.
+						</span>
+					{:else if promptLong}
+						<span class="text-xs text-amber-500">
+							That is a whole recap. Video models take a scene, not a chapter, and some cap the
+							prompt well below this length.
+						</span>
+					{/if}
 				</div>
 
 				{#if model}

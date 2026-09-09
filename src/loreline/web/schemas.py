@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from typing import Literal, Self
+from urllib.parse import urlsplit
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
 
 from loreline.models import (
     ORIGINAL_VERSION,
@@ -19,6 +20,27 @@ class LoginRequest(BaseModel):
     """Password login payload."""
 
     password: str
+
+
+def _credential(value: str | None) -> str | None:
+    """A credential as it will be sent, or None when there is none to send.
+
+    Surrounding whitespace is stripped rather than trusted: a key is pasted, and
+    a browser field, a password manager and a terminal all bring a trailing
+    space or newline along with it. Every surface here spends the key on an HTTP
+    header, and a header value cannot start or end with whitespace - h11 refuses
+    to serialise one - so the untrimmed copy is not a credential at all, it is a
+    request that cannot be built.
+
+    Blank after trimming is therefore None, not "": three spaces typed into the
+    key field used to save as a real key, mask itself as "•••" in the table and
+    say "blank = keep current" on the way back in, while every request built
+    from it died with ``Illegal header value b'Bearer    '``. Answering None
+    makes that case identical to the empty one, which has always behaved
+    correctly (no secret written, and the row honestly shows none).
+    """
+    trimmed = (value or "").strip()
+    return trimmed or None
 
 
 class ProviderCreate(BaseModel):
@@ -39,11 +61,40 @@ class ProviderCreate(BaseModel):
         description="Optional API key set at create/update time; stored write-only.",
     )
 
+    @field_validator("api_key")
+    @classmethod
+    def _usable_key_or_none(cls, value: str | None) -> str | None:
+        """Normalise here, so the API is safe whichever client is calling.
+
+        The routes store the key with a bare ``if body.api_key``, which is the
+        right rule; it was simply being handed something truthy that was not a
+        key. Fixing it at the schema covers create and update in one place, and
+        covers a client that is not this app's own wizard.
+        """
+        return _credential(value)
+
 
 class SecretWrite(BaseModel):
     """Write-only secret value for a provider's API key."""
 
     value: str
+
+    @field_validator("value")
+    @classmethod
+    def _reject_a_blank_secret(cls, value: str) -> str:
+        """Refuse a value that is not a credential, rather than storing it.
+
+        This route means "store this key", and there is nothing to normalise a
+        blank one into: writing it would leave the row reporting a stored
+        secret it cannot authenticate with, and silently writing nothing while
+        answering ``ok`` would be the same lie by another route. Deleting the
+        key is a different request (DELETE the provider's secret is the
+        provider delete), so this simply refuses.
+        """
+        credential = _credential(value)
+        if credential is None:
+            raise ValueError("an API key cannot be blank")
+        return credential
 
 
 class GlossaryWrite(BaseModel):
@@ -144,6 +195,11 @@ class SummarizeRequest(BaseModel):
     """How hard a reasoning model should think. Only meaningful for a model
     that advertises support (ModelInfo.supports_reasoning); ignored otherwise,
     and dropped automatically if the endpoint rejects it."""
+    version: str | None = None
+    """Transcript version to summarize ("original" or a transcribe job id).
+    None means the original, so a client that predates the field keeps working;
+    an id no version answers to is a 404 rather than a quiet fallback, because
+    summarizing the wrong transcript costs money and reads as if it worked."""
 
 
 class SummarizeResult(BaseModel):
@@ -218,6 +274,41 @@ class OkResponse(BaseModel):
     ok: bool = True
 
 
+class LivenessResponse(BaseModel):
+    """The unauthenticated liveness answer: this process is up, and no more.
+
+    Its own model rather than a reuse of ``OkResponse`` because the two are
+    read by different callers and mean different things: ``ok`` acknowledges a
+    write to whoever made it, ``status`` is what an uptime check and the
+    installer's start-up poll look at from outside. Deliberately carries
+    nothing about the deployment; see ``/api/system/livez``.
+    """
+
+    status: Literal["ok"] = "ok"
+
+
+def _absolute_http_url(value: str | None, label: str) -> str:
+    """Return ``value`` trimmed if it is an absolute http(s) URL, else raise.
+
+    An alert channel is the one piece of configuration whose failure is
+    indistinguishable from nothing having gone wrong. A mistyped URL used to
+    save, sit in the table looking exactly like a working channel, and swallow
+    every alert it was set up to deliver. Nothing on the page grades a channel
+    the way the provider table grades a provider, so the write path is where a
+    URL that cannot possibly work has to be caught.
+
+    "Absolute http(s)" is the whole test, on purpose: a scheme we can POST to
+    and a host to POST it at. Anything stricter would reject configurations
+    that work - a receiver that happens to be down at save time, a LAN name
+    this box resolves and nothing else does, a port-only host.
+    """
+    text = (value or "").strip()
+    parts = urlsplit(text)
+    if parts.scheme not in ("http", "https") or not parts.netloc:
+        raise ValueError(f"{label} must be an absolute http:// or https:// URL")
+    return text
+
+
 class AlertChannelWrite(BaseModel):
     """Create/update payload for one alert channel (token is write-only)."""
 
@@ -227,10 +318,43 @@ class AlertChannelWrite(BaseModel):
     server: str = "https://ntfy.sh"
     topic: str | None = None
     chat_id: str | None = None
-    url: str | None = None
+    url: str | None = Field(default=None, validate_default=True)
+    """The webhook target. ``validate_default`` because a field validator is
+    skipped for a field the request omits, and an omitted ``url`` is exactly the
+    webhook-with-nowhere-to-post the validator below exists to refuse."""
     token: str | None = Field(
         default=None, description="Write-only token (Telegram bot / ntfy auth)."
     )
+
+    # Field validators rather than the `model_validator(mode="after")` used
+    # elsewhere in this file, for one reason: FastAPI echoes the rejected input
+    # back in the 422 body, and a model-level error's input is the *whole*
+    # payload - `token` included. A field-level error carries only the offending
+    # string, so a bad URL cannot drag a write-only credential into the response
+    # or into whatever logs it. `type` is declared first, so it is already
+    # validated and visible in `info.data` by the time these run.
+
+    @field_validator("server")
+    @classmethod
+    def _ntfy_server_must_be_a_url(cls, value: str, info: ValidationInfo) -> str:
+        """An ntfy channel's server has to be somewhere we can actually POST."""
+        if info.data.get("type") != "ntfy":
+            return value  # carried but unused by the other channel types
+        return _absolute_http_url(value, "ntfy server")
+
+    @field_validator("url")
+    @classmethod
+    def _webhook_url_must_be_a_url(cls, value: str | None, info: ValidationInfo) -> str | None:
+        """A webhook is nothing but its URL, so a blank one is rejected too.
+
+        This also fails an update of a channel saved before the check existed,
+        which is deliberate: the row is broken either way, and Edit or Delete
+        both resolve it. Silently keeping it toggleable would preserve exactly
+        the "looks configured, delivers nothing" state this exists to end.
+        """
+        if info.data.get("type") != "webhook":
+            return value
+        return _absolute_http_url(value, "webhook url")
 
 
 class AlertChannelView(BaseModel):
@@ -248,9 +372,19 @@ class AlertChannelView(BaseModel):
 
 
 class AlertTestResult(BaseModel):
-    """Delivery outcome of a single channel test."""
+    """Delivery outcome of a single channel test, and why it failed.
+
+    ``detail`` is the only diagnosis an alert channel ever offers: nothing
+    probes one periodically and the table carries no health column, so "Test
+    failed" on its own leaves an operator guessing between a typo, a closed
+    port and a rejected token. It holds the transport's own words or the status
+    plus the vendor's sentence, bounded and with the channel's credential
+    scrubbed out (see ``loreline.monitoring.alerts._scrub``). None on success:
+    there is nothing to explain.
+    """
 
     ok: bool
+    detail: str | None = None
 
 
 class AutostartState(BaseModel):

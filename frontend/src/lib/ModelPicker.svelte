@@ -49,7 +49,27 @@ const fetched = $derived(loaded.map((m) => m.id))
 // returned - a favourite or stored default that predates the fetch (or that
 // the provider no longer serves) simply renders without one.
 const detail = $derived(new Map(loaded.map((m) => [m.id, m])))
-const favorites = $derived(withoutHidden(kind, provider?.favorite_models ?? []))
+
+// A row's favourites are one flat list while the row serves several
+// interactions at once, and nothing narrowed them again on the way out. The
+// wizard's "Load models" deliberately merges every interaction's catalogue so a
+// favourite can be picked for any of its roles, and all of them then showed up
+// in all of the pickers: four OpenRouter speech-to-text models sat at the top
+// of the video picker under a heading calling them the preferred choices, and
+// one saved as the video default produced a job that failed upstream.
+//
+// This interaction's own list is the only thing that can confirm a favourite,
+// so it decides - but only while it says something. An empty `fetched` covers
+// both "not opened yet" (the list loads lazily) and "the catalogue could not be
+// read", and neither is evidence against a favourite, so both keep the whole
+// list rather than letting a picker go blank over an unreachable vendor.
+const confirmed = $derived(new Set(fetched))
+const listConfirms = $derived(fetched.length > 0)
+const favorites = $derived(
+	withoutHidden(kind, provider?.favorite_models ?? []).filter(
+		(m) => !listConfirms || confirmed.has(m),
+	),
+)
 
 // Offered without consulting `fetched`, and that is the point: `fetched` is
 // empty until the list is lazily loaded, so a default resting on it would

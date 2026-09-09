@@ -1,4 +1,16 @@
 <script lang="ts">
+/**
+ * Every session recorded, newest work first.
+ *
+ * A merged session copies its oldest source's start, status, campaign and
+ * primary provider, so on Started/Status/Primary/Campaign alone the merge and
+ * the part it was built from are the same row twice and only opening both
+ * tells them apart. Two things separate them here. `merged_from` names the
+ * parts, so the merge says outright what it is. Duration says which row is the
+ * long one, which is the question this table gets asked most and is worth a
+ * column whether or not anything was ever merged.
+ */
+
 import { onMount } from 'svelte'
 import { goto } from '$app/navigation'
 import { actionSetup } from '$lib/actionSetup.svelte'
@@ -16,7 +28,7 @@ import {
 	TableHeader,
 	TableRow,
 } from '$lib/components/ui/table'
-import { providerName } from '$lib/stores'
+import { fmtDuration, providerName } from '$lib/stores'
 import type { Session } from '$lib/wire'
 
 let sessions = $state<Session[]>([])
@@ -132,6 +144,7 @@ onMount(reload)
 						<Checkbox checked={allChecked} onCheckedChange={toggleAll} aria-label="Select all" />
 					</TableHead>
 					<TableHead>Started</TableHead>
+					<TableHead>Duration</TableHead>
 					<TableHead>Status</TableHead>
 					<TableHead>Primary</TableHead>
 					<TableHead>Campaign</TableHead>
@@ -144,7 +157,24 @@ onMount(reload)
 						<TableCell>
 							<Checkbox bind:checked={selected[s.id]} aria-label="Select session" />
 						</TableCell>
-						<TableCell>{when(s.started_at)}</TableCell>
+						<TableCell>
+							<span class="flex flex-wrap items-center gap-2">
+								{when(s.started_at)}
+								{#if s.merged_from.length}
+									<Badge
+										variant="outline"
+										title="Assembled from {s.merged_from.length} sessions, which are still here in their own right."
+									>
+										merged
+									</Badge>
+								{/if}
+							</span>
+						</TableCell>
+						<!-- A dash, not a blank: "nothing to say" has to look deliberate
+						     next to the rows that do say something. -->
+						<TableCell class="text-muted-foreground">
+							{fmtDuration(s.started_at, s.ended_at) || '-'}
+						</TableCell>
 						<TableCell>
 							<Badge
 								variant={s.status === 'error'
@@ -167,7 +197,7 @@ onMount(reload)
 				{/each}
 				{#if sessions.length === 0}
 					<TableRow>
-						<TableCell colspan={6} class="text-muted-foreground">No sessions recorded.</TableCell>
+						<TableCell colspan={7} class="text-muted-foreground">No sessions recorded.</TableCell>
 					</TableRow>
 				{/if}
 			</TableBody>

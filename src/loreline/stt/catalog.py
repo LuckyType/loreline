@@ -25,6 +25,7 @@ it, because nobody remembered the second gate.
 from __future__ import annotations
 
 from collections.abc import Iterable
+from dataclasses import dataclass
 
 from loreline.capabilities import (
     catalog_for,
@@ -33,12 +34,33 @@ from loreline.capabilities import (
     is_realtime_model,
     supports_inline_diarization,
 )
-from loreline.catalog import ClientFactory, VendorModel, VendorPrice, probe
+from loreline.catalog import CatalogStatus, ClientFactory, VendorModel, VendorPrice, probe
 from loreline.models import Interaction, ModelInfo, ModelPrice, ProviderKind
 
 # A picker is waiting on this: shorter than the CI check's budget, longer than
 # the boot-time courtesy's.
 PICKER_TIMEOUT_S = 15.0
+
+
+@dataclass(frozen=True, slots=True)
+class ModelListing:
+    """A picker's list, and why it is empty when the vendor could not be read.
+
+    Fail soft is still the contract: a vendor that is down yields the curated
+    list, and a caller with something to show hears nothing about the failure.
+    The one case that needs more is the one where the fallback is empty too - a
+    self-hosted row whose base URL points at nothing has no curated list behind
+    it, so the picker went blank and the wizard's "Load models" button reported
+    a typo'd port exactly as it reported a vendor that lists nothing at all.
+
+    ``error`` is therefore *why this list is empty*, never a general failure
+    channel: it is the probe's own sentence (see
+    :attr:`loreline.catalog.CatalogProbe.detail`), and it is None whenever there
+    are models, and whenever nothing was asked in the first place.
+    """
+
+    models: list[ModelInfo]
+    error: str | None = None
 
 
 async def list_models(
@@ -51,6 +73,32 @@ async def list_models(
     client_factory: ClientFactory | None = None,
 ) -> list[ModelInfo]:
     """Available models for a provider connection (live where possible).
+
+    The best-effort face of :func:`list_catalog`, for the callers that can only
+    act on a list: an empty one is simply "nothing on offer" to them. The
+    provider-models route wants the reason as well and calls the other.
+    """
+    listing = await list_catalog(
+        kind=kind,
+        base_url=base_url,
+        api_key=api_key,
+        interaction=interaction,
+        strict_filtering=strict_filtering,
+        client_factory=client_factory,
+    )
+    return listing.models
+
+
+async def list_catalog(
+    *,
+    kind: ProviderKind,
+    base_url: str | None,
+    api_key: str | None,
+    interaction: Interaction = Interaction.TRANSCRIBE,
+    strict_filtering: bool = True,
+    client_factory: ClientFactory | None = None,
+) -> ModelListing:
+    """Available models for a provider connection, plus why there are none.
 
     Scoped to ``interaction``: a transcription picker must never offer a chat
     or image model, which is exactly what an unscoped OpenAI ``/models`` dump
@@ -69,6 +117,7 @@ async def list_models(
     # None means nothing to fetch; a surface the pickers may not read live is
     # the curated list by declaration.
     catalogue = catalog_for(kind, interaction, base_url=base_url)
+    failure: str | None = None
     if catalogue is not None and catalogue.surface.picker:
         answer = await probe(
             kind,
@@ -82,11 +131,20 @@ async def list_models(
             narrowed = filter_models(
                 _rows(answer.models), kind=kind, interaction=interaction, strict=strict_filtering
             )
-            return _annotate(narrowed, kind=kind, interaction=interaction)
+            return ModelListing(_annotate(narrowed, kind=kind, interaction=interaction))
+        # Something was asked and did not answer usefully. NO_CATALOGUE cannot
+        # occur here - the surface resolved, or we would not have probed - so
+        # every remaining status is a real reason: unreachable, unreadable, or a
+        # credential the vendor's list demands and this row has not got.
+        failure = answer.detail if answer.status is not CatalogStatus.NO_CATALOGUE else None
     # The curated fallback, scoped to this interaction: a Gemini summarize
     # picker must not offer a transcription model to summarize with.
     curated = [ModelInfo(id=model_id) for model_id in curated_models(kind, interaction)]
-    return _annotate(curated, kind=kind, interaction=interaction)
+    annotated = _annotate(curated, kind=kind, interaction=interaction)
+    # A kind with a curated list has something to show, so the failure stays
+    # where it has always been, in the log: the fallback is the answer, not a
+    # consolation prize. Only an empty list needs to say why it is empty.
+    return ModelListing(annotated, None if annotated else failure)
 
 
 def _rows(models: Iterable[VendorModel]) -> list[ModelInfo]:

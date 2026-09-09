@@ -302,6 +302,32 @@ MIGRATIONS: list[str] = [
     CREATE UNIQUE INDEX idx_segments_turn
         ON transcript_segments(session_id, source, turn_id);
     """,
+    # v19 - record which transcript version a summary was made from. The row
+    # already said which provider and which model wrote it, which stops one
+    # short of identifying it: a session holds the live capture plus one
+    # version per re-transcription, they differ by hundreds of segments, and
+    # the same model over two of them produces two different summaries.
+    #
+    # NULL rather than 'original' for existing rows, deliberately. Every
+    # summary written before this column did read the original, because the
+    # route could not read anything else - but the column's job is to say what
+    # the UI may claim, and "no version recorded" is the true statement about a
+    # row nobody recorded a version for.
+    """
+    ALTER TABLE sessions ADD COLUMN summary_version TEXT;
+    """,
+    # v20 - record what a merged session was merged from (JSON list of source
+    # session ids, oldest first; '[]' for a captured session).
+    #
+    # A merge copies its oldest source's start time, status, provider and
+    # campaign, so the history list showed two rows that were identical in
+    # every visible column and could only be told apart by opening both. The
+    # ids are stored rather than a bare "merged" flag because the useful
+    # question is which sessions went in, and the sources are left intact by a
+    # merge, so the ids stay resolvable.
+    """
+    ALTER TABLE sessions ADD COLUMN merged_from TEXT NOT NULL DEFAULT '[]';
+    """,
 ]
 
 

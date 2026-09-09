@@ -84,7 +84,62 @@ let chanSelected = $state<ChannelMeta | null>(null)
 let chanStep = $state(1)
 let chanEditing = $state<string | null>(null)
 let chanOpen = $state(false)
+/**
+ * The line above the table: a short verdict, and the reason behind a failure.
+ *
+ * Split in two because they are read differently. `chanMsg` is the three-word
+ * answer ("Test sent", "Test failed"); `chanDetail` is what the channel
+ * actually said, which is the difference between "Test failed" and "HTTP 401:
+ * Unauthorized" - one says something is wrong, the other says which field to
+ * fix. The server scrubs the channel's token out of it before it gets here.
+ */
 let chanMsg = $state('')
+let chanDetail = $state('')
+
+/**
+ * A vendor can answer a failed POST with an entire HTML error page, and this
+ * message sits inside a card header. Show the front of it and hang the rest
+ * off the tooltip, the way the provider table carries the vendor's own
+ * sentence on its health badge.
+ */
+const DETAIL_CHARS = 120
+const shortDetail = $derived(
+	chanDetail.length > DETAIL_CHARS ? `${chanDetail.slice(0, DETAIL_CHARS - 1)}…` : chanDetail,
+)
+// One string rather than a verdict element and a reason element: the two are
+// separated by a colon with no space before it, and markup that has to sit on
+// one line to keep it that way is markup the formatter will eventually break.
+const chanLine = $derived(chanDetail ? `${chanMsg}: ${shortDetail}` : chanMsg)
+
+/**
+ * Whether a string is something the backend could actually POST to.
+ *
+ * Deliberately the same test the API applies (an absolute http or https URL,
+ * see `_absolute_http_url` in `web/schemas.py`) and no stricter: the point is
+ * to catch `not-a-url` at the field, not to second-guess a LAN hostname or a
+ * receiver that happens to be down while the channel is being set up.
+ */
+function isHttpUrl(value: string | null | undefined): boolean {
+	if (!value?.trim()) return false
+	try {
+		const { protocol } = new URL(value.trim())
+		return protocol === 'http:' || protocol === 'https:'
+	} catch {
+		return false
+	}
+}
+
+// Shown under the field itself rather than only as a disabled button, so the
+// answer to "why can I not save this" is next to the thing that is wrong.
+// Blank while the field is still empty: a form you have not filled in yet is
+// not a form you got wrong.
+const URL_HINT = 'Enter an absolute URL, for example https://hooks.example/loreline'
+const serverError = $derived(
+	chanSelected?.type === 'ntfy' && chanForm.server && !isHttpUrl(chanForm.server) ? URL_HINT : '',
+)
+const urlError = $derived(
+	chanSelected?.type === 'webhook' && chanForm.url && !isHttpUrl(chanForm.url) ? URL_HINT : '',
+)
 
 async function loadChannels() {
 	try {
@@ -133,15 +188,26 @@ function editChannel(c: AlertChannel) {
 	chanOpen = true
 }
 
+/**
+ * Whether the form describes a channel worth saving.
+ *
+ * Presence was the whole gate, and truthiness let `not-a-url` through: the
+ * channel saved, sat in the table looking configured, and delivered nothing.
+ * The URL-shaped fields now get the shape check on top of the presence check,
+ * which is the same one the API enforces - so a client that skips it is
+ * refused rather than obeyed, and this only decides whether the user finds out
+ * at the field or at the save.
+ */
 function channelValid(): boolean {
 	if (!chanSelected) return false
-	if (chanSelected.type === 'ntfy') return !!chanForm.topic
+	if (chanSelected.type === 'ntfy') return !!chanForm.topic && isHttpUrl(chanForm.server)
 	if (chanSelected.type === 'telegram') return !!chanForm.chat_id
-	return !!chanForm.url
+	return isHttpUrl(chanForm.url)
 }
 
 async function saveChannel() {
 	chanMsg = ''
+	chanDetail = ''
 	const body: AlertChannelWrite = {
 		...chanForm,
 		topic: chanForm.topic || null,
@@ -173,13 +239,21 @@ async function toggleChannel(c: AlertChannel) {
 		await loadChannels()
 	} catch (err) {
 		chanMsg = err instanceof ApiError ? err.message : 'update failed'
+		chanDetail = ''
 	}
 }
 
 async function testChannel(id: string) {
 	chanMsg = ''
+	chanDetail = ''
 	try {
-		chanMsg = (await api.testAlertChannel(id)).ok ? 'Test sent' : 'Test failed'
+		// A refused channel is still a successful request, so the reason arrives
+		// in the body rather than as a thrown ApiError. The catch below is for
+		// the test route itself being unreachable, which says nothing about the
+		// channel.
+		const result = await api.testAlertChannel(id)
+		chanMsg = result.ok ? 'Test sent' : 'Test failed'
+		chanDetail = result.ok ? '' : (result.detail ?? '')
 	} catch (err) {
 		chanMsg = err instanceof ApiError ? err.message : 'test failed'
 	}
@@ -187,6 +261,7 @@ async function testChannel(id: string) {
 
 async function deleteChannel(id: string) {
 	chanMsg = ''
+	chanDetail = ''
 	if (!(await confirm({ description: 'Delete this alert channel?', destructive: true }))) return
 	await api.deleteAlertChannel(id)
 	await loadChannels()
@@ -214,7 +289,12 @@ onMount(loadChannels)
 		</CardAction>
 	</CardHeader>
 	{#if chanMsg}
-		<p class="px-6 text-sm text-muted-foreground">{chanMsg}</p>
+		<!-- The full reason rides on the tooltip, the way the provider table
+		     carries the vendor's sentence on its health badge: the line stays one
+		     line, and nothing is thrown away. -->
+		<p class="px-6 text-sm break-words text-muted-foreground" title={chanDetail || undefined}>
+			{chanLine}
+		</p>
 	{/if}
 	<CardContent class="pt-0">
 		<Table>
@@ -320,7 +400,16 @@ onMount(loadChannels)
 				{#if meta.fields.includes('server')}
 					<div class="flex flex-col gap-2">
 						<Label for="csrv">Server</Label>
-						<Input id="csrv" bind:value={chanForm.server} placeholder="https://ntfy.sh" />
+						<Input
+							id="csrv"
+							bind:value={chanForm.server}
+							placeholder="https://ntfy.sh"
+							aria-invalid={!!serverError}
+							aria-describedby={serverError ? 'csrv-error' : undefined}
+						/>
+						{#if serverError}
+							<p id="csrv-error" class="text-sm text-destructive">{serverError}</p>
+						{/if}
 					</div>
 				{/if}
 				{#if meta.fields.includes('topic')}
@@ -338,7 +427,16 @@ onMount(loadChannels)
 				{#if meta.fields.includes('url')}
 					<div class="flex flex-col gap-2">
 						<Label for="curl">URL</Label>
-						<Input id="curl" bind:value={chanForm.url} placeholder="https://…" />
+						<Input
+							id="curl"
+							bind:value={chanForm.url}
+							placeholder="https://…"
+							aria-invalid={!!urlError}
+							aria-describedby={urlError ? 'curl-error' : undefined}
+						/>
+						{#if urlError}
+							<p id="curl-error" class="text-sm text-destructive">{urlError}</p>
+						{/if}
 					</div>
 				{/if}
 				{#if meta.fields.includes('token')}

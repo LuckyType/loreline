@@ -57,13 +57,23 @@ _DOCKER_MARKER = Path("/.dockerenv")
 # is what tells "the updater profile isn't running" apart from "this is taking
 # a while", and only the first of those should fall back to the host message.
 _UPDATE_TIMEOUT = httpx.Timeout(1830.0, connect=2.0)
+# Read this as the answer to "why did nothing happen", because that is the
+# question it is always asked. The old wording explained the refusal and then
+# sent the reader to the host, without ever mentioning the one thing that makes
+# this button work, so an operator who wanted it working had no way to learn
+# from the button itself that the updater profile exists. It also offered
+# `loreline-update.timer`, which is a systemd unit and so is exactly as absent
+# from a container as the one the first sentence just said was missing.
 _CONTAINER_MESSAGE = (
-    "Running in a Docker deployment - self-update from the web UI isn't "
-    "available here (there's no systemd unit inside the container to "
-    "restart, and granting that access would mean handing the container "
-    "the Docker socket, i.e. effectively root on the host). Update from the "
-    "host instead: deploy/update.sh - or enable automatic updates with "
-    "`sudo systemctl enable --now loreline-update.timer`."
+    "Running in a Docker deployment, and no updater service is configured, so "
+    "there is nothing here that may restart this container: the app is refused "
+    "the Docker socket on purpose, since that is effectively root on the host. "
+    "Two ways forward. Update from the host with deploy/update.sh, which is the "
+    "default and stays it. Or, to make this button work, run "
+    "`docker compose --profile updater up -d` on the host after putting "
+    "UPDATER_TOKEN and UPDATER_REPO_DIR in .env, then recreate this container "
+    "so it picks the token up - see Updating in the README for what that "
+    "container is given and why."
 )
 _APPLYING_MESSAGE = (
     "A newer image was pulled. The app container is being recreated onto it now, "

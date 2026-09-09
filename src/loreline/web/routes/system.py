@@ -1,7 +1,8 @@
 """System routes: health, self-update, autostart, and push-alert config.
 
-``/healthz`` stays unauthenticated (external pollers / uptime checks); the
-mutating ops endpoints require auth.
+``/livez`` is the only unauthenticated route here: it says the process is up
+and nothing else, which is all an external poller needs. Everything else,
+``/healthz`` and its operational snapshot included, requires auth.
 """
 
 from __future__ import annotations
@@ -37,6 +38,7 @@ from loreline.web.schemas import (
     AlertTestResult,
     AutostartState,
     AutostartUpdate,
+    LivenessResponse,
     OkResponse,
     RevisionResponse,
     RollbackRequest,
@@ -113,9 +115,30 @@ class HealthResponse(BaseModel):
     the difference between a quiet table and a microphone that stopped."""
 
 
-@router.get("/healthz")
+@router.get("/livez")
+async def livez() -> LivenessResponse:
+    """Say that this process is up. The one route here that needs no cookie.
+
+    Empty on purpose: it touches no disk, no database and no diarizer, so it
+    cannot fail for a reason that has nothing to do with the process being
+    alive, and it hands an anonymous caller nothing about the deployment. That
+    is what makes it safe to leave open for the installer's start-up poll and
+    for any uptime check pointed at the box.
+    """
+    return LivenessResponse()
+
+
+@router.get("/healthz", dependencies=_auth)
 async def healthz(request: Request) -> HealthResponse:
-    """Return service health. Used by UI badge, push alerts, and external polling."""
+    """Return the full operational snapshot, for the UI badge and push alerts.
+
+    Behind auth, unlike ``/livez`` above: the exact version, free disk, capture
+    state, the operator's own diarizer endpoint and the STT vendor's raw error
+    text add up to a reconnaissance report, and this app publishes its port on
+    the LAN. It also makes the shell's guard real - the SPA layout already
+    redirects to /login when this call answers 401, a branch that could not be
+    reached while the route was open.
+    """
     state = get_state(request)
     capture_status = state.manager.status()
     free, total = disk_usage(state.settings.data_dir)
@@ -339,8 +362,14 @@ async def delete_alert_channel(request: Request, channel_id: str) -> OkResponse:
 
 @router.post("/alerts/channels/{channel_id}/test", dependencies=_auth)
 async def test_alert_channel(request: Request, channel_id: str) -> AlertTestResult:
-    """Send a test notification to one channel."""
-    return AlertTestResult(ok=await get_state(request).alerts.test_channel(channel_id))
+    """Send a test notification to one channel, and say why when it fails.
+
+    Always 200, failure included: the request itself succeeded, and the answer
+    to "did this channel take it" is the body. Turning a refused webhook into a
+    5xx here would make the page's own error path swallow the reason.
+    """
+    result = await get_state(request).alerts.test_channel(channel_id)
+    return AlertTestResult(ok=result.ok, detail=result.detail)
 
 
 class ServiceLogs(BaseModel):

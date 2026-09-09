@@ -21,18 +21,22 @@ import asyncio
 import contextlib
 import time
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import TYPE_CHECKING
+
+import httpx
 
 from loreline.bus import EventBus
 from loreline.diarization.merge import assign_speakers
+from loreline.diarization.remote import probe_diarizer
 from loreline.export import final_rows, variant_rows
-from loreline.health import HealthStatus, classify_request_error
+from loreline.health import HealthReport, HealthStatus, classify_request_error
 from loreline.logging import bind_log_context, get_logger
 from loreline.models import (
     DIARIZE_SOURCE_PREFIX,
     ORIGINAL_VERSION,
     REPROCESS_SOURCE_PREFIX,
+    DiarizationMode,
     JobStatus,
     ReprocessJob,
     TranscriptEvent,
@@ -45,7 +49,7 @@ if TYPE_CHECKING:
     from loreline.audio.chunker import Utterance
     from loreline.diarization.base import DiarizationProvider
     from loreline.diarization.provider import BuildDiarizer
-    from loreline.models import ProviderConfig, SpeakerSegment
+    from loreline.models import DiarizationConfig, ProviderConfig, SpeakerSegment
     from loreline.persistence import (
         AudioStore,
         GlossaryRepository,
@@ -75,6 +79,10 @@ class ProviderNotFoundError(ValueError):
 
 class TargetNotFoundError(ValueError):
     """Raised when a diarize job targets a transcript version with no rows."""
+
+
+class DiarizerUnreachableError(ValueError):
+    """Raised when a diarize job is asked for while nothing answers at its endpoint."""
 
 
 class OriginalVersionError(ValueError):
@@ -115,6 +123,13 @@ def stored_audio_backend(
     there is no batch endpoint to send a stored file to instead.
     """
     return create_backend(config, secrets, model, prefer_batch=True)
+
+
+# What ``enqueue`` asks before it accepts a diarize job, and what a test
+# substitutes: anything that grades a diarization endpoint, awaited. The
+# default is the probe ``/api/system/healthz`` and ``/api/system/diarizer/probe``
+# already call, so all three agree on what "not answering" means.
+DiarizerProbe = Callable[[str], Awaitable[HealthReport]]
 
 
 # How often a running job's segment count is written back to its row. The
@@ -212,6 +227,7 @@ class ReprocessManager:
         transcript_bus: EventBus[TranscriptEvent],
         diarizer_factory: BuildDiarizer,
         backend_factory: BackendFactory | None = None,
+        diarizer_probe: DiarizerProbe | None = None,
     ) -> None:
         self._providers = providers
         self._glossaries = glossaries
@@ -226,10 +242,17 @@ class ReprocessManager:
         self._bus = transcript_bus
         self._backend_factory = backend_factory or stored_audio_backend
         self._diarizer_factory = diarizer_factory
+        self._diarizer_probe = diarizer_probe or probe_diarizer
         self._tasks: dict[str, asyncio.Task[None]] = {}
 
     async def enqueue(self, req: ReprocessRequest) -> ReprocessJob:
-        """Validate inputs, create a job row, and spawn the runner task."""
+        """Validate inputs, create a job row, and spawn the runner task.
+
+        A diarize job is also checked against the service it needs, which no
+        other operation is: it is the one job whose whole work is a single call
+        to a machine that may not be there, and queueing it against a wedged
+        one was measured making the wedge worse, one press at a time.
+        """
         session = await self._sessions.get(req.session_id)
         if session is None:
             msg = f"unknown session {req.session_id!r}"
@@ -248,6 +271,8 @@ class ReprocessManager:
             if not variant_rows(events, req.target):
                 msg = f"unknown transcript version {req.target!r}"
                 raise TargetNotFoundError(msg)
+        if req.operation == "diarize":
+            await self._refuse_an_unreachable_diarizer(req.diarization)
 
         job = ReprocessJob(
             id=uuid.uuid4().hex,
@@ -276,6 +301,45 @@ class ReprocessManager:
         task.add_done_callback(lambda _t: self._tasks.pop(job.id, None))
         log.info("reprocess.enqueue", job_id=job.id, session_id=job.session_id)
         return job
+
+    async def _refuse_an_unreachable_diarizer(self, config: DiarizationConfig) -> None:
+        """Say no at the button when nothing answers at the diarizer's endpoint.
+
+        The failure this prevents is not the wasted job, it is the queue behind
+        it. A diarization that the service is still working on when the client
+        gives up keeps the service busy, so every further press lands behind it
+        and makes the backlog longer, and the only signal a GM gets is another
+        version that ends at "-" some minutes later. Refusing costs one probe
+        and answers immediately, with a sentence naming the endpoint.
+
+        The same probe ``/api/system/healthz`` polls, so the settings page's
+        badge and this refusal can never disagree, and only ``UNREACHABLE`` is
+        refused: a service answering 503 while its models load, or one graded
+        degraded for not remembering speakers, is a service that is there, and
+        deciding for the GM that it is not worth asking is not this function's
+        call to make.
+
+        A *transcribe* job is deliberately not checked, even though it may
+        diarize every utterance it produces. Its value is the transcript, its
+        diarization is an addition on top that the router already survives
+        without (see ``SttRouter._merge_diarization``), and refusing a
+        re-transcription because a side feature is down would be the worse
+        trade of the two.
+        """
+        if config.mode != DiarizationMode.REMOTE or not config.endpoint:
+            return
+        report = await self._diarizer_probe(config.endpoint)
+        if report.status is not HealthStatus.UNREACHABLE:
+            return
+        log.warning(
+            "reprocess.diarizer_unreachable", endpoint=config.endpoint, detail=report.detail
+        )
+        msg = (
+            f"the diarization service at {config.endpoint} is not answering "
+            f"({report.detail or 'no answer'}) - start it, or fix the endpoint, "
+            "and press Diarize again"
+        )
+        raise DiarizerUnreachableError(msg)
 
     async def delete_version(self, session_id: str, version: str) -> None:
         """Delete one transcript version: its segments, its diarization, its jobs.
@@ -350,15 +414,30 @@ class ReprocessManager:
         campaign_id: str | None,
         started_mono: float,
     ) -> None:
-        # Attribute every line this task emits, including the router's and the
-        # backend's - which know nothing about jobs - to the session and the
-        # version being written. That routes them into this version's log file
-        # and keeps them off the dashboard, which shows the live capture only
-        # (see loreline.logging.bind_log_context).
+        """Run one job, and leave a readable account of it in its own log file.
+
+        Three lines at minimum, whatever the run does: what it set out to do,
+        what it wrote and how long it took, and, when it fails, why plus the
+        traceback. That is not decoration. Every version's log is offered on
+        the session page as "Show logs", and the README promises each run keeps
+        one; before these lines a finished re-transcription's file held the
+        single ``reprocess.enqueue`` line the caller wrote and nothing about
+        the run itself, so the one screen meant for answering "what happened to
+        this version" could not answer it for the runs that failed silently.
+
+        The binding on the first line is what puts them there, and it covers
+        the whole body including the failure path: it attributes every line
+        this task emits - the router's and the backend's too, which know
+        nothing about jobs - to this session and this version, which routes
+        them into this version's file and keeps them off the dashboard, which
+        shows the live capture only (see ``loreline.logging.bind_log_context``).
+        """
         bind_log_context(session_id=job.session_id, job_id=job.id)
         job.status = JobStatus.RUNNING
         job.started_at = time.time()
         await self._reprocess.update(job)
+        started = time.monotonic()
+        log.info("reprocess.start", **_run_description(job))
         try:
             if job.operation == "diarize":
                 job.segments_added = await self._diarize_session(job)
@@ -367,10 +446,24 @@ class ReprocessManager:
                     job, provider, campaign_id, started_mono
                 )
             job.status = JobStatus.DONE
+            log.info(
+                "reprocess.finished",
+                operation=job.operation,
+                segments_added=job.segments_added,
+                elapsed_s=round(time.monotonic() - started, 1),
+            )
         except Exception as exc:  # any failure marks the job errored
             job.status = JobStatus.ERROR
-            job.error = _job_error_message(exc)
-            log.exception("reprocess.failed", job_id=job.id, operation=job.operation)
+            job.error = _job_error_message(exc, job)
+            # The row carries one sentence for a GM; this carries the same
+            # sentence plus the whole traceback, into the file "Show logs" opens.
+            log.exception(
+                "reprocess.failed",
+                job_id=job.id,
+                operation=job.operation,
+                error=job.error,
+                elapsed_s=round(time.monotonic() - started, 1),
+            )
         finally:
             job.finished_at = time.time()
             await self._reprocess.update(job)
@@ -528,7 +621,33 @@ async def _aclose(obj: object) -> None:
             log.warning("reprocess.aclose.failed")
 
 
-def _job_error_message(exc: Exception) -> str:
+def _run_description(job: ReprocessJob) -> dict[str, str]:
+    """What a run's opening log line says it is about to do.
+
+    Enough to read the rest of the file without the job row open next to it:
+    which operation, which version it writes, and which machine does the work -
+    the provider and model for a re-transcription, the diarizer and its
+    endpoint for a relabeling. A diarize job names its target rather than a
+    version of its own, because it writes none: it rewrites one version's rows
+    into a copy that supersedes them (see :meth:`_diarize_session`).
+    """
+    if job.operation == "diarize":
+        return {
+            "operation": job.operation,
+            "target": job.target,
+            "diarizer": job.diarization.mode.value,
+            "endpoint": job.diarization.endpoint or "",
+        }
+    return {
+        "operation": job.operation,
+        "version": job.id,
+        "provider_id": job.provider_id,
+        "model": job.model or "",
+        "diarizer": job.diarization.mode.value,
+    }
+
+
+def _job_error_message(exc: Exception, job: ReprocessJob) -> str:
     """The message stored on a failed job's row, in words a GM can act on.
 
     Most exceptions here already read fine as raised: a missing session or
@@ -546,12 +665,52 @@ def _job_error_message(exc: Exception) -> str:
     did answer, just badly, and gets the plain-language translation instead.
     The vendor's own words are not lost - they are still in the traceback
     ``log.exception`` writes right after this is called, which lands in the
-    version's own log file, exactly what "Show logs" reads.
+    version's own log file, exactly what "Show logs" reads. That consolation
+    holds only for a run that wrote such a file, which is why :meth:`_run` now
+    logs its own start, finish and failure: a job whose only stored line came
+    from the caller's ``reprocess.enqueue`` left "Show logs" answering "no logs
+    stored for this version", and the words were then lost after all.
+
+    One exception carries no words at all, and it is the one this path was
+    written for. ``str(httpx.ReadTimeout())`` is the empty string, so a
+    diarization that ran out of time stored ``error=""`` - which the session
+    page reads as a job with nothing to say and skips, leaving a failed run
+    indistinguishable from a button that was never pressed. A blank message is
+    therefore replaced with :func:`_wordless_failure`, never stored as it is.
     """
     failure = classify_request_error(exc)
     if failure.status is HealthStatus.UNREACHABLE:
-        return str(exc)
+        return str(exc).strip() or _wordless_failure(exc, job)
     return (
         "The diarization service answered but could not process the audio "
         "(is it configured correctly?)"
     )
+
+
+def _wordless_failure(exc: Exception, job: ReprocessJob) -> str:
+    """A sentence for an exception whose own words are the empty string.
+
+    Built from the type and from what this job was doing, because those are the
+    only two facts there are. The type name is kept inside the sentence rather
+    than translated away: "ReadTimeout" is what distinguishes a service that
+    accepted the audio and then went quiet from one that refused the
+    connection, and it is what a maintainer reading a bug report needs, while
+    the sentence around it is what a GM needs.
+    """
+    subject = _failing_service(job)
+    if isinstance(exc, httpx.TimeoutException):
+        return (
+            f"{subject} did not answer in time ({type(exc).__name__}). The wait already "
+            "grows with the amount of audio sent, so check that the service is running "
+            "and keeping up with it."
+        )
+    return f"{subject} failed with {type(exc).__name__} and gave no reason."
+
+
+def _failing_service(job: ReprocessJob) -> str:
+    """What to call the thing that did not answer, in this job's own terms."""
+    if job.operation != "diarize":
+        return "The provider this run re-transcribes with"
+    if job.diarization.endpoint:
+        return f"The diarization service at {job.diarization.endpoint}"
+    return "The diarization service"

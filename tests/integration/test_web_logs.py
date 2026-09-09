@@ -8,11 +8,17 @@ from pathlib import Path
 
 import pytest
 from starlette.testclient import TestClient
-from test_web_session import FakeBackend, capture_factory, fake_diarizers
+from test_web_session import (  # type: ignore[import-not-found]
+    FakeBackend,
+    OutOfCreditBackend,
+    capture_factory,
+    fake_diarizers,
+)
 
 from loreline.audio.chunker import Utterance
 from loreline.logging import get_logger
-from loreline.models import TranscriptEvent
+from loreline.models import ProviderConfig, TranscriptEvent
+from loreline.secrets import SecretStore
 from loreline.settings import Settings
 from loreline.web.app import create_app
 
@@ -114,6 +120,69 @@ def test_reprocess_logs_go_to_their_own_version(client: TestClient) -> None:
     original = client.get(f"/api/session/{sid}/logs").json()["logs"]
     assert job_id not in original
     assert "reprocess.enqueue" not in original
+
+
+def test_a_run_records_what_it_set_out_to_do_and_what_it_wrote(client: TestClient) -> None:
+    """The README's promise, which a finished run did not keep.
+
+    Every version's log used to hold the caller's ``reprocess.enqueue`` line
+    and whatever the backend happened to say - on the deployment this was
+    measured on, two completed re-transcriptions of 954 and 1322 segments had
+    no stored log at all. So the one screen meant for answering "what happened
+    to this version" could say neither that the run started, nor what it
+    produced, nor how long it took.
+    """
+    pid = _provider(client)
+    sid = _run_session(client, pid)
+    job_id = _reprocess(client, sid, pid)
+
+    logs = client.get(f"/api/session/{sid}/logs", params={"version": job_id}).json()["logs"]
+    assert "reprocess.start" in logs
+    assert f"version={job_id}" in logs  # which version this run writes
+    assert f"provider_id={pid}" in logs  # and what does the work
+    assert f"model={_MODEL}" in logs
+    assert "reprocess.finished" in logs
+    assert "segments_added=" in logs
+    assert "elapsed_s=" in logs
+
+
+def test_a_failed_run_writes_the_reason_and_the_traceback(tmp_path: Path) -> None:
+    """What the row's one sentence tells a reader to go and look at.
+
+    Both halves are load-bearing and neither was there. The ``error=`` field is
+    the same sentence the session page shows, so the file and the page cannot
+    disagree about which run failed and why; the traceback is the part the page
+    deliberately does not carry. It reaches the file only because the log tap
+    runs after ``format_exc_info`` (see ``loreline.logging``) - before that, a
+    failed run's file recorded the fact of an exception as ``exc_info=True``
+    and not one line of it.
+    """
+    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="x")
+    live = [ChattyBackend]  # the capture itself must still work
+
+    def factory(config: ProviderConfig, secrets: SecretStore, model: str | None) -> FakeBackend:
+        cls = live.pop() if live else OutOfCreditBackend
+        return cls(config, secrets, model)
+
+    app = create_app(
+        settings,
+        capture_factory=capture_factory,  # type: ignore[arg-type]
+        backend_factory=factory,  # type: ignore[arg-type]
+        diarizer_factory=fake_diarizers,
+    )
+    with TestClient(app) as client:
+        pid = _provider(client)
+        sid = _run_session(client, pid)
+        job_id = _reprocess(client, sid, pid)
+        assert client.get(f"/api/reprocess/{job_id}").json()["status"] == "error"
+
+        logs = client.get(f"/api/session/{sid}/logs", params={"version": job_id}).json()["logs"]
+
+    assert "reprocess.start" in logs  # the run is bracketed even when it fails
+    assert "reprocess.failed" in logs
+    assert "no credits remaining" in logs  # the row's own sentence, in the file
+    assert "Traceback (most recent call last)" in logs
+    assert "ProvidersExhaustedError" in logs  # the exception, named, not "exc_info=True"
 
 
 def test_logs_are_deleted_with_their_version_and_their_session(

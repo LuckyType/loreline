@@ -21,7 +21,7 @@ from test_web_session import (  # type: ignore[import-not-found]
 
 from loreline.audio.chunker import SpeechDetector, Utterance
 from loreline.diarization.base import DiarizationProvider
-from loreline.health import raise_for_vendor_status
+from loreline.health import HealthReport, HealthStatus, raise_for_vendor_status
 from loreline.models import DiarizationConfig, ProviderConfig, SpeakerSegment, TranscriptEvent
 from loreline.reprocess.jobs import stored_audio_backend
 from loreline.secrets import SecretStore
@@ -34,6 +34,18 @@ from loreline.web.app import create_app
 _MODEL = "fake-model"
 
 
+async def _reachable_diarizer(endpoint: str) -> HealthReport:
+    """Stand in for the probe ``enqueue`` runs before it accepts a diarize job.
+
+    Every diarize test here names ``http://diar``, where nothing is listening:
+    the real probe would refuse the job on the spot and no diarizer double
+    under test would ever be called. What that refusal does when it *is* the
+    subject has its own test at the bottom of this file.
+    """
+    _ = endpoint
+    return HealthReport(HealthStatus.HEALTHY)
+
+
 @pytest_asyncio.fixture
 async def client(tmp_path: Path) -> AsyncIterator[AsyncClient]:
     settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t")
@@ -42,6 +54,7 @@ async def client(tmp_path: Path) -> AsyncIterator[AsyncClient]:
         capture_factory=capture_factory,  # type: ignore[arg-type]
         backend_factory=FakeBackend,  # type: ignore[arg-type]
         diarizer_factory=fake_diarizers,
+        diarizer_probe=_reachable_diarizer,
     )
     async with LifespanManager(app):
         transport = ASGITransport(app=app)
@@ -81,6 +94,91 @@ async def test_export_formats(client: AsyncClient) -> None:
     assert bad.status_code == 404
 
 
+class ModelNamingBackend(FakeBackend):
+    """FakeBackend whose text names the model that produced it.
+
+    Which is the only way to tell two versions of one session apart end to
+    end: the live capture and every re-transcription otherwise say the same
+    thing, so an export returning the wrong one would look right.
+    """
+
+    async def transcribe(
+        self,
+        utterance: Utterance,
+        *,
+        session_id: str,
+        glossary: object = None,
+    ) -> TranscriptEvent | None:
+        _ = glossary
+        return TranscriptEvent(
+            session_id=session_id,
+            source=self.config.id,
+            text=f"said by {self.model}",
+            start_ts=utterance.start,
+            end_ts=utterance.end,
+            is_final=True,
+        )
+
+
+async def test_export_returns_the_version_it_was_asked_for(tmp_path: Path) -> None:
+    """Export selects a transcript version, and refuses one that does not exist.
+
+    The route had no version parameter at all and rendered the original with
+    the version hard-coded, so re-transcribing a session with a better model
+    and pressing Export on that version handed back the live capture under the
+    new version's name, with nothing saying so.
+    """
+    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t")
+    app = create_app(
+        settings,
+        capture_factory=capture_factory,  # type: ignore[arg-type]
+        backend_factory=ModelNamingBackend,  # type: ignore[arg-type]
+        diarizer_factory=fake_diarizers,
+    )
+    async with LifespanManager(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            pid = await _provider(client)
+            start = await client.post(
+                "/api/session/start", json={"primary_provider": pid, "model": "live-model"}
+            )
+            sid = start.json()["id"]
+            await client.post("/api/session/stop")
+
+            enqueue = await client.post(
+                "/api/reprocess",
+                json={"session_id": sid, "provider_id": pid, "model": "nova-9000"},
+            )
+            version = enqueue.json()["id"]
+            ctx = app.state.ctx  # pyright: ignore[reportAny]
+            await ctx.reprocess.wait(version)
+
+            named = await client.get(
+                f"/api/session/{sid}/export", params={"fmt": "txt", "version": version}
+            )
+            assert named.status_code == 200
+            assert "said by nova-9000" in named.text
+            assert "live-model" not in named.text
+
+            # No version named is still the live capture, so an old bookmark
+            # keeps meaning what it meant.
+            default = await client.get(f"/api/session/{sid}/export", params={"fmt": "txt"})
+            assert "said by live-model" in default.text
+            assert "nova-9000" not in default.text
+            explicit = await client.get(
+                f"/api/session/{sid}/export", params={"fmt": "txt", "version": "original"}
+            )
+            assert explicit.text == default.text
+
+            # A version nobody produced is a 404, not the original wearing its
+            # name.
+            missing = await client.get(
+                f"/api/session/{sid}/export", params={"fmt": "txt", "version": "nope"}
+            )
+            assert missing.status_code == 404
+            assert "nope" in missing.json()["detail"]
+
+
 async def test_audio_download(client: AsyncClient) -> None:
     pid = await _provider(client)
     sid = await _run_session(client, pid)
@@ -108,6 +206,7 @@ async def test_reprocess_transcribe_names_the_model_it_runs(tmp_path: Path) -> N
         capture_factory=capture_factory,  # type: ignore[arg-type]
         backend_factory=factory,  # type: ignore[arg-type]
         diarizer_factory=fake_diarizers,
+        diarizer_probe=_reachable_diarizer,
     )
     async with LifespanManager(app):
         transport = ASGITransport(app=app)
@@ -149,6 +248,7 @@ async def test_a_reprocess_job_builds_its_connector_for_stored_audio(tmp_path: P
         settings,
         capture_factory=capture_factory,  # type: ignore[arg-type]
         diarizer_factory=fake_diarizers,
+        diarizer_probe=_reachable_diarizer,
     )
     async with LifespanManager(app):
         ctx = app.state.ctx  # pyright: ignore[reportAny]
@@ -174,6 +274,7 @@ async def test_reprocess_applies_the_glossary_unless_switched_off(tmp_path: Path
         capture_factory=capture_factory,  # type: ignore[arg-type]
         backend_factory=factory,  # type: ignore[arg-type]
         diarizer_factory=fake_diarizers,
+        diarizer_probe=_reachable_diarizer,
     )
     async with LifespanManager(app):
         transport = ASGITransport(app=app)
@@ -220,6 +321,7 @@ async def test_reprocess_job(tmp_path: Path) -> None:
         capture_factory=capture_factory,  # type: ignore[arg-type]
         backend_factory=FakeBackend,  # type: ignore[arg-type]
         diarizer_factory=fake_diarizers,
+        diarizer_probe=_reachable_diarizer,
     )
     async with LifespanManager(app):
         transport = ASGITransport(app=app)
@@ -354,6 +456,7 @@ async def test_diarize_session_relabels_globally(tmp_path: Path) -> None:
         capture_factory=capture_factory,  # type: ignore[arg-type]
         backend_factory=FakeBackend,  # type: ignore[arg-type]
         diarizer_factory=_whole_session_diarizers,
+        diarizer_probe=_reachable_diarizer,
     )
     async with LifespanManager(app):
         transport = ASGITransport(app=app)
@@ -506,6 +609,7 @@ async def test_diarize_job_translates_a_diarizer_error_status_for_the_gm(tmp_pat
         capture_factory=capture_factory,  # type: ignore[arg-type]
         backend_factory=FakeBackend,  # type: ignore[arg-type]
         diarizer_factory=failing_diarizers,
+        diarizer_probe=_reachable_diarizer,
     )
     async with LifespanManager(app):
         transport = ASGITransport(app=app)
@@ -538,6 +642,7 @@ async def test_diarize_job_leaves_an_unreachable_diarizer_error_as_is(tmp_path: 
         capture_factory=capture_factory,  # type: ignore[arg-type]
         backend_factory=FakeBackend,  # type: ignore[arg-type]
         diarizer_factory=unreachable_diarizers,
+        diarizer_probe=_reachable_diarizer,
     )
     async with LifespanManager(app):
         transport = ASGITransport(app=app)
@@ -548,6 +653,107 @@ async def test_diarize_job_leaves_an_unreachable_diarizer_error_as_is(tmp_path: 
 
     assert job["status"] == "error"
     assert "Connection refused" in str(job["error"])
+
+
+async def test_a_timed_out_diarization_says_so_instead_of_saying_nothing(
+    tmp_path: Path,
+) -> None:
+    """The failure that was invisible end to end: an error with no words in it.
+
+    ``str(httpx.ReadTimeout())`` is the empty string, and an ``UNREACHABLE``
+    verdict used to be passed through as ``str(exc)``, so a diarization that
+    ran out of time stored ``error=""``. The session page reads a job as failed
+    only if it carries a message, so the column went back to "-" and a run that
+    had taken two minutes was indistinguishable from a button never pressed.
+    """
+
+    async def timing_out_diarizers(_config: DiarizationConfig) -> DiarizationProvider:
+        return _FailingDiarizer(httpx.ReadTimeout(""))
+
+    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t")
+    app = create_app(
+        settings,
+        capture_factory=capture_factory,  # type: ignore[arg-type]
+        backend_factory=FakeBackend,  # type: ignore[arg-type]
+        diarizer_factory=timing_out_diarizers,
+        diarizer_probe=_reachable_diarizer,
+    )
+    async with LifespanManager(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            pid = await _provider(client)
+            sid = await _run_session(client, pid)
+            job = await _diarize_job(client, sid)
+
+    assert job["status"] == "error"
+    error = str(job["error"])
+    assert error.strip()  # the whole bug: this used to be ""
+    assert "http://diar" in error  # which service, not just "something"
+    assert "did not answer in time" in error
+    assert "ReadTimeout" in error  # and which failure, for whoever reads a report
+
+
+async def test_diarizing_against_a_service_that_is_not_answering_is_refused(
+    tmp_path: Path,
+) -> None:
+    """A press that would only lengthen the queue is answered, not queued.
+
+    A diarization the service is still working on when the client gives up
+    keeps the service busy, so every further press lands behind it. Refusing
+    costs one probe, the same one the health badge uses, and says which
+    endpoint is not answering.
+    """
+    probed: list[str] = []
+
+    async def unreachable(endpoint: str) -> HealthReport:
+        probed.append(endpoint)
+        return HealthReport(HealthStatus.UNREACHABLE, "no answer within 2s")
+
+    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t")
+    app = create_app(
+        settings,
+        capture_factory=capture_factory,  # type: ignore[arg-type]
+        backend_factory=FakeBackend,  # type: ignore[arg-type]
+        diarizer_factory=_whole_session_diarizers,
+        diarizer_probe=unreachable,
+    )
+    async with LifespanManager(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            pid = await _provider(client)
+            sid = await _run_session(client, pid)
+
+            refused = await client.post(
+                "/api/reprocess",
+                json={
+                    "session_id": sid,
+                    "operation": "diarize",
+                    "diarization": {"mode": "remote", "endpoint": "http://diar"},
+                },
+            )
+            assert refused.status_code == 503
+            detail = refused.json()["detail"]
+            assert "http://diar" in detail
+            assert "no answer within 2s" in detail
+            # No job row either: a refused press leaves nothing behind to
+            # explain later, which is the difference from a job that fails.
+            assert (await client.get("/api/reprocess", params={"session_id": sid})).json() == []
+
+            # A re-transcription is still allowed against the same dead
+            # diarizer: its value is the transcript, and the router survives a
+            # diarizer that is not there.
+            allowed = await client.post(
+                "/api/reprocess",
+                json={
+                    "session_id": sid,
+                    "provider_id": pid,
+                    "model": _MODEL,
+                    "diarization": {"mode": "remote", "endpoint": "http://diar"},
+                },
+            )
+            assert allowed.status_code == 202
+
+    assert probed == ["http://diar"]
 
 
 class _TrackingDiarizer:
@@ -613,6 +819,7 @@ async def test_transcribe_job_diarizes_under_its_own_bank_and_forgets_only_that(
         capture_factory=capture_factory,  # type: ignore[arg-type]
         backend_factory=FakeBackend,  # type: ignore[arg-type]
         diarizer_factory=tracking_diarizers,
+        diarizer_probe=_reachable_diarizer,
     )
     async with LifespanManager(app):
         transport = ASGITransport(app=app)
@@ -655,6 +862,7 @@ async def test_delete_transcript_version(tmp_path: Path) -> None:
         capture_factory=capture_factory,  # type: ignore[arg-type]
         backend_factory=FakeBackend,  # type: ignore[arg-type]
         diarizer_factory=_whole_session_diarizers,
+        diarizer_probe=_reachable_diarizer,
     )
     async with LifespanManager(app):
         transport = ASGITransport(app=app)
@@ -807,6 +1015,7 @@ async def test_running_job_publishes_its_segment_count(tmp_path: Path) -> None:
         capture_factory=_two_utterance_capture,  # type: ignore[arg-type]
         backend_factory=factory,  # type: ignore[arg-type]
         diarizer_factory=fake_diarizers,
+        diarizer_probe=_reachable_diarizer,
     )
     async with LifespanManager(app):
         transport = ASGITransport(app=app)
@@ -864,6 +1073,7 @@ async def test_reprocess_fails_with_the_vendors_reason_when_credit_runs_out(
         capture_factory=capture_factory,  # type: ignore[arg-type]
         backend_factory=factory,  # type: ignore[arg-type]
         diarizer_factory=fake_diarizers,
+        diarizer_probe=_reachable_diarizer,
     )
     async with LifespanManager(app):
         transport = ASGITransport(app=app)

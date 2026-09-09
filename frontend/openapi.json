@@ -6,13 +6,35 @@
     "version": "0.1.0"
   },
   "paths": {
+    "/api/system/livez": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Livez",
+        "description": "Say that this process is up. The one route here that needs no cookie.\n\nEmpty on purpose: it touches no disk, no database and no diarizer, so it\ncannot fail for a reason that has nothing to do with the process being\nalive, and it hands an anonymous caller nothing about the deployment. That\nis what makes it safe to leave open for the installer's start-up poll and\nfor any uptime check pointed at the box.",
+        "operationId": "livez_api_system_livez_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LivenessResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/system/healthz": {
       "get": {
         "tags": [
           "system"
         ],
         "summary": "Healthz",
-        "description": "Return service health. Used by UI badge, push alerts, and external polling.",
+        "description": "Return the full operational snapshot, for the UI badge and push alerts.\n\nBehind auth, unlike ``/livez`` above: the exact version, free disk, capture\nstate, the operator's own diarizer endpoint and the STT vendor's raw error\ntext add up to a reconnaissance report, and this app publishes its port on\nthe LAN. It also makes the shell's guard real - the SPA layout already\nredirects to /login when this call answers 401, a branch that could not be\nreached while the route was open.",
         "operationId": "healthz_api_system_healthz_get",
         "responses": {
           "200": {
@@ -25,7 +47,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
       }
     },
     "/api/system/diarizer/probe": {
@@ -507,7 +534,7 @@
           "system"
         ],
         "summary": "Test Alert Channel",
-        "description": "Send a test notification to one channel.",
+        "description": "Send a test notification to one channel, and say why when it fails.\n\nAlways 200, failure included: the request itself succeeded, and the answer\nto \"did this channel take it\" is the body. Turning a refused webhook into a\n5xx here would make the page's own error path swallow the reason.",
         "operationId": "test_alert_channel_api_system_alerts_channels__channel_id__test_post",
         "security": [
           {
@@ -724,7 +751,7 @@
           "auth"
         ],
         "summary": "Login",
-        "description": "Validate the shared password and set an auth cookie.\n\nRate-limited per client IP (see ``LoginRateLimiter``): a shared password\nwith no backoff is a free brute-force target on a device that's LAN- (or\nworse, internet-) reachable.",
+        "description": "Validate the shared password and set an auth cookie.\n\nRate-limited per client (see ``LoginRateLimiter``): a shared password with\nno backoff is a free brute-force target on a device that's LAN- (or worse,\ninternet-) reachable. The key comes from ``client_address`` rather than the\nsocket's peer, because behind the bundled Caddy every browser at the table\narrives from the same container address and a limiter keyed on that is a\nglobal one: anyone able to reach the box could hold the login shut for\neverybody, five requests at a time.",
         "operationId": "login_api_auth_login_post",
         "requestBody": {
           "content": {
@@ -1177,7 +1204,7 @@
           "providers"
         ],
         "summary": "Provider Models",
-        "description": "List a provider's available models (live /v1/models, else a curated set).\n\nEntries carry price/context length only where the provider publishes them\n(OpenRouter); everywhere else it's the bare id, exactly as before.",
+        "description": "List a provider's available models (live /v1/models, else a curated set).\n\nEntries carry price/context length only where the provider publishes them\n(OpenRouter); everywhere else it's the bare id, exactly as before.\n\nAn empty list is an answer, but not when there is a reason behind it. A\nself-hosted base URL pointing at nothing produced ``200 []``, the same thing\na vendor listing no models produces, so the wizard's \"Load models\" button\nsaid nothing at all and left the operator to guess between a wrong port, a\nstopped service and a provider with nothing to offer. The probe already\nknows which it was, so that sentence goes out as the error it is - 502,\nbecause this app is fine and the endpoint behind it is not.",
         "operationId": "provider_models_api_providers_models_post",
         "requestBody": {
           "content": {
@@ -1790,7 +1817,7 @@
           "sessions"
         ],
         "summary": "Summarize Session",
-        "description": "Summarize a session's transcript with the chosen LLM provider + model.",
+        "description": "Summarize one transcript version with the chosen LLM provider + model.\n\n``version`` names the version to summarize and defaults to the live\ncapture, so a client that predates the field keeps getting what it always\ngot. Everything else about the request is unchanged.\n\nIt exists because summarizing was the most expensive way this app could be\nwrong: the route summarized the original with the version hard-coded, so a\nsession whose live capture died half way through and was re-transcribed\nthree times still fed the LLM the broken half-transcript - and the GM paid\nfor a summary of a session that mostly is not in it.",
         "operationId": "summarize_session_api_session__session_id__summarize_post",
         "security": [
           {
@@ -1848,7 +1875,7 @@
           "sessions"
         ],
         "summary": "Export Session",
-        "description": "Export a session's transcript as txt/md/srt/vtt/json.",
+        "description": "Export one transcript version as txt/md/srt/vtt/json.\n\n``version`` is the version the caller is looking at (\"original\" or a\ntranscribe job id), defaulting to the live capture so an old bookmark still\nmeans what it meant.\n\nThe route had no such parameter at all, and rendered the original with the\nversion hard-coded. The whole point of re-transcribing a session with a\nbetter model is the file you get out of it, so a GM who selected a 1346-\nsegment re-transcription and pressed Export got the 683-segment original\nback, in every format, with nothing on screen saying which one it was.\n\nAn unknown version is a 404 rather than a fallback to the original, for the\nsame reason a wrong file with no warning is worse than no file.",
         "operationId": "export_session_api_session__session_id__export_get",
         "security": [
           {
@@ -1873,6 +1900,16 @@
               "type": "string",
               "default": "txt",
               "title": "Fmt"
+            }
+          },
+          {
+            "name": "version",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "original",
+              "title": "Version"
             }
           }
         ],
@@ -1997,7 +2034,7 @@
           "sessions"
         ],
         "summary": "Merge Sessions",
-        "description": "Merge the selected sessions' transcripts - and audio - into a new session.\n\nParts are concatenated oldest-first, each part's timestamps offset so they run\nback-to-back; speaker rename maps are unioned; originals are left intact. When\nevery source has stored audio (at one shared sample rate), the WAVs and\nutterance indexes are concatenated too, so the merged session can be\nre-processed, re-diarized, and downloaded like any other.",
+        "description": "Merge the selected sessions' transcripts - and audio - into a new session.\n\nParts are concatenated oldest-first, each part's timestamps offset so they run\nback-to-back; speaker rename maps are unioned; originals are left intact. When\nevery source has stored audio (at one shared sample rate), the WAVs and\nutterance indexes are concatenated too, so the merged session can be\nre-processed, re-diarized, and downloaded like any other.\n\nEach source contributes its **newest completed re-transcription that\nproduced segments**, falling back to its live capture when it has none (see\n:func:`_best_available_rows`). This used to take every source's original\nunconditionally, which threw away every re-transcription of every part: a\nGM who re-ran two half-sessions through a better model and then merged them\ngot the two live captures back, with no way to tell from the merged row.\n\nThe alternative considered and not taken was a per-source version picker in\nthe request. It was rejected because the merge dialog does not ask and\nshould not have to: a GM merging the two halves of one evening is saying\n\"make this one session\", not \"and by the way use job 2680abb4 for the first\nhalf\". Taking the best text available is what that sentence means, and the\nsources are left intact, so a merge made from the wrong version is undone by\ndeleting one row rather than by recovering anything.",
         "operationId": "merge_sessions_api_session_merge_post",
         "requestBody": {
           "content": {
@@ -2044,7 +2081,7 @@
           "reprocess"
         ],
         "summary": "Enqueue Reprocess",
-        "description": "Enqueue a post-session re-processing job.",
+        "description": "Enqueue a post-session re-processing job.\n\n503 for a diarizer that is not answering, because that is what it means:\nthe request is fine and the machine it needs is not there. It is also the\none refusal here that clears up by itself, so the message names the\nendpoint and invites another press rather than describing a bad request.",
         "operationId": "enqueue_reprocess_api_reprocess_post",
         "security": [
           {
@@ -2709,6 +2746,17 @@
           "ok": {
             "type": "boolean",
             "title": "Ok"
+          },
+          "detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail"
           }
         },
         "type": "object",
@@ -2716,7 +2764,7 @@
           "ok"
         ],
         "title": "AlertTestResult",
-        "description": "Delivery outcome of a single channel test."
+        "description": "Delivery outcome of a single channel test, and why it failed.\n\n``detail`` is the only diagnosis an alert channel ever offers: nothing\nprobes one periodically and the table carries no health column, so \"Test\nfailed\" on its own leaves an operator guessing between a typo, a closed\nport and a rejected token. It holds the transport's own words or the status\nplus the vendor's sentence, bounded and with the channel's credential\nscrubbed out (see ``loreline.monitoring.alerts._scrub``). None on success:\nthere is nothing to explain."
       },
       "AuthScheme": {
         "type": "string",
@@ -2788,6 +2836,19 @@
             },
             "type": "array",
             "title": "Realtime Name Markers"
+          },
+          "incompatible_name_markers": {
+            "additionalProperties": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "propertyNames": {
+              "$ref": "#/components/schemas/Interaction"
+            },
+            "type": "object",
+            "title": "Incompatible Name Markers"
           }
         },
         "additionalProperties": false,
@@ -3256,6 +3317,19 @@
         ],
         "title": "JobStatus",
         "description": "Lifecycle state of a re-processing job."
+      },
+      "LivenessResponse": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "const": "ok",
+            "title": "Status",
+            "default": "ok"
+          }
+        },
+        "type": "object",
+        "title": "LivenessResponse",
+        "description": "The unauthenticated liveness answer: this process is up, and no more.\n\nIts own model rather than a reuse of ``OkResponse`` because the two are\nread by different callers and mean different things: ``ok`` acknowledges a\nwrite to whoever made it, ``status`` is what an uptime check and the\ninstaller's start-up poll look at from outside. Deliberately carries\nnothing about the deployment; see ``/api/system/livez``."
       },
       "LlmCapabilities": {
         "properties": {
@@ -4334,6 +4408,24 @@
               }
             ],
             "title": "Summary Model"
+          },
+          "summary_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Summary Version"
+          },
+          "merged_from": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Merged From"
           }
         },
         "type": "object",
@@ -4512,6 +4604,17 @@
               }
             ],
             "title": "Reasoning Effort"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version"
           }
         },
         "type": "object",

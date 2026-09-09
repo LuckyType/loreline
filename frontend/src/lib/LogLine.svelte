@@ -3,12 +3,24 @@ import { cn } from '$lib/utils'
 
 let { line, wrap = true }: { line: string; wrap?: boolean } = $props()
 
+// Where one key=value pair ends and the next begins. A value is allowed to
+// contain spaces, because the ones worth reading do: the very first line of
+// every session is
+//   audio.capture.start device=Jabra SPEAK 410 USB: Audio (hw:0,0) rate=16000
+// and splitting that on whitespace tore the device name - the one thing on the
+// line a person actually reads - into five unkeyed grey tokens. So a value
+// runs to the next " key=" boundary, or to the end of the line. The key shape
+// is the usual identifier one the server writes (device, device_rate), which
+// is also what keeps "USB:" and "(hw:0,0)" from being mistaken for a new pair.
+const PAIR_BOUNDARY = /\s+(?=[A-Za-z_][A-Za-z0-9_.]*=)/
+
 const parsed = $derived.by(() => {
 	const m = line.match(/^(\S+)\s+\[(\w+)\]\s+(\S+)(?:\s+(.*))?$/)
 	if (!m) return null
 	const extras: { k: string; v: string }[] = []
-	if (m[4]) {
-		for (const tok of m[4].split(/\s+/)) {
+	const rest = m[4]?.trim()
+	if (rest) {
+		for (const tok of rest.split(PAIR_BOUNDARY)) {
 			const eq = tok.indexOf('=')
 			if (eq > 0) extras.push({ k: tok.slice(0, eq), v: tok.slice(eq + 1) })
 			else extras.push({ k: '', v: tok })

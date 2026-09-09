@@ -68,6 +68,15 @@ const PAIR: Record<Action, [provider: ProviderKey, model: ModelKey]> = {
 	video: ['video_provider', 'video_model'],
 }
 
+/** Which wire interaction an action picks a model for. A live capture is a
+ *  transcription with a narrower provider list, so the two share one. */
+const INTERACTION: Record<Action, Interaction> = {
+	capture: 'transcribe',
+	transcribe: 'transcribe',
+	summarize: 'summarize',
+	video: 'video',
+}
+
 /** True for a row that can drive a live capture: transcribe-capable, and not
  *  a kind the config marks as stored-audio only. Permissive without a config,
  *  like every gate: offering too much beats hiding a row an operator needs. */
@@ -190,7 +199,7 @@ class ActionSetupStore {
 		action: Action,
 		provider: ProviderConfig | undefined = this.preferredProvider(action),
 	): string {
-		return preferredModel(provider, this.pairedDefault(action, provider))
+		return preferredModel(provider, this.pairedDefault(action, provider), INTERACTION[action])
 	}
 }
 

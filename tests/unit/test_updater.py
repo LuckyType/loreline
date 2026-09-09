@@ -70,6 +70,13 @@ async def test_update_refuses_in_container() -> None:
     assert result.previous_commit == "sha"
     assert result.new_commit == "sha"
     assert "deploy/update.sh" in result.output
+    # The refusal has to name the way out, not just the refusal. An operator who
+    # wants this button working learns the updater profile exists from here or
+    # from nowhere, and the message used to point at a systemd timer that is as
+    # absent from a container as the unit it had just said was missing.
+    assert "--profile updater" in result.output
+    assert "UPDATER_TOKEN" in result.output
+    assert "systemctl" not in result.output
     # Never even tried to run the source-deployment script.
     assert not any(a[0] == "bash" for a in runner.calls)
 

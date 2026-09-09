@@ -72,6 +72,13 @@ def _tap(
     ``session_id`` and ``job_id`` come from the event dict, which by this point
     holds both explicit keyword arguments and whatever the emitting task bound
     into its context (see :func:`bind_log_context`).
+
+    The traceback is in there too, as the ``exception`` field, because this tap
+    runs *after* ``format_exc_info`` (see :func:`configure_logging`). It used
+    to run before it, and the difference is the whole value of a stored log:
+    a failed run's file then held ``... reprocess.failed exc_info=True`` and
+    not one line of the traceback that says why, which is precisely the
+    question the file is opened to answer.
     """
     broadcaster = _SINKS.broadcaster
     if broadcaster is None:
@@ -135,7 +142,10 @@ def configure_logging(
         structlog.processors.add_log_level,
         structlog.processors.TimeStamper(fmt="iso", utc=True),
         structlog.processors.StackInfoRenderer(),
-        # After merge_contextvars, so the tap sees the bound session/job fields.
+        structlog.processors.format_exc_info,
+        # After merge_contextvars, so the tap sees the bound session/job fields,
+        # and after format_exc_info, so it sees a rendered traceback rather than
+        # the bare ``exc_info=True`` flag that stands in for one before it runs.
         # Always in the chain, no-op without a broadcaster: the chain a cached
         # logger holds must not depend on how the *first* configure call went.
         _tap,
@@ -150,7 +160,7 @@ def configure_logging(
     # In place, keeping the list identity stable across reconfigures (see
     # _PROCESSORS): loggers cached by an earlier call share this object, so this
     # is what makes them pick up the new renderer instead of keeping the old.
-    _PROCESSORS[:] = [*shared_processors, structlog.processors.format_exc_info, renderer]
+    _PROCESSORS[:] = [*shared_processors, renderer]
 
     structlog.configure(
         processors=_PROCESSORS,

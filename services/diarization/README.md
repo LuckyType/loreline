@@ -15,6 +15,10 @@ capture device). Exposes the HTTP contract consumed by Loreline's
 - `DELETE /sessions/{session_id}` -> `{"deleted": bool}`, forgetting one session's
   remembered speakers. 200 either way, including for an id that was never seen.
 
+`POST /diarize` also answers `429` with a `Retry-After` header when another
+diarization is already running and this one waited 30 s for it - see "One at a
+time" below.
+
 Two fields describe the service rather than the audio. `session_memory` says this
 build understands `session_id` instead of accepting and ignoring it, which is what
 the image before it did and what no status code distinguishes; Loreline's endpoint
@@ -35,6 +39,33 @@ What the labels mean depends on whether the call carries a `session_id`:
   matched no known voice - has its segments left out of the answer rather than
   labelled with a number that would name somebody else. Loreline's merge already
   handles words that no segment covers, which is what those words become.
+
+## One at a time
+
+One diarization runs at a time, behind an explicit semaphore (`DiarizeSlot`).
+A second call waits up to 30 seconds for the slot and is then refused with
+`429` and a `Retry-After`, so a live capture's short turns queue behind each
+other while a caller arriving behind a whole-session run is told to come back
+instead of holding a connection open for minutes.
+
+This is a CPU service with one set of ONNX sessions, so serializing costs
+nothing in throughput: two inferences at once take twice as long each and
+finish no sooner. What it buys is everything else the service answers. It used
+to serialize by accident, with the model on the request thread and no bound at
+all, and a 37-minute session then made it answer nothing whatsoever - including
+the app's 2-second health probe, which reported the diarizer *unreachable* for
+as long as it was busy, while every further press queued more work behind the
+pile. `/healthz` does not take the slot and answers in milliseconds during a
+diarization.
+
+Two limits are worth knowing. A diarization that has started cannot be stopped:
+it is a native call with no cancellation point, so a caller that gives up
+leaves it running to the end, and the slot is about who may *start* one.
+And because of that, the container's uvicorn is given
+`--timeout-graceful-shutdown 5`: without it, `docker stop` waits for the
+in-flight request, exceeds its own grace period, and the container is SIGKILLed
+(exit 137). With it the process exits on its own and the worker thread, which
+is a daemon thread, goes with it.
 
 ## Session speaker memory
 

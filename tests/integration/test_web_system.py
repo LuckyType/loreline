@@ -339,6 +339,7 @@ async def test_alert_channels_crud_and_test(
 
     result = (await client.post(f"/api/system/alerts/channels/{channel_id}/test")).json()
     assert result["ok"] is True
+    assert result["detail"] is None  # nothing to explain when it worked
     assert len(alert_requests) >= 1
 
     assert (await client.delete(f"/api/system/alerts/channels/{channel_id}")).status_code == 200
@@ -362,5 +363,98 @@ async def test_ops_endpoints_require_auth(tmp_path: Path) -> None:
         assert (
             await ac.get("/api/system/diarizer/probe", params={"endpoint": "http://x"})
         ).status_code == 401
-        # health stays open for external pollers
-        assert (await ac.get("/api/system/healthz")).status_code == 200
+        # The snapshot is behind the cookie too: version, free disk, capture
+        # state, the diarizer endpoint and the STT vendor's error text are not
+        # for anyone who can reach the port.
+        assert (await ac.get("/api/system/healthz")).status_code == 401
+        # What stays open for external pollers is liveness, and only that.
+        assert (await ac.get("/api/system/livez")).status_code == 200
+
+
+async def test_webhook_channel_needs_a_real_url(client: AsyncClient) -> None:
+    """A webhook that is not a URL is refused by the API, client or no client.
+
+    The bug this closes: `not-a-url` saved, sat in the table looking configured
+    and delivered nothing, and nothing on the page ever said so.
+    """
+    rejected = await client.post(
+        "/api/system/alerts/channels",
+        json={"type": "webhook", "url": "not-a-url"},
+    )
+    assert rejected.status_code == 422
+    error = rejected.json()["detail"][0]
+    assert error["loc"] == ["body", "url"]  # the message names the field
+    assert "absolute http:// or https:// URL" in error["msg"]
+    assert (await client.get("/api/system/alerts/channels")).json() == []
+
+    # A webhook with no URL at all is the same broken row by another route.
+    assert (
+        await client.post("/api/system/alerts/channels", json={"type": "webhook"})
+    ).status_code == 422
+
+    # ...and a real one still saves, unchanged.
+    created = await client.post(
+        "/api/system/alerts/channels",
+        json={"type": "webhook", "url": "https://hooks.example/loreline", "min_level": "error"},
+    )
+    assert created.status_code == 201
+    assert created.json()["url"] == "https://hooks.example/loreline"
+    assert created.json()["min_level"] == "error"
+
+
+async def test_ntfy_channel_needs_a_real_server(client: AsyncClient) -> None:
+    """Same check on the other URL-shaped field, whose default hides it."""
+    rejected = await client.post(
+        "/api/system/alerts/channels",
+        json={"type": "ntfy", "server": "ntfy.example", "topic": "loreline"},
+    )
+    assert rejected.status_code == 422
+    error = rejected.json()["detail"][0]
+    assert error["loc"] == ["body", "server"]
+    assert "absolute http:// or https:// URL" in error["msg"]
+
+    ok = await client.post(
+        "/api/system/alerts/channels",
+        json={"type": "ntfy", "server": "https://ntfy.example", "topic": "loreline"},
+    )
+    assert ok.status_code == 201
+    assert ok.json()["server"] == "https://ntfy.example"
+
+    # A Telegram channel carries the ntfy default in `server` and never uses
+    # it, so the check must not fire on a field that channel type ignores.
+    assert (
+        await client.post("/api/system/alerts/channels", json={"type": "telegram", "chat_id": "5"})
+    ).status_code == 201
+
+
+async def test_failed_test_says_why_without_leaking_the_token(settings: Settings) -> None:
+    """The test route hands back the reason, scrubbed of the channel's token.
+
+    Telegram carries the bot token in the request path, and a vendor that
+    echoes the request back would otherwise put it in the UI and the log.
+    """
+    token = "1234567:AA-super-secret-bot-token"
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={"description": f"Unauthorized: {request.url}"})
+
+    app = create_app(
+        settings,
+        command_runner=FakeRunner(),
+        alert_client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handle)),
+    )
+    async with (
+        LifespanManager(app),
+        AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac,
+    ):
+        created = await ac.post(
+            "/api/system/alerts/channels",
+            json={"type": "telegram", "chat_id": "5", "token": token},
+        )
+        channel_id = created.json()["id"]
+        result = (await ac.post(f"/api/system/alerts/channels/{channel_id}/test")).json()
+
+    assert result["ok"] is False
+    assert result["detail"].startswith("HTTP 401")
+    assert token not in result["detail"]
+    assert "/bot***" in result["detail"]

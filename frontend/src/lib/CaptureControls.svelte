@@ -32,7 +32,7 @@ import { modelInfoFor } from '$lib/modelCatalog.svelte'
 import ModelPicker from '$lib/ModelPicker.svelte'
 import { formatTime, health } from '$lib/stores'
 import { connect } from '$lib/ws'
-import type { DiarizationModeKind, DiarizerProbe } from '$lib/wire'
+import type { DiarizationModeKind, DiarizerProbe, InputDevice } from '$lib/wire'
 import { cn } from '$lib/utils'
 
 // Provider rows, stored defaults and the capability gate all come from one
@@ -52,7 +52,7 @@ const sttDefault = $derived(actionSetup.pairedDefault('capture', primaryProvider
 // Seeded, not stored: a pick in the picker overrides these until the provider
 // changes, and a provider switch starts over (see preferredModel).
 let model = $derived(actionSetup.preferredModelFor('capture', primaryProvider))
-let fallbackModel = $derived(preferredModel(fallbackProvider, ''))
+let fallbackModel = $derived(preferredModel(fallbackProvider, '', 'transcribe'))
 // The stored mode, seeded the same way: a pick overrides it.
 let diarMode = $derived(actionSetup.defaults.diar_mode as DiarizationModeKind)
 // The picked model's catalogue entry, used only as the fallback for a model
@@ -89,14 +89,26 @@ const diarProbeCurrent = $derived(
 	diarMode === 'remote' && diarProbedEndpoint === diarEndpoint.trim(),
 )
 // On by default: capture always fed the campaign glossary to the provider, and
-// turning it off is the deliberate choice (hear the audio unbiased).
-let useGlossary = $state(true)
+// turning it off is the deliberate choice (hear the audio unbiased). What is
+// held here is that choice, not the resulting flag - null while the GM has no
+// opinion yet - which is what keeps "off because I said so" apart from "off
+// because this model cannot take one". It was one plain $state that an effect
+// cleared, so a detour through a model with no glossary support left the box
+// unticked once the next model could take one again, and the card claimed a
+// deliberate choice nobody had made while the campaign's terms went unsent.
+let glossaryPick = $state<boolean | null>(null)
 // Some models cannot take a glossary at all (the field is simply ignored), in
 // which case the checkbox is disabled and says why rather than being a silent
 // no-op. No `active` features are passed: a model that refuses to combine the
 // glossary with something else does not block it, it costs something, and the
 // backend resolves that in the glossary's favour - see glossaryWarning.
 const glossaryBlocked = $derived(featureBlockedReason(primaryKind, model, 'glossary'))
+// Derived rather than assigned, so a model that cannot receive a glossary at
+// all suppresses it for exactly as long as it is selected: the terms are never
+// sent with the checkbox still ticked, and picking a model that can take them
+// again restores the GM's standing intent instead of silently staying off.
+// Only about that case, not about a conflict - see glossaryWarning.
+const useGlossary = $derived(glossaryBlocked ? false : (glossaryPick ?? true))
 // The price of that resolution, stated where the GM decides: on a model that
 // declares the conflict, switching the glossary on gives up word timestamps
 // and so degrades speaker attribution in every diarization mode.
@@ -137,15 +149,6 @@ const startBlocked = $derived(endpointMissing || fallbackModelMissing)
 // the summary line claiming a mode the control below it no longer lists.
 $effect(() => {
 	if (diarMode === 'inline' && model && !inlineAvailable) diarMode = 'none'
-})
-
-// Switching to a model with no way to receive a glossary at all must not leave
-// the toggle on: the terms would be dropped on the floor with the checkbox
-// still ticked. This is only about that case now, not about a conflict - a
-// model that refuses a combination still gets the glossary, and gives up the
-// other feature instead.
-$effect(() => {
-	if (useGlossary && glossaryBlocked) useGlossary = false
 })
 
 // Debounced live probe of the remote diarization endpoint: fires shortly
@@ -194,6 +197,26 @@ function setDiarMode(mode: string) {
 	}
 }
 
+// --- is the stored microphone still there? ---
+// The stored setting is the device's full name with its ALSA card index baked
+// into it ("Jabra SPEAK 410 USB: Audio (hw:2,0)"), and that index moves when
+// the box is rebooted with a different set of USB devices attached. Nothing
+// noticed until Start, which is to say until the table had already begun
+// playing: the server's message about it is a good one, it just arrives an
+// evening too late. So the card asks once when it mounts, by exactly the rule
+// Settings > Client already uses - a stored name that is not in the device
+// list is gone - rather than inventing a second one.
+//
+// Deliberately a warning and not a block on Start: the list can be wrong in
+// both directions (a listed device can still refuse to open, and a GM who has
+// just replugged the microphone knows more than a list fetched when this card
+// mounted), so this says so loudly and still lets them try.
+let storedDevice = $state('')
+let inputDevices = $state.raw<InputDevice[]>([])
+const deviceMissing = $derived(
+	storedDevice !== '' && !inputDevices.some((d) => d.name === storedDevice),
+)
+
 // Fallback and diarization are collapsed by default. The summary line has to
 // carry enough that folding them away never hides a problem - so it states
 // what each is set to, and turns red when something needs attention.
@@ -225,6 +248,11 @@ const diarProblem = $derived(
 )
 
 const advancedProblem = $derived(startBlocked || diarProblem)
+
+// The dot in front of the summary line grades the whole line, and the missing
+// microphone is on that line too, so it is not the same question as
+// advancedProblem: that one is only about what the advanced panel is set to.
+const summaryProblem = $derived(advancedProblem || deviceMissing)
 
 const capturing = $derived($health?.capture_status === 'capturing')
 
@@ -445,10 +473,27 @@ async function refresh() {
 	health.set(await api.health())
 }
 
+/** One fetch per mount, not one per health poll: this answer changes when
+ *  something is plugged in, not every five seconds. */
+async function checkStoredDevice() {
+	try {
+		// Fetched and assigned together: a device list that has landed while the
+		// stored name has not (or the reverse) reads as a missing device, and
+		// would flash a red warning at a GM whose microphone is fine.
+		const [devices, setting] = await Promise.all([api.listDevices(), api.getInputDevice()])
+		inputDevices = devices
+		storedDevice = setting.device ?? ''
+	} catch {
+		// A call that never answered says nothing about the microphone, so the
+		// card stays quiet rather than painting a fault it cannot vouch for.
+	}
+}
+
 onMount(() => {
 	// Providers, defaults and the capability gate: every seed above is derived
 	// from the store, so nothing here has to wait for it.
 	void actionSetup.load()
+	void checkStoredDevice()
 })
 </script>
 
@@ -503,8 +548,13 @@ onMount(() => {
 			{/if}
 		{:else}
 			<!-- Essentials inline; fallback + diarization fold away, but the summary
-			     below always states what they're set to so nothing hides silently. -->
-			<div class="grid grid-cols-[1fr_1fr_auto] items-end gap-3">
+			     below always states what they're set to so nothing hides silently.
+			     Stacked below sm and three columns above it: at 320px the third
+			     column pushed Start past the card's own right edge, with no
+			     horizontal scroll to reveal it, so 28px of a 109px button was on
+			     screen; at 390px the label clipped to "Start sess" and both
+			     dropdowns were squeezed under 140px. -->
+			<div class="grid grid-cols-1 items-end gap-3 sm:grid-cols-[1fr_1fr_auto]">
 				<div class="flex flex-col gap-2">
 					<Label for="primary">Transcription provider</Label>
 					<Dropdown
@@ -525,7 +575,11 @@ onMount(() => {
 						defaultModel={sttDefault}
 					/>
 				</div>
-				<Button onclick={start} disabled={busy || !primary || !model || startBlocked}>
+				<Button
+					class="w-full sm:w-auto"
+					onclick={start}
+					disabled={busy || !primary || !model || startBlocked}
+				>
 					Start session
 				</Button>
 				{#if !model && primary}
@@ -539,8 +593,25 @@ onMount(() => {
 				class="mt-3.5 flex flex-wrap items-center gap-x-2 gap-y-1 border-t border-dashed pt-3 text-xs"
 			>
 				<span
-					class={cn('size-1.5 shrink-0 rounded-full', advancedProblem ? 'bg-destructive' : 'bg-emerald-500')}
+					class={cn(
+						'size-1.5 shrink-0 rounded-full',
+						summaryProblem ? 'bg-destructive' : 'bg-emerald-500',
+					)}
 				></span>
+				{#if deviceMissing}
+					<!-- First on the line on purpose: a microphone that is not there
+					     outranks anything the advanced panel can be set to, and it is
+					     the only thing on this line that is fixed somewhere else. -->
+					<span class="text-muted-foreground">Microphone</span>
+					<a
+						class="text-destructive underline underline-offset-2"
+						href="/settings/client"
+						title="The saved microphone '{storedDevice}' is no longer available - pick another one."
+					>
+						Not found - pick another in Settings
+					</a>
+					<span class="text-muted-foreground">·</span>
+				{/if}
 				<span class="text-muted-foreground">Fallback</span>
 				<span class={fallbackModelMissing ? 'text-destructive' : 'text-foreground'}
 					>{fallbackSummary}</span
@@ -633,7 +704,7 @@ onMount(() => {
 								id="use-glossary"
 								checked={useGlossary}
 								disabled={!!glossaryBlocked}
-								onCheckedChange={(v) => (useGlossary = v === true)}
+								onCheckedChange={(v) => (glossaryPick = v === true)}
 							/>
 							<span class={cn('text-sm', glossaryBlocked && 'text-muted-foreground')}>
 								Use glossary
