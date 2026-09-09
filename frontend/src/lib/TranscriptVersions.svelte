@@ -21,13 +21,16 @@
  * scrolls meant scrolling to reach the one button anybody came for, and on a
  * phone they wrapped into a paragraph of widgets. With no stored audio there
  * is nothing to replay, so the button is disabled with that reason instead of
- * opening a dialog that could not do anything.
+ * opening a dialog that could not do anything. Below the `sm` breakpoint the
+ * button is a plus and nothing else: two words plus the section's title do not
+ * fit on a 320px header, and it opens a dialog that names itself anyway.
  *
  * Open, the section takes an equal share of the card's leftover height and
  * scrolls inside it, so a session with a dozen re-transcriptions still leaves
  * room for the transcript below it.
  */
 
+import { Plus } from '@lucide/svelte'
 import { actionSetup } from '$lib/actionSetup.svelte'
 import { ApiError, api } from '$lib/api'
 import { Badge } from '$lib/components/ui/badge'
@@ -331,11 +334,13 @@ const originalStatus = $derived.by(() => {
 				size="sm"
 				onclick={() => (reprocessOpen = true)}
 				disabled={!hasAudio}
+				aria-label="New transcription"
 				title={hasAudio
 					? 'Run the stored recording through a provider again, as another version'
 					: NO_AUDIO_NOTE}
 			>
-				New transcription
+				<Plus />
+				<span class="hidden sm:inline">New transcription</span>
 			</Button>
 		{/snippet}
 

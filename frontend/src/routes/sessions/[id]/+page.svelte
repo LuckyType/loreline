@@ -1,7 +1,8 @@
 <script lang="ts">
 /**
  * One session: its transcript versions, the transcript itself, its summary,
- * and the recording they all describe, playing at the foot of the card.
+ * and the recording they all describe, playing in a bar of its own beneath
+ * them.
  *
  * The page owns only what more than one card reads - the session, its job
  * rows, its generated videos, which version is selected, and where the
@@ -15,9 +16,14 @@
  * two cards fetching the same list on their own timers would disagree about
  * how many there are.
  *
- * The card is sized to the window rather than to its contents, so the player
- * stays reachable without scrolling: header and player are fixed bands, and
- * the sections between them share what is left, each scrolling its own body.
+ * The page is sized to the window rather than to its contents, so the player
+ * stays reachable without scrolling. It is the last row of a column that ends
+ * at the bottom of the screen and it takes only the height it needs, which
+ * leaves the card the rest: the session header is a fixed band at the top of
+ * that card, and the sections under it share what is left, each scrolling its
+ * own body. The player is docked by flow rather than by `position: fixed`, so
+ * unlike a fixed bar it can cover neither the card's last line nor the sidebar
+ * beside it, and a session with no recording simply ends the column early.
  * Which segment is being spoken is worked out here, once, because both the
  * timeline's dots and the transcript's highlight are answers to it.
  */
@@ -340,19 +346,22 @@ onMount(async () => {
 				onvideoschanged={refreshVideoJobs}
 				onerror={setError}
 			/>
-
-			<!-- Last, and docked: it brings its own separator, since a session with
-			     no recording renders no player and must not leave a rule behind. -->
-			<SessionPlayer
-				sessionId={id}
-				audioPath={detail.session.audio_path}
-				audioDurationS={detail.audio_duration_s}
-				segments={shownEvents}
-				{activeStart}
-				bind:audioEl
-				bind:currentTime
-				onseek={() => seekNonce++}
-			/>
 		</Card>
+
+		<!-- Outside the card, and last in the column: the recording belongs to no
+		     one section, and a row that takes only the height it needs sits on the
+		     bottom edge of the screen without being positioned there. It brings
+		     its own surface, and a session with no recording renders nothing here
+		     at all rather than an empty bar. -->
+		<SessionPlayer
+			sessionId={id}
+			audioPath={detail.session.audio_path}
+			audioDurationS={detail.audio_duration_s}
+			segments={shownEvents}
+			{activeStart}
+			bind:audioEl
+			bind:currentTime
+			onseek={() => seekNonce++}
+		/>
 	{/if}
 </div>

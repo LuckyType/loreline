@@ -1,6 +1,13 @@
 <script lang="ts">
 /**
- * The session's recording, docked at the foot of the card.
+ * The session's recording, a bar of its own under the card.
+ *
+ * It brings its own surface rather than sitting in the card's last slot,
+ * because it is not part of any one section: whichever of them is open, the
+ * playhead is the thing all of them are about. The page hands it the last row
+ * of a column sized to the window, so it sits on the bottom edge of the screen
+ * without being positioned there - it can no more overlap the card above it
+ * than any other block can overlap its sibling.
  *
  * A real <audio> element does the playing - it is what knows how to decode the
  * WAV, and what the browser's own media keys and screen readers already
@@ -9,14 +16,14 @@
  * bar that doubles as a map of the transcript, with a dot per segment and the
  * one being spoken lit.
  *
- * An empty recording gets the note rather than controls, from the same shared
- * check the export menu labels its entry with: a player that plainly cannot
- * play beats one that looks fine and stays silent.
+ * A session with no recording renders nothing at all, not an empty bar: there
+ * is no playhead to dock. An empty one gets the note rather than controls,
+ * from the same shared check the export menu labels its entry with: a player
+ * that plainly cannot play beats one that looks fine and stays silent.
  */
 
 import { Pause, Play } from '@lucide/svelte'
 import { api } from '$lib/api'
-import { CardContent } from '$lib/components/ui/card'
 import { audioIsEmpty, EMPTY_AUDIO_NOTE, formatTime, GAP_SOURCE } from '$lib/stores'
 import { cn } from '$lib/utils'
 import type { TranscriptEvent } from '$lib/wire'
@@ -86,12 +93,20 @@ function toggle() {
 </script>
 
 {#if hasAudio}
-	<div class="shrink-0 border-t"></div>
-	<CardContent class="shrink-0">
+	<!-- The card's own surface, spelled out: these are the classes card.svelte
+	     and card-content.svelte would have given it, minus the vertical padding
+	     a section needs and a control bar does not. `shrink-0` is what makes the
+	     card above absorb every pixel this does not take. -->
+	<div
+		class="shrink-0 rounded-xl bg-card px-6 py-3 text-sm text-card-foreground shadow-xs ring-1 ring-foreground/10"
+	>
 		{#if empty}
 			<p class="m-0 text-muted-foreground">{EMPTY_AUDIO_NOTE}</p>
 		{:else}
-			<div class="flex items-center gap-2.5 rounded-md bg-accent/40 px-3 py-2">
+			<!-- No tint of its own any more: the surface around it already sets the
+			     player apart from the card, and a shaded box inside a card-coloured
+			     one is two frames drawn for one control. -->
+			<div class="flex items-center gap-2.5">
 				<!-- preload="metadata" keeps a long session's WAV off the wire until it
 				     is played or a timestamp seeks it. -->
 				<audio
@@ -161,5 +176,5 @@ function toggle() {
 				</span>
 			</div>
 		{/if}
-	</CardContent>
+	</div>
 {/if}

@@ -7,7 +7,15 @@
  * need is missing: an LLM provider, or a summary to work from. They sit in the
  * section's header rather than under the recap, because a control buried at
  * the foot of a body that scrolls is one you have to go looking for - and the
- * header is drawn whether the section is folded or not.
+ * header is drawn whether the section is folded or not. They read in the order
+ * they are used: summarize, then make a video of it, then watch what came out.
+ *
+ * Below the `sm` breakpoint each one is its own icon with the label hidden,
+ * since three labelled buttons do not fit beside the section's title on a
+ * phone and every one of them only opens a dialog anyway. Each keeps its words
+ * in `aria-label` and `title`, which is the only place a disabled one can say
+ * why it is disabled. The video count is the exception that stays visible: it
+ * is the whole reason that button exists.
  *
  * A session has one summary but several transcripts, so the meta line says
  * which version this one was read from alongside the provider and model that
@@ -29,6 +37,7 @@
  * player off the screen.
  */
 
+import { Clapperboard, Film, Sparkles } from '@lucide/svelte'
 import { actionSetup } from '$lib/actionSetup.svelte'
 import { ApiError, api } from '$lib/api'
 import { Button } from '$lib/components/ui/button'
@@ -120,7 +129,10 @@ const videosTitle = $derived.by(() => {
 	if (done) parts.push(`${done} to watch`)
 	if (running) parts.push(`${running} generating`)
 	if (failed) parts.push(`${failed} failed`)
-	return parts.join(', ')
+	// A status nothing above covers leaves the list empty, and the trigger is an
+	// icon and a number below `sm`: the fallback is what stops that button from
+	// being an unlabelled square with no tooltip at all.
+	return parts.join(', ') || `Videos (${videoJobs.length})`
 })
 
 /** Delete one generation and its file.
@@ -150,37 +162,55 @@ async function deleteVideo(jobId: string) {
 		bodyClass="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto"
 	>
 		{#snippet actions()}
-			{#if videoJobs.length}
-				<!-- The count is the whole point of this button. "Videos" on its own
-				     says nothing about whether there is anything behind it, and the
-				     complaint that moved the players in here was precisely that a
-				     finished generation was impossible to notice. No generations, no
-				     button: there would be nothing to open. -->
-				<Button variant="outline" size="sm" onclick={() => (videosOpen = true)} title={videosTitle}>
-					Videos ({videoJobs.length})
-				</Button>
-			{/if}
-			<Button
-				variant="outline"
-				size="sm"
-				onclick={() => (videoOpen = true)}
-				disabled={videoProviders.length === 0 || !session.summary}
-				title={videoProviders.length === 0
-					? 'Add an OpenRouter provider in Settings'
-					: !session.summary
-						? 'Summarize the session first'
-						: ''}
-			>
-				Generate video
-			</Button>
 			<Button
 				variant="outline"
 				size="sm"
 				onclick={openSummarize}
 				disabled={llmProviders.length === 0}
+				aria-label={session.summary ? 'Re-summarize' : 'Summarize'}
+				title={llmProviders.length === 0
+					? 'Add an LLM provider (OpenAI-compatible chat) in Settings'
+					: session.summary
+						? 'Re-summarize'
+						: 'Summarize'}
 			>
-				{session.summary ? 'Re-summarize' : 'Summarize'}
+				<Sparkles />
+				<span class="hidden sm:inline">{session.summary ? 'Re-summarize' : 'Summarize'}</span>
 			</Button>
+			<Button
+				variant="outline"
+				size="sm"
+				onclick={() => (videoOpen = true)}
+				disabled={videoProviders.length === 0 || !session.summary}
+				aria-label="Generate video"
+				title={videoProviders.length === 0
+					? 'Add an OpenRouter provider in Settings'
+					: !session.summary
+						? 'Summarize the session first'
+						: 'Generate video'}
+			>
+				<Clapperboard />
+				<span class="hidden sm:inline">Generate video</span>
+			</Button>
+			{#if videoJobs.length}
+				<!-- The count is the whole point of this button, so it is the one
+				     label that survives the phone: "Videos" on its own says nothing
+				     about whether there is anything behind it, and the complaint that
+				     moved the players in here was precisely that a finished
+				     generation was impossible to notice. No generations, no button:
+				     there would be nothing to open. -->
+				<Button
+					variant="outline"
+					size="sm"
+					onclick={() => (videosOpen = true)}
+					aria-label="Videos ({videoJobs.length})"
+					title={videosTitle}
+				>
+					<Film />
+					<span class="hidden sm:inline">Videos ({videoJobs.length})</span>
+					<span class="sm:hidden">{videoJobs.length}</span>
+				</Button>
+			{/if}
 		{/snippet}
 
 		{#if session.summary}
