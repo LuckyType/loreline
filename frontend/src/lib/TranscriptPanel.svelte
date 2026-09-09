@@ -10,11 +10,13 @@
  * only way in: a name clicked in the transcript below edits in place, which
  * ends at the same endpoint with the same whole-map shape.
  *
- * Both live in the section's header, and both open a dialog. The controls used
- * to sit in a bar above the segments, where five diarizer settings and two
- * buttons wrapped onto a second line on a phone and scrolled out of reach on a
- * long transcript; a header is drawn whether the section is folded or not, and
- * two buttons fit on it at 320px.
+ * Both live in the section's header, next to the search, and both open a
+ * dialog. The controls used to sit in a bar above the segments, where five
+ * diarizer settings and two buttons wrapped onto a second line on a phone and
+ * scrolled out of reach on a long transcript; a header is drawn whether the
+ * section is folded or not. The search toggle was the last thing left in that
+ * bar and joined them there, because one funnel floating over the transcript
+ * was a whole band of chrome spent on a single icon.
  *
  * What produced this version is in the header too, as the title's own caption:
  * the provider, the model, whether it has been diarized and how many segments
@@ -24,12 +26,17 @@
  * question being asked.
  *
  * The search box filters here rather than inside the list, because the count
- * in the header has to agree with what the list is showing.
+ * in the header has to agree with what the list is showing. The box itself is
+ * the only part of it that is not in the header: it appears as a row above the
+ * segments while the search is on and there is no row at all while it is off,
+ * so nothing is spent on a band that is empty most of the time. Turning the
+ * search on therefore unfolds the section as well - the toggle is drawn folded
+ * and the box is not, and a search you cannot see or type into is not a search.
  *
  * Open, the section takes an equal share of whatever height the card has left
  * and scrolls the segments inside it; closed, it is just its own header. The
- * search stays put either way, so the list is the only thing that moves under
- * the playhead.
+ * header and the search box both stay put while it is open, so the list is the
+ * only thing that moves under the playhead.
  */
 
 import { Filter, Users } from '@lucide/svelte'
@@ -104,6 +111,11 @@ let diarizeOpen = $state(false)
 let renameOpen = $state(false)
 let filter = $state('')
 let filterOpen = $state(false)
+// The toggle itself, so Escape out of the box can hand focus back to the
+// control that opened it rather than dropping it on the document.
+let filterButton = $state<HTMLElement | null>(null)
+const uid = $props.id()
+const filterId = `${uid}-filter`
 
 const shownEvents = $derived(
 	filter ? events.filter((e) => matchesQuery(e, detail.session.speaker_names, filter)) : events,
@@ -119,15 +131,33 @@ const segmentsLabel = $derived(
 	filter ? `${segmentCount(shownEvents)}/${segmentCount(events)}` : `${segmentCount(events)}`,
 )
 
+/** Put the search away and take the filter with it: a box that is gone while
+ *  a query is still narrowing the list is a transcript with segments missing
+ *  and nothing on screen saying why. */
+function closeFilter(refocus: boolean) {
+	filterOpen = false
+	filter = ''
+	if (refocus) filterButton?.focus()
+}
+
 function toggleFilter() {
-	filterOpen = !filterOpen
-	if (!filterOpen) filter = ''
+	if (filterOpen) {
+		// The pointer or the keyboard is already on the toggle here, so there is
+		// nothing to hand focus back to.
+		closeFilter(false)
+		return
+	}
+	filterOpen = true
+	// The box lives in the body and the toggle lives in the header, which is
+	// drawn folded too: opening the search on a folded section would otherwise
+	// put the cursor in a box nobody can see.
+	open = true
 }
 
 function onFilterKeydown(e: KeyboardEvent) {
 	if (e.key !== 'Escape') return
 	e.preventDefault()
-	toggleFilter()
+	closeFilter(true)
 }
 
 /** The rename dialog's save, reached by clicking a name instead of opening a
@@ -208,10 +238,11 @@ const selectedModel = $derived(version === 'original' ? '-' : (selectedJob?.mode
 					Diarize
 				</Button>
 			{/if}
-			<!-- An icon, because the words next to it would be the third label on a
-			     header that has to fit at 320px. Renaming needs speakers to rename,
-			     which only a diarized transcript has, so with none the button says
-			     so by being disabled and by saying why on hover. -->
+			<!-- Icons, because their words would be the second and third label on a
+			     header that has to fit at 320px, and both are recognisable enough
+			     without them. Renaming needs speakers to rename, which only a
+			     diarized transcript has, so with none the button says so by being
+			     disabled and by saying why on hover. -->
 			<Button
 				variant="outline"
 				size="icon-sm"
@@ -224,32 +255,43 @@ const selectedModel = $derived(version === 'original' ? '-' : (selectedJob?.mode
 			>
 				<Users />
 			</Button>
-		{/snippet}
-
-		<!-- All that is left of the control bar that used to sit here: the rest
-		     either moved into the header or behind a dialog. The search stays with
-		     the list, because it is the one control whose effect is in the body. -->
-		<div class="flex shrink-0 flex-wrap items-center gap-2">
-			{#if filterOpen}
-				<Input
-					class="w-40"
-					placeholder="search…"
-					bind:value={filter}
-					autofocus
-					onkeydown={onFilterKeydown}
-				/>
-			{/if}
+			<!-- A disclosure rather than a toggle, because what it does is reveal
+			     the box below: `aria-expanded` says so, and the outline variant
+			     already draws an expanded button filled, which is the state this
+			     needs. The green edge on top of that is the louder signal, for the
+			     case that matters most - a search left on, quietly hiding most of
+			     the transcript. -->
 			<Button
-				variant="ghost"
+				variant="outline"
 				size="icon-sm"
-				class={cn('opacity-55 hover:opacity-100', filterOpen && 'border-emerald-500 opacity-100')}
+				bind:ref={filterButton}
+				class={cn(filterOpen && 'border-emerald-500')}
+				aria-expanded={filterOpen}
+				aria-controls={filterOpen ? filterId : undefined}
 				title="Search this transcript by what was said or who said it"
 				aria-label="Search transcript"
 				onclick={toggleFilter}
 			>
 				<Filter />
 			</Button>
-		</div>
+		{/snippet}
+
+		<!-- The last of the control bar that used to sit here, and only while it
+		     has something to hold: the box is its own row, so switching the search
+		     off leaves the list flush against the header rather than under a band
+		     of empty chrome. Full width on a phone, where a 10rem box is four
+		     words, and back to a box beside the segments once there is room. -->
+		{#if filterOpen}
+			<Input
+				id={filterId}
+				class="w-full shrink-0 sm:w-64"
+				placeholder="search…"
+				aria-label="Search transcript"
+				bind:value={filter}
+				autofocus
+				onkeydown={onFilterKeydown}
+			/>
+		{/if}
 		{#if loading}
 			<p class="text-muted-foreground">Loading transcript…</p>
 		{:else}
