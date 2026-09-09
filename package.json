@@ -1,0 +1,16 @@
+{
+	"name": "loreline-release",
+	"private": true,
+	"description": "Release tooling only, not an application. Loreline is the Python package in src/loreline and the SvelteKit app in frontend/; neither is built or published from here. This file exists so commit-and-tag-version has somewhere to be installed from, and it deliberately carries no version field: the version of record is pyproject.toml. See docs/CONTRIBUTING.md, 'Cutting a release'.",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/LuckyType/loreline.git"
+	},
+	"scripts": {
+		"release": "commit-and-tag-version",
+		"release:dry": "commit-and-tag-version --dry-run"
+	},
+	"devDependencies": {
+		"commit-and-tag-version": "^12.6.0"
+	}
+}

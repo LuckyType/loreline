@@ -59,6 +59,89 @@ same range with live verification.
 > makes every `uv run` re-resolve and dirty the lock. CI already runs
 > `uv sync --frozen`. When you intentionally change dependencies, run `uv lock`.
 
+## Cutting a release
+
+Releases are cut by hand, from a clean `main`, whenever there is something
+worth deploying. Nothing in CI does it: the tag is a deliberate act, and a
+version number only means anything if somebody decided it.
+
+[commit-and-tag-version](https://github.com/absolute-version/commit-and-tag-version)
+does the mechanical part. It reads the conventional commit subjects since the
+last `v*` tag, writes `CHANGELOG.md`, bumps the version everywhere it is
+written down, commits that as `chore(release): <version>` and tags it
+`v<version>`. The `package.json` in the repository root exists for no other
+reason than to install that tool: Loreline is not an npm package, nothing is
+built or published from there, and the version of record is `pyproject.toml`.
+
+```bash
+npm install                  # once, and again whenever the tool is updated
+npm run release:dry          # says what it would do, writes nothing
+npm run release              # bump, changelog, commit, tag
+```
+
+Four files carry the version, and all four are bumped together and land in the
+release commit: `pyproject.toml`, `frontend/package.json`,
+`frontend/package-lock.json` and `uv.lock`. The last of those is not a nicety.
+`uv.lock` keeps its own copy of loreline's version, `uv sync --frozen` refuses
+to run when the two disagree, and `uv sync --frozen` is what the Dockerfile
+does, so a release that skipped it would commit and tag perfectly cleanly and
+then fail every image build from that tag onwards. `uv lock --check` runs as a
+post-bump hook so that cannot happen quietly.
+
+### What drives the bump
+
+`fix:` is a patch and `feat:` would ordinarily be a minor. Those two are also
+the only types that reach the changelog. `refactor:`, `docs:`, `test:`,
+`chore:`, `style:`, `build:` and this repo's own `merge:` are hidden, not
+because they are not real work but because somebody comparing two deployed
+builds is not trying to learn that a component got extracted.
+`.versionrc.cjs` holds the mapping and the argument for it.
+
+> Tip, and this is the part worth remembering: while the version is below
+> 1.0.0, commit-and-tag-version switches the preset into its 0.x mode by itself
+> and shifts every bump down a step. Features come out as a patch, and only a
+> `BREAKING CHANGE` reaches a minor. No setting in `.versionrc.cjs` turns that
+> off, it is hardcoded in the tool. So a release that added features has to say
+> so out loud:
+>
+> ```bash
+> npm run release -- --release-as minor
+> ```
+>
+> v0.2.0 was cut exactly that way: 0.1.0 plus 59 features would otherwise have
+> proposed 0.1.1. A release that only fixes things needs no flag.
+
+The standing rule, so this is not argued out again at every release: while the
+version is below 1.0.0, a release that contains any `feat:` is cut with
+`--release-as minor`, and a release that contains only `fix:` is cut with no
+flag at all. That keeps the middle digit meaning "features landed" and the last
+digit meaning "fixes only", which is exactly what the changelog's two sections
+already claim, and it means the number can be read without going back to the
+commits. A `BREAKING CHANGE` needs no flag either, because the same 0.x mode
+already promotes it to a minor by itself. None of this survives 1.0.0: once the
+version is past it the clamp stops applying, `feat:` becomes a minor on its
+own, and plain `npm run release` is correct again.
+
+### Publishing the tag
+
+The release stops at a local commit and tag on purpose, so there is a moment to
+read the changelog back before any of it becomes permanent. Nothing reaches
+anyone else until the tag is pushed, and the tag has to be pushed explicitly:
+
+```bash
+git push --follow-tags origin main
+```
+
+That push is what moves the Revision line under Settings > Client. The image
+bakes in `git describe --tags --always` at build time, so a build cut from a
+pushed tag reports `v0.2.0` exactly, and one cut a few commits later reports
+something like `v0.2.0-7-gabc1234`. Before v0.2.0 existed the nearest reachable
+tag was `pre-streaming-realtime-stt-20260908`, a safety marker left before a
+large merge, and the line read `pre-streaming-realtime-stt-20260908-108-g48f132d`,
+which told nobody anything. Push the release commit without `--follow-tags` and
+it stays that uninformative, because the tag the build describes against never
+left the machine that made it.
+
 ## Layout
 
 | Path | What |
