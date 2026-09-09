@@ -16,7 +16,12 @@ sherpa-onnx's model loading.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import multiprocessing
+import os
 import threading
+import time
+from collections.abc import Generator
 
 import httpx
 import pytest
@@ -24,9 +29,18 @@ import pytest
 import services.diarization.app as diarization_app
 
 
-def _transport() -> httpx.ASGITransport:
-    """A transport onto a fresh service app, so no test shares another's cache."""
-    return httpx.ASGITransport(app=diarization_app.create_app())
+def _transport(worker: diarization_app.DiarizeWorker | None = None) -> httpx.ASGITransport:
+    """A transport onto a fresh service app, so no test shares another's cache.
+
+    An ``InlineWorker`` unless a test says otherwise, and that is the same
+    class the service runs inside its child process - just running here, where
+    a monkeypatched ``_load_pipeline`` can reach it and where no test pays for
+    a ``spawn``. The process boundary has tests of its own further down; what
+    these want is the service's own logic, not a second interpreter.
+    """
+    return httpx.ASGITransport(
+        app=diarization_app.create_app(worker or diarization_app.InlineWorker())
+    )
 
 
 async def test_healthz_503_before_models_are_ready() -> None:
@@ -553,17 +567,101 @@ def _post_diarize(client: httpx.AsyncClient) -> asyncio.Task[httpx.Response]:
     )
 
 
-async def test_healthz_answers_while_a_diarization_is_running(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+class _ExclusiveWorker:
+    """A worker that, like the real one, can attend to exactly one thing at a time.
+
+    This class is the whole point of rewriting the test below, and the reason
+    the version before it was green while the deployment was red. That one
+    stalled the model on a ``threading.Event``, which releases the GIL, so
+    every other thread of the process carried on and ``/healthz`` answered -
+    demonstrating a thing the real service could not do. sherpa-onnx's
+    ``process`` is bound without ``py::call_guard<py::gil_scoped_release>`` and
+    holds the GIL for its whole run, so while one is in flight *nothing* else
+    in that interpreter is scheduled.
+
+    Rather than reproduce that (a test that burns CPU to prove a point is a
+    slow test that fails on a loaded box), this states the same constraint at
+    the seam: ``diarize`` holds a lock for its whole run, and ``check_models``
+    refuses to wait for that lock, counting the intrusion and failing loudly.
+    A ``/healthz`` that needs to ask the worker anything therefore fails this
+    test outright, instead of passing because a fake was more accommodating
+    than the thing it stands in for.
+    """
+
+    def __init__(self, entered: threading.Event, release: threading.Event) -> None:
+        self._entered = entered
+        self._release = release
+        self._busy = threading.Lock()
+        self.intrusions = 0
+        self.checks = 0
+
+    def check_models(self) -> None:
+        if not self._busy.acquire(blocking=False):
+            self.intrusions += 1
+            msg = "the worker was asked about its models while it was diarizing"
+            raise AssertionError(msg)
+        try:
+            self.checks += 1
+        finally:
+            self._busy.release()
+
+    def diarize(self, work: diarization_app.DiarizeWork) -> diarization_app.DiarizeOutcome:
+        _ = work
+        with self._busy:
+            self._entered.set()
+            self._release.wait(_STALL_LIMIT_S)
+            return diarization_app.DiarizeOutcome(spans=[(0.0, 1.0, 0)], pooled={}, rate=_RATE)
+
+    def close(self) -> None:
+        return None
+
+
+async def test_healthz_answers_while_a_diarization_is_running() -> None:
     """The measured failure: a busy service read as a service that is gone.
 
     The app probes this endpoint with a 2 s deadline while the UI polls, so a
-    health check that queues behind the audio reports the diarizer unreachable
+    health check that waits on the diarization reports the diarizer unreachable
     for exactly as long as it is working - which is what happened on the box,
-    for four minutes, while the container was up and busy the whole time. The
-    deadline here is that same 2 s, so this fails by timing out rather than by
-    being slow.
+    for the whole of a 36-minute recording, while the container was up and busy
+    throughout. The deadline here is that same 2 s, so this fails by timing out
+    rather than by being slow.
+
+    Polled several times, because "the app's badge went red, poll after poll"
+    is what was actually reported, and once is not that. The worker is asked
+    exactly once in the whole test, on the cold probe before any audio arrives:
+    every answer after that comes out of this process's own memory, which is
+    the only way one can be given while the models are unreachable by anyone.
+    """
+    entered, release = threading.Event(), threading.Event()
+    worker = _ExclusiveWorker(entered, release)
+
+    async with httpx.AsyncClient(transport=_transport(worker), base_url="http://diar") as client:
+        assert (await client.get("/healthz")).status_code == 200
+
+        diarizing = _post_diarize(client)
+        assert await asyncio.to_thread(entered.wait, _STALL_LIMIT_S)
+
+        for _ in range(3):
+            health = await asyncio.wait_for(client.get("/healthz"), timeout=2.0)
+            assert health.status_code == 200
+            assert health.json()["status"] == "ok"
+
+        release.set()
+        assert (await diarizing).status_code == 200
+
+    assert worker.intrusions == 0
+    assert worker.checks == 1
+
+
+async def test_healthz_still_answers_while_the_model_thread_stalls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same promise, one layer down, against a model that merely takes a while.
+
+    Kept alongside the test above rather than replaced by it: this one drives
+    the real ``InlineWorker`` and the real slot, so it covers the path an
+    in-process deployment takes, while that one covers the constraint the real
+    binding imposes. Neither subsumes the other.
     """
     entered, release = threading.Event(), threading.Event()
     _stall_the_model(monkeypatch, entered, release)
@@ -638,3 +736,274 @@ async def test_a_caller_that_would_wait_too_long_is_refused_with_a_reason(
         assert (await first).status_code == 200
 
     assert pipeline.calls == 1  # the refused call never reached the model
+
+
+# ---------------------------------------------------------------------------
+# The process boundary itself
+# ---------------------------------------------------------------------------
+# Every test above runs the worker inline, which is where the service's own
+# logic is worth testing and where a monkeypatched loader can reach. These few
+# start the real child: spawn, a fresh interpreter, a pipe, and the dataclasses
+# the service sends over it. No ONNX file anywhere - what is under test is the
+# boundary, and a model would only make it slow.
+
+
+class SlowFakeWorker:
+    """What the child process runs below: no models, and slow to order.
+
+    Public and module level because ``spawn`` pickles a class by reference and
+    imports it in a fresh interpreter, which is the whole reason
+    ``WorkerProcess`` takes what to build rather than hard-coding it.
+
+    Configured through the environment rather than through arguments, since a
+    class pickled by name carries no state along with it and the child inherits
+    this process's environment when it is spawned.
+    """
+
+    def check_models(self) -> None:
+        """Load nothing, or refuse the way an unmounted model file refuses."""
+        unloadable = os.environ.get("DIAR_TEST_UNLOADABLE")
+        if unloadable:
+            raise diarization_app.ModelsUnavailableError(unloadable)
+
+    def diarize(self, work: diarization_app.DiarizeWork) -> diarization_app.DiarizeOutcome:
+        """Reflect the request back inside the shapes the service reads.
+
+        None of this is a diarization. What is under test is that the request
+        crossed whole and the answer came back the same way, the pooled
+        embedding included - that last being the one whose loss would be silent
+        rather than loud, since the speaker bank is fed from it.
+        """
+        if os.environ.get("DIAR_TEST_EXIT"):
+            os._exit(9)  # a child dying mid-call, the way an OOM kill ends one
+        time.sleep(float(os.environ.get("DIAR_TEST_STALL_S", "0") or 0))
+        return diarization_app.DiarizeOutcome(
+            spans=[(0.0, float(len(work.payload)), 0)],
+            pooled={0: diarization_app.ClusterVoice(vector=[1.0], reliable=work.embeddings)},
+            rate=_RATE,
+        )
+
+    def close(self) -> None:
+        return None
+
+
+@contextlib.contextmanager
+def _child_worker(
+    monkeypatch: pytest.MonkeyPatch, **environment: str
+) -> Generator[diarization_app.WorkerProcess]:
+    """A real ``WorkerProcess`` running :class:`SlowFakeWorker`, closed afterwards.
+
+    Closed on the way out whatever happened, because a leaked child outlives
+    the test that made it and the next one then measures two.
+    """
+    for name, value in environment.items():
+        monkeypatch.setenv(name, value)
+    worker = diarization_app.WorkerProcess(SlowFakeWorker)
+    try:
+        yield worker
+    finally:
+        worker.close()
+
+
+async def test_a_child_process_serves_a_whole_call_over_its_pipe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The request and its answer cross a real process boundary intact.
+
+    Including ``ClusterVoice``: the child embeds and this process matches, so
+    a session's speaker is decided here, from something the child sent, in code
+    that no boundary runs through. The generation in the answer is this
+    process's, which is the same fact stated from the other end - the bank the
+    caller is being told about is the one in the process it is talking to.
+    """
+    with _child_worker(monkeypatch) as worker:
+        async with httpx.AsyncClient(
+            transport=_transport(worker), base_url="http://diar"
+        ) as client:
+            assert (await client.get("/healthz")).status_code == 200
+            response = await client.post(
+                "/diarize",
+                data={"sample_rate": str(_RATE), "session_id": "s1"},
+                files={"file": ("audio.wav", b"1,2,1", "audio/wav")},
+            )
+
+    assert response.status_code == 200
+    body = response.json()
+    # Five bytes of payload reached the child and the span it built from them
+    # came back, labelled with a speaker this process opened for it.
+    assert body["segments"] == [{"start": 0.0, "end": 5.0, "speaker": "Speaker 0"}]
+    assert body["sample_rate"] == _RATE
+    assert body["generation"] == diarization_app.GENERATION
+
+
+async def test_healthz_answers_while_the_child_process_is_working(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The whole change, end to end, against a child that genuinely cannot answer.
+
+    The child is busy for longer than the app's probe deadline and its pipe is
+    silent for all of it, which is exactly what an inference does to it. This
+    process answers anyway, in milliseconds, because it is not the one doing
+    the work and readiness is not a question it has to forward.
+    """
+    with _child_worker(monkeypatch, DIAR_TEST_STALL_S="1.5") as worker:
+        async with httpx.AsyncClient(
+            transport=_transport(worker), base_url="http://diar"
+        ) as client:
+            assert (await client.get("/healthz")).status_code == 200
+            diarizing = _post_diarize(client)
+            await asyncio.sleep(0.2)  # long enough for the child to be inside the call
+            assert not diarizing.done()
+
+            for _ in range(3):
+                health = await asyncio.wait_for(client.get("/healthz"), timeout=2.0)
+                assert health.status_code == 200
+                assert health.json()["status"] == "ok"
+
+            assert (await diarizing).status_code == 200
+
+
+async def test_a_load_failure_in_the_child_is_the_same_503_out_here(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A model that will not load says so through the pipe, not through a traceback.
+
+    A traceback does not pickle and a sherpa-onnx exception class need not
+    exist on both sides, so the child sends which half failed and what to put
+    in front of a human. This is the half that is a 503, and the sentence on
+    the settings page is the one the child wrote.
+    """
+    unmounted = "/models/seg.onnx is not mounted"
+    with _child_worker(monkeypatch, DIAR_TEST_UNLOADABLE=unmounted) as worker:
+        async with httpx.AsyncClient(
+            transport=_transport(worker), base_url="http://diar"
+        ) as client:
+            health = await client.get("/healthz")
+            diarize = await client.post(
+                "/diarize", files={"file": ("audio.wav", b"1", "audio/wav")}
+            )
+
+    assert health.status_code == 503
+    assert health.json() == {"detail": unmounted}
+    assert diarize.status_code == 503
+    assert diarize.json() == health.json()  # two routes, one verdict
+
+
+async def test_a_child_that_exits_is_replaced_and_the_caller_is_told(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dead child costs one request and a model reload, not the service.
+
+    The models used to be in the process serving HTTP, so anything that killed
+    them killed the server, and the restart also forgot every session's
+    speakers. Now this process survives, and the two things it must not do are
+    hang waiting for an answer that is not coming, and go on believing the dead
+    child's models were loaded - which is why the deadlines here are real
+    assertions and why the call after it is served rather than refused.
+    """
+    with _child_worker(monkeypatch, DIAR_TEST_EXIT="1") as worker:
+        async with httpx.AsyncClient(
+            transport=_transport(worker), base_url="http://diar"
+        ) as client:
+            assert (await client.get("/healthz")).status_code == 200
+
+            lost = await asyncio.wait_for(_post_diarize(client), timeout=_STALL_LIMIT_S)
+            assert lost.status_code == 503
+            assert "exited" in lost.json()["detail"]
+
+            monkeypatch.delenv("DIAR_TEST_EXIT")
+            served = await asyncio.wait_for(_post_diarize(client), timeout=_STALL_LIMIT_S)
+            assert served.status_code == 200
+
+
+def test_closing_does_not_wait_for_the_child_to_finish(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``docker stop`` has ten seconds; a diarization can have thirty minutes.
+
+    The container was measured being SIGKILLed over exactly this, which is why
+    uvicorn is given ``--timeout-graceful-shutdown 5``. Moving the models into
+    a child must not put that back - a ``ProcessPoolExecutor`` would have, by
+    joining its worker at interpreter exit however long the worker had left.
+    So: a child told to be busy for a minute, and a close that has to return in
+    a fraction of it with nothing of ours still running.
+    """
+    told: list[str] = []
+
+    def diarize_in_the_background(worker: diarization_app.WorkerProcess) -> None:
+        work = diarization_app.DiarizeWork(payload=b"1", num_clusters=-1, embeddings=False)
+        try:
+            worker.diarize(work)
+        except diarization_app.WorkerUnavailableError:
+            told.append("the worker went away")
+
+    with _child_worker(monkeypatch, DIAR_TEST_STALL_S="60") as worker:
+        worker.check_models()  # the child is up and idle
+        caller = threading.Thread(target=diarize_in_the_background, args=(worker,), daemon=True)
+        caller.start()
+        time.sleep(0.3)  # long enough for the child to be inside the call
+
+        started = time.monotonic()
+        worker.close()
+        took = time.monotonic() - started
+
+    caller.join(_STALL_LIMIT_S)
+    assert took < 3.0, f"close() waited {took:.1f}s on a child with 60s of work in it"
+    assert told == ["the worker went away"]
+    assert not [p for p in multiprocessing.active_children() if p.name == "diarization-models"]
+
+
+class _FlakyWorker:
+    """An inline worker whose process is pretended to die once, mid-session.
+
+    Standing in for what a real child does when it is OOM-killed: the call in
+    flight is lost and the next one is served by a fresh child holding no
+    models. The point of the test below is what is *not* lost with it.
+    """
+
+    def __init__(self, inner: diarization_app.DiarizeWorker) -> None:
+        self._inner = inner
+        self.die_on_the_next_call = False
+
+    def check_models(self) -> None:
+        self._inner.check_models()
+
+    def diarize(self, work: diarization_app.DiarizeWork) -> diarization_app.DiarizeOutcome:
+        if self.die_on_the_next_call:
+            self.die_on_the_next_call = False
+            msg = "the process holding the diarization models exited before it answered"
+            raise diarization_app.WorkerUnavailableError(msg)
+        return self._inner.diarize(work)
+
+    def close(self) -> None:
+        self._inner.close()
+
+
+async def test_a_worker_that_dies_does_not_renumber_a_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Where the speaker bank lives, said as a behaviour rather than as a comment.
+
+    The models are in a child and the bank is not, so losing the child costs a
+    model reload and nothing else. Had the bank gone with them, the next turn
+    would start again at Speaker 0 and one label would end up naming two
+    people - the failure ``generation`` exists to report, and one a caller
+    could not even see here, because the process ``generation`` names never
+    restarted.
+    """
+    _stub_models(monkeypatch)
+    worker = _FlakyWorker(diarization_app.InlineWorker())
+    async with httpx.AsyncClient(transport=_transport(worker), base_url="http://diar") as client:
+        assert await _speakers(client, "1", session_id="s1") == ["Speaker 0"]
+        assert await _speakers(client, "2", session_id="s1") == ["Speaker 1"]
+        before = (await client.get("/healthz")).json()["generation"]
+
+        worker.die_on_the_next_call = True
+        lost = await client.post(
+            "/diarize",
+            data={"sample_rate": str(_RATE), "session_id": "s1"},
+            files={"file": ("audio.wav", b"1", "audio/wav")},
+        )
+        assert lost.status_code == 503
+
+        assert await _speakers(client, "1", session_id="s1") == ["Speaker 0"]
+        assert await _speakers(client, "2", session_id="s1") == ["Speaker 1"]
+        assert (await client.get("/healthz")).json()["generation"] == before

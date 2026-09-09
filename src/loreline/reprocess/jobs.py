@@ -250,8 +250,9 @@ class ReprocessManager:
 
         A diarize job is also checked against the service it needs, which no
         other operation is: it is the one job whose whole work is a single call
-        to a machine that may not be there, and queueing it against a wedged
-        one was measured making the wedge worse, one press at a time.
+        to a machine that may not be there at all, and a job queued against one
+        that is not there gives a GM nothing to act on except another version
+        that ends at "-" some minutes later.
         """
         session = await self._sessions.get(req.session_id)
         if session is None:
@@ -305,19 +306,34 @@ class ReprocessManager:
     async def _refuse_an_unreachable_diarizer(self, config: DiarizationConfig) -> None:
         """Say no at the button when nothing answers at the diarizer's endpoint.
 
-        The failure this prevents is not the wasted job, it is the queue behind
-        it. A diarization that the service is still working on when the client
-        gives up keeps the service busy, so every further press lands behind it
-        and makes the backlog longer, and the only signal a GM gets is another
-        version that ends at "-" some minutes later. Refusing costs one probe
-        and answers immediately, with a sentence naming the endpoint.
+        The failure this prevents is a job whose only outcome a GM ever sees is
+        another transcript version that ends at "-" some minutes later.
+        Refusing costs one probe and answers immediately, with a sentence
+        naming the endpoint.
+
+        What that sentence must not do is diagnose, and it used to. It read
+        "start it, or fix the endpoint, and press Diarize again", and that was
+        wrong in the one case that actually came up. The diarization service
+        could not answer anything at all while it was working - the sherpa-onnx
+        binding holds the GIL for the length of an inference, so its own health
+        endpoint was never scheduled - and a perfectly healthy service part way
+        through a 36-minute recording therefore probed ``UNREACHABLE``. This
+        guard then refused the next press by telling an operator to start a
+        service that was running fine. Two fixes interacting badly, and the one
+        that had to change is the service: it now answers while it works (see
+        ``services/diarization/app.py``), so a busy diarizer is graded healthy
+        here and a second press is bounded by the service's own 429 rather than
+        by this. The wording changed too, because it should never have claimed
+        to know: what the probe saw is that nothing answered within two
+        seconds, and it cannot tell a stopped service from a mistyped address
+        from a network that will not carry the request.
 
         The same probe ``/api/system/healthz`` polls, so the settings page's
         badge and this refusal can never disagree, and only ``UNREACHABLE`` is
-        refused: a service answering 503 while its models load, or one graded
-        degraded for not remembering speakers, is a service that is there, and
-        deciding for the GM that it is not worth asking is not this function's
-        call to make.
+        refused: a service answering 503 while its models load, one answering
+        429 because it is already diarizing, or one graded degraded for not
+        remembering speakers, is a service that is there, and deciding for the
+        GM that it is not worth asking is not this function's call to make.
 
         A *transcribe* job is deliberately not checked, even though it may
         diarize every utterance it produces. Its value is the transcript, its
@@ -335,9 +351,10 @@ class ReprocessManager:
             "reprocess.diarizer_unreachable", endpoint=config.endpoint, detail=report.detail
         )
         msg = (
-            f"the diarization service at {config.endpoint} is not answering "
-            f"({report.detail or 'no answer'}) - start it, or fix the endpoint, "
-            "and press Diarize again"
+            f"the diarization service at {config.endpoint} did not answer its health "
+            f"check ({report.detail or 'no answer'}). It may be stopped, at a different "
+            "address, or unreachable from here; a service that is only busy still "
+            "answers. Check it and press Diarize again."
         )
         raise DiarizerUnreachableError(msg)
 

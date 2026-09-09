@@ -696,12 +696,18 @@ async def test_a_timed_out_diarization_says_so_instead_of_saying_nothing(
 async def test_diarizing_against_a_service_that_is_not_answering_is_refused(
     tmp_path: Path,
 ) -> None:
-    """A press that would only lengthen the queue is answered, not queued.
+    """A press against nothing at all is answered, not queued.
 
-    A diarization the service is still working on when the client gives up
-    keeps the service busy, so every further press lands behind it. Refusing
-    costs one probe, the same one the health badge uses, and says which
-    endpoint is not answering.
+    Refusing costs one probe, the same one the health badge uses, and says
+    which endpoint did not answer and what the probe saw.
+
+    What it must not say is the part asserted at the bottom. The first version
+    of this message told the operator to start the service, and while the
+    diarizer could not answer during a run - it held the GIL from the first
+    frame to the last - that sentence was shown about a service that was up and
+    working, which is the least useful thing to tell somebody staring at a
+    container they can see running. The service was fixed; this checks that the
+    message no longer instructs from a verdict that cannot support one.
     """
     probed: list[str] = []
 
@@ -733,8 +739,14 @@ async def test_diarizing_against_a_service_that_is_not_answering_is_refused(
             )
             assert refused.status_code == 503
             detail = refused.json()["detail"]
-            assert "http://diar" in detail
-            assert "no answer within 2s" in detail
+            assert "http://diar" in detail  # which service, not just "something"
+            assert "no answer within 2s" in detail  # and what the probe actually saw
+            # It offers causes rather than picking one, because two seconds of
+            # silence cannot separate a stopped service from a mistyped address
+            # from a network that will not carry the request.
+            assert "may be stopped" in detail
+            assert "only busy still answers" in detail
+            assert "start it" not in detail
             # No job row either: a refused press leaves nothing behind to
             # explain later, which is the difference from a job that fails.
             assert (await client.get("/api/reprocess", params={"session_id": sid})).json() == []
