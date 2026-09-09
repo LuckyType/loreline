@@ -143,9 +143,21 @@ services:
     # This image ships with NO models, and does not download one on demand:
     # transcription 404s with "Model '...' is not installed locally" while
     # GET /v1/models still answers 200 with an empty list - which reads like
-    # the service is fine. Install one once (persists in speaches-hub):
+    # the service is fine. deploy/install.sh installs one for you when you
+    # enable this profile at install time; otherwise, once (persists in
+    # speaches-hub):
     #
-    #   curl -X POST http://localhost:8200/v1/models/Systran/faster-whisper-large-v3
+    #   curl -X POST http://localhost:8200/v1/models/Systran/faster-whisper-small
+    #
+    # `small`, not `large-v3`, and the reason is a hard limit rather than a
+    # preference: SttRouter gives each utterance 30 s (timeout_s in
+    # src/loreline/stt/router.py) and large-v3 on a CPU does not come close.
+    # Measured on the test box, every single utterance timed out, the run
+    # logged `stt.degraded ... Speaches (local): TimeoutError` and wrote no
+    # segments at all. `small` is multilingual, which the distil-whisper
+    # builds are not (English only), and that matters for a table not playing
+    # in English. If your box has the cores for it, `medium` and `large-v3`
+    # are the same one-line install.
     #
     # Note WHISPER__MODEL and PRELOAD_MODELS do NOT work here despite
     # appearing in the upstream docs - this build's settings object has

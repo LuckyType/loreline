@@ -450,6 +450,39 @@ msg_info "Building and starting the stack (first build takes a few minutes)"
 as_root docker compose "${PROFILES[@]}" up -d --build
 msg_ok "Stack is up"
 
+# The Speaches image ships with no model and will not fetch one on demand, so
+# a box that enabled local STT here would otherwise come up looking healthy and
+# 404 on every utterance (GET /v1/models answers 200 with an empty list, which
+# is the part that makes it look fine). Install one now, while we still have
+# the operator's attention.
+#
+# `small` rather than `large-v3`: SttRouter allows 30 s per utterance, and
+# large-v3 on a CPU blows through that on every one of them, which shows up as
+# a re-transcription that runs forever and writes nothing. Multilingual,
+# because the distil-whisper builds are English only. LORELINE_STT_MODEL
+# overrides it for a box with the cores to spare.
+STT_MODEL="${LORELINE_STT_MODEL:-Systran/faster-whisper-small}"
+if [[ $ENABLE_STT == yes ]]; then
+  if command -v curl &>/dev/null; then
+    msg_info "Installing the ${STT_MODEL} model (a few hundred MB, one time)"
+    # Give the service a moment to bind before asking it for anything.
+    for _ in $(seq 1 30); do
+      curl -fsS "http://127.0.0.1:8200/v1/models" >/dev/null 2>&1 && break
+      sleep 2
+    done
+    # Non-fatal on purpose: a slow or absent download is not a reason to fail
+    # an install that is otherwise complete, and the exact command to retry is
+    # one line. The app works with a cloud provider either way.
+    if as_root curl -fsS -X POST "http://127.0.0.1:8200/v1/models/${STT_MODEL}" >/dev/null 2>&1; then
+      msg_ok "Local STT model installed (${STT_MODEL})"
+    else
+      msg_warn "Could not install ${STT_MODEL}. Local STT will 404 until you run:\n   curl -X POST http://127.0.0.1:8200/v1/models/${STT_MODEL}"
+    fi
+  else
+    msg_warn "curl not found, so the local STT model was not installed. Run:\n   curl -X POST http://127.0.0.1:8200/v1/models/${STT_MODEL}"
+  fi
+fi
+
 # Create (but don't start) any optional service not selected above, so
 # Settings > Services can start it later. Compose profiles are a client-side
 # concept - the Docker API can only start a container that already exists, so
