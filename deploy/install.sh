@@ -107,7 +107,7 @@ gen_password() {
 header
 
 [[ $(uname -s) == Linux ]] || die "This installer targets Linux. On macOS/Windows use Docker Desktop and \`docker compose up -d\` directly (note: microphone capture can't work there)."
-command -v apt-get &>/dev/null || die "This installer expects apt (Debian/Ubuntu). On another distro, install Docker + the Compose plugin yourself, then run: docker compose up -d --build"
+command -v apt-get &>/dev/null || die "This installer expects apt (Debian/Ubuntu). On another distro, install Docker plus the Compose and Buildx plugins yourself, then run: docker compose up -d --build"
 
 # Runs fine either as root (`sudo bash deploy/install.sh`) or as a normal
 # user with sudo - `as_root` papers over the difference so every privileged
@@ -180,13 +180,25 @@ if [[ $APP_DIR != "$CHECKOUT" ]]; then
       as_root apt-get update -qq
       as_root apt-get install -y --no-install-recommends git ca-certificates
     fi
-    # Not a shallow clone, deliberately: the history is ~20MB, and deploy/
-    # update.sh pulls in this checkout while an admin reasonably expects to be
-    # able to `git log` it before letting it update. A --depth 1 box would
-    # differ from a hand-cloned one for no saving worth having.
+    # Shallow, because a deployment does not need this project's past: 307
+    # commits of history is 27MB of .git against roughly one of working tree,
+    # and on the Raspberry Pi this installer targets that is mostly transfer
+    # time on a slow link.
+    #
+    # It costs the `git log` an admin might want before letting the box update
+    # itself, which is a real thing to give up, so: `git fetch --unshallow` in
+    # ${APP_DIR} brings it all back whenever someone wants it, and the summary
+    # at the end of this script says so.
+    #
+    # Every update path keeps working on a shallow checkout, which is the part
+    # worth being sure about rather than assuming. deploy/update.sh and
+    # update-fast.sh do `rev-parse HEAD`, `fetch origin`, `pull --ff-only origin
+    # main` and `diff PREV NEW -- <path>`; the fetch adds the new commits
+    # without discarding the one that was HEAD, so both ends of that diff are
+    # present and the "what changed in this pull" notes still work.
     msg_info "Cloning ${REPO_URL} into ${APP_DIR}"
     as_root mkdir -p "$APP_DIR"
-    as_root git clone "$REPO_URL" "$APP_DIR" ||
+    as_root git clone --depth 1 "$REPO_URL" "$APP_DIR" ||
       die "Clone failed. Check network access to ${REPO_URL}, or clone it yourself and run bash ${APP_DIR}/deploy/install.sh"
     # Same reasoning as `own` below: a checkout owned by root is one the
     # invoking user can't `git pull` in, and pulling is how they update.
@@ -302,11 +314,46 @@ else
     fi
   done
   [[ -n $COMPOSE_PKG ]] || die "No Docker Compose v2 package available (looked for docker-compose-v2 / docker-compose-plugin). Install Docker + Compose manually, then re-run."
-  as_root apt-get install -y --no-install-recommends docker.io "$COMPOSE_PKG"
-  msg_ok "Docker installed (${COMPOSE_PKG})"
+  # Buildx, for the same reason and with the same two spellings. This installer
+  # ends in `docker compose up -d --build`, and Compose v2.29 and later refuse
+  # to build without it: "compose build requires buildx 0.17.0 or later".
+  #
+  # It has to be named explicitly. It is a package of its own, and docker.io
+  # does not pull it in by any route: on bookworm that package's Recommends are
+  # apparmor, ca-certificates, cgroupfs-mount, git, needrestart and xz-utils,
+  # with no mention of buildx, so this is not something --no-install-recommends
+  # was hiding. Without this line a fresh box gets Docker, gets Compose, and
+  # then fails on the one command this script exists to run.
+  BUILDX_PKG=""
+  for pkg in docker-buildx docker-buildx-plugin; do
+    if have_pkg "$pkg"; then
+      BUILDX_PKG="$pkg"
+      break
+    fi
+  done
+  [[ -n $BUILDX_PKG ]] || die "No Docker Buildx package available (looked for docker-buildx / docker-buildx-plugin). Compose cannot build images without it. Install Docker + Compose + Buildx manually, then re-run."
+  as_root apt-get install -y --no-install-recommends docker.io "$COMPOSE_PKG" "$BUILDX_PKG"
+  msg_ok "Docker installed (${COMPOSE_PKG}, ${BUILDX_PKG})"
 fi
 as_root systemctl enable --now docker >/dev/null 2>&1 || true
 as_root docker compose version &>/dev/null || die "Docker is installed but \`docker compose\` doesn't work - check the Compose plugin installation."
+
+# Checked here rather than only in the install branch above, because the branch
+# that skips installation is exactly where this bites: a box that already had
+# Docker and Compose from before buildx was a separate package sails past the
+# "Docker already installed" check and then fails at the build, several minutes
+# and one generated password later. One attempt to fix it, then a message that
+# says what to run, since this is the last point where the answer is still cheap.
+if ! as_root docker buildx version &>/dev/null; then
+  msg_info "Installing Docker Buildx (Compose needs it to build)"
+  as_root apt-get update -qq
+  for pkg in docker-buildx docker-buildx-plugin; do
+    have_pkg "$pkg" && as_root apt-get install -y --no-install-recommends "$pkg" && break
+  done
+  as_root docker buildx version &>/dev/null ||
+    die "Compose cannot build images without Buildx, and no docker-buildx / docker-buildx-plugin package was available here. Install Buildx for your distro, then re-run this script."
+  msg_ok "Docker Buildx installed"
+fi
 
 # --- .env -------------------------------------------------------------------
 WRITE_ENV=1
@@ -459,6 +506,12 @@ fi
 echo ""
 echo -e "${DIM}  Logs         sudo docker compose logs -f app"
 echo -e "  Update       deploy/update.sh"
+# Only when it is actually shallow, which is asked of git rather than inferred
+# from whether this run did the cloning: a checkout that was already here, or
+# one cloned by hand, has its full history and does not want this line.
+if [[ $(git -C "$APP_DIR" rev-parse --is-shallow-repository 2>/dev/null) == true ]]; then
+  echo -e "  History      git -C ${APP_DIR} fetch --unshallow ${DIM}(cloned shallow to save the download)${CL}${DIM}"
+fi
 [[ $ENABLE_STT == no ]] && echo -e "  Local STT    sudo docker compose --profile local-stt up -d"
 [[ $ENABLE_DIAR == no ]] && echo -e "  Diarization  sudo docker compose --profile diarization up -d\n               (then add COMPOSE_PROFILES=diarization to .env, or updates won't rebuild it)"
 echo -e "  Bluetooth    bash deploy/setup-bluetooth-audio.sh${CL}"

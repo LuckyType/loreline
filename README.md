@@ -132,8 +132,9 @@ The installer is interactive either way, the one-liner included: it reattaches
 its prompts to your terminal, because piping means stdin is the script itself
 and an installer that quietly took every default instead of asking would be a
 poor trade for one line. Confirm once and it installs Docker Engine and the
-Compose plugin from apt if needed, generates a login password, detects whether
-the host has a microphone, brings the stack up, and prints where to reach it.
+Compose and Buildx plugins from apt if needed, generates a login password,
+detects whether the host has a microphone, brings the stack up, and prints
+where to reach it.
 Answer "no" at the first prompt to choose the port, password, mic passthrough,
 self-hosted STT and diarization, and auto-updates one at a time.
 
