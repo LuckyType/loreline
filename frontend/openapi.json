@@ -2172,6 +2172,54 @@
         }
       }
     },
+    "/api/reprocess/{job_id}/cancel": {
+      "post": {
+        "tags": [
+          "reprocess"
+        ],
+        "summary": "Cancel Reprocess Job",
+        "description": "Stop a queued or running job, keeping every segment it already wrote.\n\n409, naming the state it finished in, for a job that is already over. That\nis a race the caller can genuinely lose rather than a mistake: the session\npage polls every 1.5s, so a run can reach the end between the poll that\ndrew the Cancel button and the press that arrives here, and \"too late, it\nis done\" is a different answer from \"too late, it failed\".\n\nThe job comes back as it stands the moment the request is answered, which\nis not always its final state: a re-transcription stops at the end of the\nutterance it is on (see ``ReprocessManager.cancel``), so this can honestly\nanswer \"running\" for a moment longer. The page keeps polling while the row\nsays so and settles it without a second press.",
+        "operationId": "cancel_reprocess_job_api_reprocess__job_id__cancel_post",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Job Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReprocessJob"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/reprocess/{job_id}": {
       "get": {
         "tags": [
@@ -3313,10 +3361,11 @@
           "queued",
           "running",
           "done",
-          "error"
+          "error",
+          "cancelled"
         ],
         "title": "JobStatus",
-        "description": "Lifecycle state of a re-processing job."
+        "description": "Lifecycle state of a re-processing job.\n\n``CANCELLED`` is terminal and is deliberately not ``ERROR``. A GM watching\na re-transcription fill up can tell within a minute or two whether the\nmodel is worth the rest of the recording, and stopping it there is a\ndecision, not a failure: nothing broke, the run did exactly what it was\ntold, and everything it had written by then is kept and still readable\n(see :meth:`loreline.reprocess.jobs.ReprocessManager.cancel`). Every reader\ntherefore has to be explicit about which question it is asking - \"did this\nfail\" means ``ERROR`` alone, \"is this still going\" means ``QUEUED`` or\n``RUNNING`` alone - because a cancelled run answers no to both.\n\nVideo jobs share this enum and never reach ``CANCELLED``: a generation is\none remote call this app only polls, so there is nothing here to stop."
       },
       "LivenessResponse": {
         "properties": {

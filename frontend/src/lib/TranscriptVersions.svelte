@@ -11,6 +11,11 @@
  * can be deleted - the original is the capture itself and nothing can produce
  * it again.
  *
+ * That live view is what the last column is built around. Watching a
+ * re-transcription fill up is how a GM judges a model, so while a job is in
+ * flight the row offers Cancel where Delete will be, and once it stops -
+ * cancelled or otherwise - Delete takes the slot back.
+ *
  * Open, the section takes an equal share of the card's leftover height and
  * scrolls inside it, so a session with a dozen re-transcriptions still leaves
  * room for the transcript below it.
@@ -72,6 +77,14 @@ let logsVersion = $state('original')
 // collapsing the table the reader was working in.
 let logsTrigger = $state<HTMLElement | null>(null)
 
+// Job ids whose Cancel has been pressed and whose row has not settled yet. A
+// re-transcription stops at the end of the utterance it is on, so the row goes
+// on saying "running" for a moment after the press; without this the button
+// would sit there looking untouched and invite a second press. Ids are never
+// removed on success on purpose: the button they belong to is gone as soon as
+// the row leaves flight, whichever state it lands in.
+let cancelling = $state<string[]>([])
+
 /** Show the log lines one version was produced by, remembering the control
  *  that asked so focus can go back to it. */
 function showLogs(version: string, trigger: EventTarget | null) {
@@ -117,7 +130,9 @@ function failureText(job: ReprocessJob): string {
 // won, so a fixed-and-superseded error sat on screen for minutes while a newer
 // run failed silently behind it. Ordered by when each failed, not when each
 // was created, and stamped with that time below - a failure with no date on it
-// reads as current however old it is.
+// reads as current however old it is. A cancelled run is deliberately not one:
+// the GM stopped it themselves, nothing broke, and reporting their own decision
+// back to them as the session's last failure would be both wrong and alarming.
 const lastFailure = $derived(
 	jobs.filter((j) => j.status === 'error').sort((a, b) => failedAt(b) - failedAt(a))[0],
 )
@@ -132,20 +147,84 @@ const lastFailureText = $derived.by(() => {
 
 /** Whether a row can be opened. A running job counts: it publishes each
  *  segment as it is written, so its version is worth watching while it fills
- *  up. A finished one with nothing in it is not (there is nothing to show). */
+ *  up. A finished one with nothing in it is not (there is nothing to show).
+ *
+ *  A cancelled run counts on exactly the same terms as a done one, and that is
+ *  the point of the whole feature: the GM stopped it in order to read what it
+ *  had produced and decide whether to keep it. Those rows are still there, so
+ *  the row stays clickable until the version is deleted. */
 function selectable(job: ReprocessJob): boolean {
-	return inFlight(job) || (job.status === 'done' && job.segments_added > 0)
+	return (
+		inFlight(job) ||
+		((job.status === 'done' || job.status === 'cancelled') && job.segments_added > 0)
+	)
 }
 
-/** Why a done row isn't clickable, when that's why. A done-but-empty row
- *  carries the same "done" badge as a normal one, so without this the only
- *  visible difference is a missing hover style - easy to read as broken
- *  rather than as "nothing to show". Queued/error rows need no such note:
- *  their status badge already explains why there's nothing to open. */
+/** Why a done or cancelled row isn't clickable, when that's why. Both carry a
+ *  badge that promises something to look at, so without this the only visible
+ *  difference from a row with content is a missing hover style - easy to read
+ *  as broken rather than as "nothing to show". They need separate wording
+ *  because they are different facts: one pass ran to the end and produced
+ *  nothing, the other was stopped before it produced anything.
+ *  Queued/running/error rows need no note: their badge already explains why
+ *  there's nothing to open. */
 function unselectableReason(job: ReprocessJob): string | undefined {
-	return job.status === 'done' && !selectable(job)
-		? 'This pass produced no segments, so there is nothing to show for it.'
-		: undefined
+	if (selectable(job)) return undefined
+	if (job.status === 'done')
+		return 'This pass produced no segments, so there is nothing to show for it.'
+	if (job.status === 'cancelled')
+		return 'This run was cancelled before it wrote anything, so there is nothing to show for it.'
+	return undefined
+}
+
+/** The variant a job's status badge wears.
+ *
+ * 'cancelled' is deliberately not destructive. It is terminal like 'done', but
+ * it is neither a success to mark nor a failure to warn about: painting it red
+ * would file a run the GM chose to end next to the ones that broke, which is
+ * the exact confusion the separate status exists to prevent. It gets the same
+ * neutral outline as queued and running. */
+function statusVariant(job: ReprocessJob): 'destructive' | 'secondary' | 'outline' {
+	if (job.status === 'error') return 'destructive'
+	if (job.status === 'done') return 'secondary'
+	return 'outline'
+}
+
+/** What hovering a status badge explains. A failure says what went wrong; a
+ *  cancelled run says what became of the work, because "cancelled" alone reads
+ *  like the version was thrown away and it was not. */
+function statusTitle(job: ReprocessJob): string | undefined {
+	if (job.status === 'error') return failureText(job)
+	if (job.status === 'cancelled')
+		return 'Stopped on request. The segments it had already written are kept.'
+	return job.error ?? undefined
+}
+
+/** Stop a running or queued job, keeping every segment it has already written.
+ *
+ * No confirmation dialog, and nobody should add one. Cancelling destroys
+ * nothing: the rows the run produced stay, the version stays readable, and it
+ * can still be deleted afterwards (which is the usual next click). The entire
+ * value of this button is stopping something quickly, and a modal in front of
+ * it would spend the seconds the GM pressed it to save.
+ *
+ * A 409 means the run finished between the poll that drew this button and the
+ * press, which is a race the page can genuinely lose and not something the GM
+ * did wrong - so it is swallowed rather than shown, and the refetch below lets
+ * the row settle into whatever it really ended as. */
+async function cancelJob(job: ReprocessJob) {
+	cancelling.push(job.id)
+	onerror?.('')
+	try {
+		await api.cancelReprocess(job.id)
+	} catch (err) {
+		if (!(err instanceof ApiError && err.status === 409)) {
+			// Anything else and the job is still going, so give the button back.
+			cancelling = cancelling.filter((id) => id !== job.id)
+			onerror?.(err instanceof ApiError ? err.message : 'cancel failed')
+		}
+	}
+	await onchanged?.()
 }
 
 /** Delete one re-transcription version, its diarization, and its job rows.
@@ -183,6 +262,11 @@ async function deleteVersion(job: ReprocessJob) {
  * line under the table: the failure belongs next to the run it happened to,
  * and this cell has the room. `note` carries the message as a tooltip, so the
  * cell stays one word wide whatever the vendor wrote.
+ *
+ * A cancelled diarize pass is named by none of these, and correctly so: it
+ * leaves no relabeling behind at all (a half-written one would hide the rest
+ * of the transcript, so the server drops it - see `_diarize_session`), which
+ * means this cell describes whatever pass was showing before it, or nothing.
  */
 function diarizeInfo(version: string): { text: string; failed: boolean; note?: string } {
 	const targeting = jobs.filter((j) => j.operation === 'diarize' && j.target === version)
@@ -309,14 +393,7 @@ const originalStatus = $derived.by(() => {
 						</TableCell>
 						<TableCell class="text-muted-foreground">{fmtWhen(j.created_at)}</TableCell>
 						<TableCell>
-							<Badge
-								title={j.status === 'error' ? failureText(j) : (j.error ?? undefined)}
-								variant={j.status === 'error'
-                    ? 'destructive'
-                    : j.status === 'done'
-                      ? 'secondary'
-                      : 'outline'}
-							>
+							<Badge title={statusTitle(j)} variant={statusVariant(j)}>
 								{j.status}
 							</Badge>
 						</TableCell>
@@ -333,20 +410,39 @@ const originalStatus = $derived.by(() => {
 								>
 									Show logs
 								</Button>
-								<Button
-									variant="ghost"
-									size="sm"
-									disabled={inFlight(j)}
-									title={inFlight(j)
-										? 'Wait for the job to finish'
-										: 'Delete this transcription and its diarization'}
-									onclick={(e: MouseEvent) => {
-										e.stopPropagation() // the row click selects the version
-										void deleteVersion(j)
-									}}
-								>
-									Delete
-								</Button>
+								<!-- One slot, two buttons. While the run is in flight there is
+								     nothing to delete yet, so Cancel takes the place the greyed
+								     out Delete used to sit in; the moment the row settles -
+								     cancelled, done or failed - Delete comes back, enabled,
+								     because a cancelled version is as deletable as a finished
+								     one. Watch the version fill up, stop it, delete it: three
+								     presses in one place, which is the flow this is for. -->
+								{#if inFlight(j)}
+									<Button
+										variant="ghost"
+										size="sm"
+										disabled={cancelling.includes(j.id)}
+										title="Stop this run. What it has already written is kept, so you can read it and then delete it."
+										onclick={(e: MouseEvent) => {
+											e.stopPropagation() // the row click selects the version
+											void cancelJob(j)
+										}}
+									>
+										{cancelling.includes(j.id) ? 'Cancelling…' : 'Cancel'}
+									</Button>
+								{:else}
+									<Button
+										variant="ghost"
+										size="sm"
+										title="Delete this transcription and its diarization"
+										onclick={(e: MouseEvent) => {
+											e.stopPropagation() // the row click selects the version
+											void deleteVersion(j)
+										}}
+									>
+										Delete
+									</Button>
+								{/if}
 							</div>
 						</TableCell>
 					</TableRow>

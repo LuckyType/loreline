@@ -953,6 +953,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/reprocess/{job_id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Cancel Reprocess Job
+         * @description Stop a queued or running job, keeping every segment it already wrote.
+         *
+         *     409, naming the state it finished in, for a job that is already over. That
+         *     is a race the caller can genuinely lose rather than a mistake: the session
+         *     page polls every 1.5s, so a run can reach the end between the poll that
+         *     drew the Cancel button and the press that arrives here, and "too late, it
+         *     is done" is a different answer from "too late, it failed".
+         *
+         *     The job comes back as it stands the moment the request is answered, which
+         *     is not always its final state: a re-transcription stops at the end of the
+         *     utterance it is on (see ``ReprocessManager.cancel``), so this can honestly
+         *     answer "running" for a moment longer. The page keeps polling while the row
+         *     says so and settles it without a second press.
+         */
+        post: operations["cancel_reprocess_job_api_reprocess__job_id__cancel_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/reprocess/{job_id}": {
         parameters: {
             query?: never;
@@ -1478,9 +1510,22 @@ export interface components {
         /**
          * JobStatus
          * @description Lifecycle state of a re-processing job.
+         *
+         *     ``CANCELLED`` is terminal and is deliberately not ``ERROR``. A GM watching
+         *     a re-transcription fill up can tell within a minute or two whether the
+         *     model is worth the rest of the recording, and stopping it there is a
+         *     decision, not a failure: nothing broke, the run did exactly what it was
+         *     told, and everything it had written by then is kept and still readable
+         *     (see :meth:`loreline.reprocess.jobs.ReprocessManager.cancel`). Every reader
+         *     therefore has to be explicit about which question it is asking - "did this
+         *     fail" means ``ERROR`` alone, "is this still going" means ``QUEUED`` or
+         *     ``RUNNING`` alone - because a cancelled run answers no to both.
+         *
+         *     Video jobs share this enum and never reach ``CANCELLED``: a generation is
+         *     one remote call this app only polls, so there is nothing here to stop.
          * @enum {string}
          */
-        JobStatus: "queued" | "running" | "done" | "error";
+        JobStatus: "queued" | "running" | "done" | "error" | "cancelled";
         /**
          * LivenessResponse
          * @description The unauthenticated liveness answer: this process is up, and no more.
@@ -3931,6 +3976,37 @@ export interface operations {
         responses: {
             /** @description Successful Response */
             202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReprocessJob"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    cancel_reprocess_job_api_reprocess__job_id__cancel_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                job_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
                 headers: {
                     [name: string]: unknown;
                 };
