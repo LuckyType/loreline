@@ -446,9 +446,64 @@ PROFILES=()
 [[ $ENABLE_STT == yes ]] && PROFILES+=(--profile local-stt)
 [[ $ENABLE_DIAR == yes ]] && PROFILES+=(--profile diarization)
 
+# The revision the built image will report in Settings > Client. It has to be
+# handed in at build time because git cannot be asked from inside the container
+# (the image has no .git - see the Dockerfile), and this is the last moment
+# anything knows it.
+#
+# Both are best-effort. A checkout is not guaranteed here - somebody may have
+# unpacked a tarball - and an empty value is read as "unknown" and shown as a
+# dash, which is the honest answer, so `|| true` rather than `die`.
+#
+# `git describe --tags` will usually find no tag on this box and fall back to
+# the short SHA, which `--always` is there to guarantee: the clone above is
+# --depth 1, so no tag is reachable from HEAD. That is expected, not a fault,
+# and a short SHA still names the build exactly. `git fetch --unshallow --tags`
+# in ${APP_DIR} and a rebuild is what turns it into a tag name.
+BUILD_COMMIT="$(git -C "$APP_DIR" rev-parse HEAD 2>/dev/null || true)"
+BUILD_DESCRIBED="$(git -C "$APP_DIR" describe --tags --always 2>/dev/null || true)"
+
 msg_info "Building and starting the stack (first build takes a few minutes)"
-as_root docker compose "${PROFILES[@]}" up -d --build
+# Passed through `env` rather than exported, because as_root is `sudo` on a
+# non-root box and sudo does not carry the caller's environment across by
+# default - an export here would arrive at Compose unset, and the build args in
+# docker-compose.yml would quietly take their empty defaults.
+as_root env "LORELINE_BUILD_COMMIT=${BUILD_COMMIT}" "LORELINE_BUILD_DESCRIBED=${BUILD_DESCRIBED}" \
+  docker compose "${PROFILES[@]}" up -d --build
 msg_ok "Stack is up"
+
+# The Speaches image ships with no model and will not fetch one on demand, so
+# a box that enabled local STT here would otherwise come up looking healthy and
+# 404 on every utterance (GET /v1/models answers 200 with an empty list, which
+# is the part that makes it look fine). Install one now, while we still have
+# the operator's attention.
+#
+# `small` rather than `large-v3`: SttRouter allows 30 s per utterance, and
+# large-v3 on a CPU blows through that on every one of them, which shows up as
+# a re-transcription that runs forever and writes nothing. Multilingual,
+# because the distil-whisper builds are English only. LORELINE_STT_MODEL
+# overrides it for a box with the cores to spare.
+STT_MODEL="${LORELINE_STT_MODEL:-Systran/faster-whisper-small}"
+if [[ $ENABLE_STT == yes ]]; then
+  if command -v curl &>/dev/null; then
+    msg_info "Installing the ${STT_MODEL} model (a few hundred MB, one time)"
+    # Give the service a moment to bind before asking it for anything.
+    for _ in $(seq 1 30); do
+      curl -fsS "http://127.0.0.1:8200/v1/models" >/dev/null 2>&1 && break
+      sleep 2
+    done
+    # Non-fatal on purpose: a slow or absent download is not a reason to fail
+    # an install that is otherwise complete, and the exact command to retry is
+    # one line. The app works with a cloud provider either way.
+    if as_root curl -fsS -X POST "http://127.0.0.1:8200/v1/models/${STT_MODEL}" >/dev/null 2>&1; then
+      msg_ok "Local STT model installed (${STT_MODEL})"
+    else
+      msg_warn "Could not install ${STT_MODEL}. Local STT will 404 until you run:\n   curl -X POST http://127.0.0.1:8200/v1/models/${STT_MODEL}"
+    fi
+  else
+    msg_warn "curl not found, so the local STT model was not installed. Run:\n   curl -X POST http://127.0.0.1:8200/v1/models/${STT_MODEL}"
+  fi
+fi
 
 # Create (but don't start) any optional service not selected above, so
 # Settings > Services can start it later. Compose profiles are a client-side

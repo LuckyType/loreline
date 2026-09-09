@@ -25,7 +25,18 @@
 
 services:
   app:
-    build: .
+    build:
+      context: .
+      # What revision the built image reports in Settings > Client. git cannot
+      # be asked from inside the container (the image has no .git - see the
+      # Dockerfile), so the side that builds has to say. deploy/install.sh and
+      # deploy/update.sh read both from this checkout's git and hand them to
+      # Compose when they run `up -d --build`; the `:-` defaults keep a bare
+      # `docker compose up -d --build` in a clone working, and an image built
+      # that way simply reports an unknown revision rather than a wrong one.
+      args:
+        LORELINE_BUILD_COMMIT: ${LORELINE_BUILD_COMMIT:-}
+        LORELINE_BUILD_DESCRIBED: ${LORELINE_BUILD_DESCRIBED:-}
     # Published by .github/workflows/docker-publish.yml on every push to main,
     # for linux/amd64 and linux/arm64. Both `build:` and `image:` on one
     # service on purpose, and the order of precedence is unchanged: `up -d
@@ -143,9 +154,21 @@ services:
     # This image ships with NO models, and does not download one on demand:
     # transcription 404s with "Model '...' is not installed locally" while
     # GET /v1/models still answers 200 with an empty list - which reads like
-    # the service is fine. Install one once (persists in speaches-hub):
+    # the service is fine. deploy/install.sh installs one for you when you
+    # enable this profile at install time; otherwise, once (persists in
+    # speaches-hub):
     #
-    #   curl -X POST http://localhost:8200/v1/models/Systran/faster-whisper-large-v3
+    #   curl -X POST http://localhost:8200/v1/models/Systran/faster-whisper-small
+    #
+    # `small`, not `large-v3`, and the reason is a hard limit rather than a
+    # preference: SttRouter gives each utterance 30 s (timeout_s in
+    # src/loreline/stt/router.py) and large-v3 on a CPU does not come close.
+    # Measured on the test box, every single utterance timed out, the run
+    # logged `stt.degraded ... Speaches (local): TimeoutError` and wrote no
+    # segments at all. `small` is multilingual, which the distil-whisper
+    # builds are not (English only), and that matters for a table not playing
+    # in English. If your box has the cores for it, `medium` and `large-v3`
+    # are the same one-line install.
     #
     # Note WHISPER__MODEL and PRELOAD_MODELS do NOT work here despite
     # appearing in the upstream docs - this build's settings object has

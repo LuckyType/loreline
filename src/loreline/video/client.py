@@ -31,7 +31,8 @@ from typing import cast
 
 import httpx
 
-from loreline.capabilities import supports, surface_for
+from loreline.capabilities import curated_entries, supports, surface_for
+from loreline.capability_config import ModelSpec, VideoCapabilities
 from loreline.catalog import VendorModel, VendorVideo, probe
 from loreline.logging import get_logger
 from loreline.models import Interaction, ProviderConfig, ProviderKind, VideoModelInfo
@@ -134,17 +135,29 @@ async def list_video_models(
     """Video models and the parameters each one accepts.
 
     A projection of the one catalogue reader, :mod:`loreline.catalog`: the
-    kind's video ``catalog`` surface, read once, fail soft. An unusable probe
-    (no such catalogue, vendor down, shape moved) yields an empty list rather
-    than raising, so the dialog can still open and say so instead of erroring
-    the page. The lists stay None where the vendor published none, which the
-    form reads as "this model takes no such parameter".
+    kind's video ``catalog`` surface, read once, fail soft. Nothing raises, so
+    the dialog opens whatever the vendor did; the lists stay None where nobody
+    published a value, which the form reads as "this model takes no such
+    parameter".
 
-    An empty list is also the ordinary answer for a vendor that publishes no
-    video catalogue at all (xAI): the dialog then builds its controls from the
-    model's ``video`` block in capabilities.yaml, which is its primary source in
-    either case - the vendor's own lists are the fallback for a model that file
-    does not annotate.
+    An unusable probe (no such catalogue, vendor down, shape moved) falls back
+    to the models capabilities.yaml curates for the kind, exactly as the model
+    pickers do - see :func:`loreline.stt.catalog.list_catalog`, which has had
+    that fallback all along. For xAI the fallback is the *only* answer: its
+    ``GET /v1/models`` is the chat roster and it publishes no video catalogue
+    anywhere, so the yaml curates grok-imagine-video-1.5 by hand and this is
+    what puts it in the picker. Without it the dialog offered a working
+    provider no model at all while ``POST /api/video`` generated happily.
+
+    Live wins wherever both exist, rather than merging the two. OpenRouter
+    publishes /videos/models *and* is curated here, and its live list is the
+    newer of the two by construction: it gains a model the day the gateway
+    does and loses one the day the gateway drops it, where the file changes
+    when someone next edits it. A merge would buy nothing for that cost -
+    every curated OpenRouter entry was read off that same live list, so the
+    ids would mostly collide - and it would go on offering a model the gateway
+    has retired, which is a paid job that can only fail. The file is the answer
+    when the vendor cannot be asked, not an addition to what it says.
     """
     answer = await probe(
         config.kind,
@@ -154,9 +167,13 @@ async def list_video_models(
         client_factory=client_factory,
         request_timeout=_TIMEOUT_S,
     )
-    if not answer.usable:
-        return []
-    return sorted((_video_row(m) for m in answer.models), key=lambda m: m.id)
+    if answer.usable:
+        return sorted((_video_row(m) for m in answer.models), key=lambda m: m.id)
+    # Curated rows keep the file's order rather than being sorted by id, as the
+    # model pickers' fallback does: that order is written deliberately (families
+    # together, the variant a GM most likely wants first), and it is information
+    # a live list simply does not carry.
+    return [_curated_row(m) for m in curated_entries(config.kind, Interaction.VIDEO)]
 
 
 def _video_row(model: VendorModel) -> VideoModelInfo:
@@ -175,6 +192,36 @@ def _video_row(model: VendorModel) -> VideoModelInfo:
         # knob the vendor did not vouch for is simply not offered.
         generate_audio=video.audio is True,
         seed=video.seed is True,
+    )
+
+
+def _curated_row(model: ModelSpec) -> VideoModelInfo:
+    """A curated entry as a catalogue row, mapped as :func:`_video_row` maps
+    a vendor's.
+
+    The differences are all things the file does not record: no per-model
+    description, no explicit ``WxH`` sizes (nothing curated offers those
+    instead of resolutions) and no seed knob, so none of the three is claimed
+    here rather than being guessed at. An empty curated list becomes None for
+    the same reason a missing vendor list is None: an unwritten ``durations``
+    is the file saying nothing about durations, and a control with nothing to
+    put in it is worse than no control.
+
+    ``image_input`` and ``prompt_max_chars`` are in the block and deliberately
+    not on the row. The dialog already reads those from /api/capabilities
+    (``videoCapsFor``), which serves this very block, and one fact arriving by
+    two routes is how the two get to disagree.
+    """
+    video = model.video or VideoCapabilities()
+    return VideoModelInfo(
+        id=model.id,
+        name=model.label or model.id,
+        supported_durations=list(video.durations) or None,
+        supported_resolutions=list(video.resolutions) or None,
+        supported_aspect_ratios=list(video.aspect_ratios) or None,
+        # Same rule as a vendor row: a knob nothing vouched for is not offered,
+        # so ``audio: null`` in the file means "no answer", never "yes".
+        generate_audio=video.audio is True,
     )
 
 

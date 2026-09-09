@@ -29,16 +29,105 @@ def _is_rev_parse(argv: list[str]) -> bool:
     return argv[:2] == ["git", "rev-parse"]
 
 
+# `in_container` is spelled out in every test below rather than left to the
+# default, which reads /.dockerenv on whatever host is running the suite. It
+# decides where current_revision looks, so leaving it implicit would make these
+# tests quietly answer a different question inside a container than outside one.
+
+
 async def test_current_revision() -> None:
     runner = FakeRunner(lambda argv: CommandResult(0, "abc123\n", ""))
-    updater = Updater(app_dir=Path("/app"), runner=runner)
+    updater = Updater(app_dir=Path("/app"), runner=runner, in_container=False)
     assert await updater.current_revision() == "abc123"
 
 
 async def test_current_revision_failure() -> None:
     runner = FakeRunner(lambda argv: CommandResult(128, "", "not a repo"))
-    updater = Updater(app_dir=Path("/app"), runner=runner)
+    updater = Updater(app_dir=Path("/app"), runner=runner, in_container=False)
     assert await updater.current_revision() is None
+
+
+async def test_current_described_reports_the_tag_and_the_distance() -> None:
+    """One string carrying the last tag, how far past it this is, and the SHA."""
+    runner = FakeRunner(lambda argv: CommandResult(0, "v0.2.0-93-ge57029c\n", ""))
+    updater = Updater(app_dir=Path("/app"), runner=runner, in_container=False)
+
+    assert await updater.current_described() == "v0.2.0-93-ge57029c"
+    assert runner.calls == [["git", "describe", "--tags", "--always"]]
+
+
+async def test_current_revision_in_a_container_reads_what_was_baked_in() -> None:
+    """The image has no .git, so the build-time value is the only truth there is."""
+    runner = FakeRunner(lambda argv: CommandResult(0, "from-git\n", ""))
+    updater = Updater(
+        app_dir=Path("/app"),
+        runner=runner,
+        in_container=True,
+        build_commit="baked-sha",
+        build_described="v0.2.0-93-gbaked",
+    )
+
+    assert await updater.current_revision() == "baked-sha"
+    assert await updater.current_described() == "v0.2.0-93-gbaked"
+    # The part worth guarding: not that git lost, but that git was never asked.
+    # It could only ever fail here, and this runs on every visit to
+    # Settings > Client.
+    assert runner.calls == []
+
+
+async def test_current_revision_in_a_container_with_nothing_baked() -> None:
+    """A `docker build` with no --build-arg knows nothing, and says so."""
+    runner = FakeRunner(lambda argv: CommandResult(0, "from-git\n", ""))
+    updater = Updater(app_dir=Path("/app"), runner=runner, in_container=True)
+
+    assert await updater.current_revision() is None
+    assert await updater.current_described() is None
+    assert runner.calls == []
+
+
+async def test_current_revision_outside_a_container_prefers_git() -> None:
+    """A checkout moves with every pull; a baked value is frozen at build time."""
+    runner = FakeRunner(lambda argv: CommandResult(0, "from-git\n", ""))
+    updater = Updater(
+        app_dir=Path("/app"),
+        runner=runner,
+        in_container=False,
+        build_commit="baked-sha",
+        build_described="v0.2.0-93-gbaked",
+    )
+
+    assert await updater.current_revision() == "from-git"
+    assert await updater.current_described() == "from-git"
+
+
+async def test_current_revision_outside_a_container_falls_back_to_the_baked_value() -> None:
+    """git is authoritative where it works, and it does not always work.
+
+    A source deployment installed from a tarball, or one whose checkout this
+    process cannot read, has no answer from git - and a package built with the
+    revision baked in still knows what it was built from.
+    """
+    runner = FakeRunner(lambda argv: CommandResult(128, "", "not a git repository"))
+    updater = Updater(
+        app_dir=Path("/app"),
+        runner=runner,
+        in_container=False,
+        build_commit="baked-sha",
+        build_described="v0.2.0-93-gbaked",
+    )
+
+    assert await updater.current_revision() == "baked-sha"
+    assert await updater.current_described() == "v0.2.0-93-gbaked"
+
+
+async def test_current_revision_treats_empty_git_output_as_no_answer() -> None:
+    """Exit 0 and nothing on stdout must not beat a perfectly good fallback."""
+    runner = FakeRunner(lambda argv: CommandResult(0, "\n", ""))
+    updater = Updater(
+        app_dir=Path("/app"), runner=runner, in_container=False, build_commit="baked-sha"
+    )
+
+    assert await updater.current_revision() == "baked-sha"
 
 
 async def test_update_reports_commits() -> None:
@@ -53,7 +142,7 @@ async def test_update_reports_commits() -> None:
         return CommandResult(0, "", "")
 
     runner = FakeRunner(handle)
-    result = await Updater(app_dir=Path("/app"), runner=runner).update()
+    result = await Updater(app_dir=Path("/app"), runner=runner, in_container=False).update()
     assert result.ok
     assert result.previous_commit == "old-sha"
     assert result.new_commit == "new-sha"
@@ -61,8 +150,10 @@ async def test_update_reports_commits() -> None:
 
 
 async def test_update_refuses_in_container() -> None:
-    runner = FakeRunner(lambda argv: CommandResult(0, "sha\n", ""))
-    updater = Updater(app_dir=Path("/app"), runner=runner, in_container=True)
+    # build_commit, not the runner's answer: a container reports the revision
+    # baked into its image and never runs git at all (see current_revision).
+    runner = FakeRunner(lambda argv: CommandResult(0, "unused\n", ""))
+    updater = Updater(app_dir=Path("/app"), runner=runner, in_container=True, build_commit="sha")
 
     result = await updater.update()
 
@@ -82,8 +173,8 @@ async def test_update_refuses_in_container() -> None:
 
 
 async def test_rollback_refuses_in_container() -> None:
-    runner = FakeRunner(lambda argv: CommandResult(0, "sha\n", ""))
-    updater = Updater(app_dir=Path("/app"), runner=runner, in_container=True)
+    runner = FakeRunner(lambda argv: CommandResult(0, "unused\n", ""))
+    updater = Updater(app_dir=Path("/app"), runner=runner, in_container=True, build_commit="sha")
 
     result = await updater.rollback("deadbeef")
 
@@ -339,7 +430,9 @@ async def test_update_failure_captured() -> None:
             return CommandResult(1, "", "boom")
         return CommandResult(0, "sha\n", "")
 
-    result = await Updater(app_dir=Path("/app"), runner=FakeRunner(handle)).update()
+    result = await Updater(
+        app_dir=Path("/app"), runner=FakeRunner(handle), in_container=False
+    ).update()
     assert not result.ok
     assert result.returncode == 1
     assert "boom" in result.output
@@ -350,7 +443,9 @@ async def test_rollback_runs_sequence() -> None:
         return CommandResult(0, "sha\n" if _is_rev_parse(argv) else "", "")
 
     runner = FakeRunner(handle)
-    result = await Updater(app_dir=Path("/app"), unit="loreline", runner=runner).rollback("dead")
+    result = await Updater(
+        app_dir=Path("/app"), unit="loreline", runner=runner, in_container=False
+    ).rollback("dead")
     assert result.ok
     steps = [a for a in runner.calls if not _is_rev_parse(a)]
     assert steps[0] == ["git", "reset", "--hard", "dead"]
@@ -376,7 +471,7 @@ async def test_rollback_stops_on_failure() -> None:
         return CommandResult(0, "", "")
 
     runner = FakeRunner(handle)
-    result = await Updater(app_dir=Path("/app"), runner=runner).rollback("x")
+    result = await Updater(app_dir=Path("/app"), runner=runner, in_container=False).rollback("x")
     assert not result.ok
     assert not any(a[:2] == ["uv", "sync"] for a in runner.calls)
 

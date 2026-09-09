@@ -21,6 +21,8 @@ from httpx import ASGITransport, AsyncClient
 from test_catalog_reader import VIDEO_BODY
 from test_web_session import FakeBackend, capture_factory, fake_diarizers
 
+from loreline import capabilities
+from loreline.capability_config import CapabilityConfig
 from loreline.models import (
     Interaction,
     JobStatus,
@@ -240,12 +242,138 @@ class TestModelCatalog:
         assert sora.supported_sizes is None
         assert (sora.generate_audio, sora.seed) == (False, False)
 
-    async def test_unreachable_provider_yields_an_empty_catalog(self) -> None:
-        """Best effort, like the chat model list: the dialog should open and
-        say there are no models, not fail the page."""
+    async def test_a_live_catalogue_is_not_merged_with_the_curated_one(self) -> None:
+        """Live wins outright where a vendor publishes a list and this file
+        curates one too, which on OpenRouter is every time.
+
+        The gateway's list is the newer of the two by construction, so a model
+        it no longer serves must not survive in the picker because the yaml
+        still names it - a job against a retired model is paid for and then
+        fails. Read on the same body as the test above: veo-3.1 is curated for
+        OpenRouter and absent from that body, and wan-3.0 is in both with
+        different durations."""
+
+        def handle(_request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json=VIDEO_BODY)
+
+        models = await list_video_models(
+            config=_openrouter(),
+            api_key="k",
+            client_factory=lambda: _client(httpx.MockTransport(handle)),
+        )
+        curated = capabilities.curated_models(ProviderKind.OPENROUTER, Interaction.VIDEO)
+        assert "google/veo-3.1" in curated
+        assert [m.id for m in models] == ["alibaba/wan-3.0", "openai/sora-2-pro"]
+        wan = next(m for m in models if m.id == "alibaba/wan-3.0")
+        # The vendor's durations, not the file's much longer list for the same id.
+        assert wan.supported_durations == [4, 8]
+
+    async def test_unreachable_provider_falls_back_to_the_curated_list(self) -> None:
+        """Best effort, like the chat model list, and by the same rule: a
+        vendor that cannot be reached yields the curated models rather than an
+        empty dialog. Generation itself does not need the catalogue, so a GM
+        whose gateway is having a bad minute can still start a clip."""
         transport = httpx.MockTransport(lambda _r: httpx.Response(500))
         models = await list_video_models(
             config=_openrouter(), api_key="k", client_factory=lambda: _client(transport)
+        )
+        expected = capabilities.curated_models(ProviderKind.OPENROUTER, Interaction.VIDEO)
+        assert expected, "openrouter curates no video models; this test needs rewriting"
+        # In the file's order, which is written deliberately, and not sorted.
+        assert [m.id for m in models] == expected
+
+
+class TestCuratedVideoModels:
+    """The other half of the same list: what the dialog gets for a vendor that
+    publishes no video catalogue at all.
+
+    xAI is that vendor - its ``GET /v1/models`` is the chat roster, and the
+    yaml says so where it curates grok-imagine-video-1.5 by hand. This used to
+    return nothing, so a working xAI row showed "No video models available"
+    while ``POST /api/video`` generated a clip from that same model happily.
+    """
+
+    @staticmethod
+    def _with_hidden(cfg: CapabilityConfig, kind: ProviderKind, model_id: str) -> CapabilityConfig:
+        """The same config with one model hidden, as a release gate would be.
+
+        ``default`` goes with it because the loader refuses a hidden default,
+        and a kind whose every video model is hidden needs none: nothing is
+        offered for that interaction any more.
+        """
+        spec = cfg.providers[kind]
+        models = [
+            m.model_copy(update={"hidden": True, "default": False}) if m.id == model_id else m
+            for m in spec.models
+        ]
+        providers = dict(cfg.providers)
+        providers[kind] = spec.model_copy(update={"models": models})
+        return cfg.model_copy(update={"providers": providers})
+
+    @staticmethod
+    def _unreachable() -> httpx.AsyncClient:
+        """A transport that answers nothing, so a test here cannot start
+        depending on a network the fallback exists to do without."""
+        return _xai_client(httpx.MockTransport(lambda _r: httpx.Response(500)))
+
+    async def test_a_vendor_with_no_catalogue_offers_its_curated_models(self) -> None:
+        """The parameters come off the file's ``video`` block, field by field,
+        because they are the only description of this model anyone has."""
+        seen: list[str] = []
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            seen.append(str(request.url))
+            return httpx.Response(200, json={"data": []})
+
+        models = await list_video_models(
+            config=_xai(),
+            api_key="k",
+            client_factory=lambda: _xai_client(httpx.MockTransport(handle)),
+        )
+        # Nothing to ask: the kind declares no video catalog surface, so the
+        # fallback is reached without a round trip rather than after one.
+        assert seen == []
+        assert [m.id for m in models] == ["grok-imagine-video-1.5"]
+        grok = models[0]
+        assert grok.name == "Grok Imagine Video 1.5"  # the file's label, not the id
+        assert grok.supported_durations == list(range(1, 16))
+        assert grok.supported_resolutions == ["480p", "720p", "1080p"]
+        assert grok.supported_aspect_ratios == ["16:9", "9:16", "1:1", "4:3", "3:4", "3:2", "2:3"]
+        assert grok.generate_audio is True  # `audio: true` in the file
+        # Neither is written down for a curated model, so neither is promised:
+        # the file records no seed knob and no explicit WxH sizes.
+        assert grok.seed is False
+        assert grok.supported_sizes is None
+
+    async def test_the_curated_row_carries_what_a_real_generation_needs(self) -> None:
+        """The verified case, end to end through the picker: the values a real
+        xAI job was submitted with are all offered by the row the dialog gets."""
+        models = await list_video_models(
+            config=_xai(), api_key="k", client_factory=self._unreachable
+        )
+        grok = next(m for m in models if m.id == "grok-imagine-video-1.5")
+        assert grok.supported_durations is not None
+        assert 2 in grok.supported_durations
+        assert "480p" in (grok.supported_resolutions or [])
+        assert "16:9" in (grok.supported_aspect_ratios or [])
+
+    async def test_a_hidden_curated_model_is_never_offered(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``hidden`` is the release gate for a connector nobody has verified
+        against the real API, and the fallback must not be a way around it.
+
+        Read only: the loaded config is copied, the flag flipped in memory, and
+        the process-wide cache restored by monkeypatch."""
+        shipped = capabilities.config()
+        curated = "grok-imagine-video-1.5"
+        entry = next(m for m in shipped.providers[ProviderKind.XAI].models if m.id == curated)
+        assert not entry.hidden, f"{curated} is hidden now; this guard needs rewriting"
+        gated = self._with_hidden(shipped, ProviderKind.XAI, curated)
+        monkeypatch.setattr(capabilities, "config", lambda: gated)
+
+        models = await list_video_models(
+            config=_xai(), api_key="k", client_factory=self._unreachable
         )
         assert models == []
 
