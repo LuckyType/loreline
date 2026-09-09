@@ -60,12 +60,27 @@ class SessionStatus(StrEnum):
 
 
 class JobStatus(StrEnum):
-    """Lifecycle state of a re-processing job."""
+    """Lifecycle state of a re-processing job.
+
+    ``CANCELLED`` is terminal and is deliberately not ``ERROR``. A GM watching
+    a re-transcription fill up can tell within a minute or two whether the
+    model is worth the rest of the recording, and stopping it there is a
+    decision, not a failure: nothing broke, the run did exactly what it was
+    told, and everything it had written by then is kept and still readable
+    (see :meth:`loreline.reprocess.jobs.ReprocessManager.cancel`). Every reader
+    therefore has to be explicit about which question it is asking - "did this
+    fail" means ``ERROR`` alone, "is this still going" means ``QUEUED`` or
+    ``RUNNING`` alone - because a cancelled run answers no to both.
+
+    Video jobs share this enum and never reach ``CANCELLED``: a generation is
+    one remote call this app only polls, so there is nothing here to stop.
+    """
 
     QUEUED = "queued"
     RUNNING = "running"
     DONE = "done"
     ERROR = "error"
+    CANCELLED = "cancelled"
 
 
 class ModelPrice(BaseModel):

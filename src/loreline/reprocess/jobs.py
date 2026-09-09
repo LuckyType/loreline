@@ -97,6 +97,14 @@ class VersionBusyError(ValueError):
     """Raised when deleting a transcript version a job is still writing."""
 
 
+class JobNotFoundError(ValueError):
+    """Raised when cancelling a re-processing job id that does not exist."""
+
+
+class JobNotCancellableError(ValueError):
+    """Raised when cancelling a job that has already reached a terminal state."""
+
+
 def stored_audio_backend(
     config: ProviderConfig, secrets: SecretStore, model: str | None
 ) -> STTBackend:
@@ -136,6 +144,61 @@ DiarizerProbe = Callable[[str], Awaitable[HealthReport]]
 # session page polls the job list every 1.5s, so a tighter cadence would only
 # add SQLite commits nobody can see.
 _COUNT_INTERVAL_S = 1.0
+
+
+# How long ``cancel`` waits for the run to actually stop before answering. It
+# is not a deadline for stopping - it is how long the endpoint is willing to
+# hold the request open so it can return the row the job settles *on* rather
+# than the one it is leaving. A queued job that never started, and a diarize
+# job stopped by ``task.cancel()``, both finish inside this; a re-transcription
+# in the middle of a vendor call does not, so that one answers "running" and
+# settles under the page's own 1.5s poll a moment later. Long enough that the
+# common cases need no second read, short enough that a press never feels slow.
+_CANCEL_SETTLE_S = 0.25
+
+# The states a job can still be stopped from. Everything else is terminal and
+# earns a 409 naming it: the page polls, so a run can reach the end between the
+# poll that drew the Cancel button and the press that hits the endpoint.
+_CANCELLABLE = frozenset({JobStatus.QUEUED, JobStatus.RUNNING})
+
+
+class _CancelRequest:
+    """One run's cancel flag, and whether the work really stopped for it.
+
+    Two booleans because they answer different questions, and only the second
+    one may decide the row's status.
+
+    ``requested`` is what the GM asked for. It is read by the run itself, at
+    the top of every utterance (see :func:`_aiter`), which is what makes
+    cancellation cooperative: the run stops between two utterances, where
+    nothing is in flight, every row it wrote is committed, and the connector,
+    the router and the diarizer all wind down through the same path a run that
+    reached the end of the recording takes.
+
+    ``stopped`` is what actually happened, and it is set by the code that broke
+    off. A request that arrives after the last utterance was already handed
+    over changes nothing about the run, and a job whose work completed in full
+    must not carry a badge saying it was cancelled - the version it produced is
+    whole, and the GM will read it as a partial one.
+    """
+
+    def __init__(self) -> None:
+        self.requested = False
+        self.stopped = False
+
+
+class _Run:
+    """The live half of an enqueued job: its task, and the flag that asks it to stop.
+
+    Kept only while the task exists (the done-callback in ``enqueue`` drops the
+    entry), so "this manager has a ``_Run`` for the id" means "this process is
+    the one running it" - which is what lets :meth:`ReprocessManager.cancel`
+    tell a job it can actually reach from a row left behind by something else.
+    """
+
+    def __init__(self, task: asyncio.Task[None], cancel: _CancelRequest) -> None:
+        self.task = task
+        self.cancel = cancel
 
 
 class _LiveSegmentCount:
@@ -243,7 +306,7 @@ class ReprocessManager:
         self._backend_factory = backend_factory or stored_audio_backend
         self._diarizer_factory = diarizer_factory
         self._diarizer_probe = diarizer_probe or probe_diarizer
-        self._tasks: dict[str, asyncio.Task[None]] = {}
+        self._runs: dict[str, _Run] = {}
 
     async def enqueue(self, req: ReprocessRequest) -> ReprocessJob:
         """Validate inputs, create a job row, and spawn the runner task.
@@ -297,9 +360,16 @@ class ReprocessManager:
         )
         await self._reprocess.create(job)
         campaign_id = session.campaign_id
-        task = asyncio.create_task(self._run(job, provider, campaign_id, session.started_mono))
-        self._tasks[job.id] = task
-        task.add_done_callback(lambda _t: self._tasks.pop(job.id, None))
+        # The flag is built here rather than inside the task, and handed to it:
+        # `cancel` has to be able to raise it in the window between this line
+        # and the loop first scheduling the task, which is exactly the window a
+        # job spends QUEUED (see `_run`, which checks it before doing anything).
+        cancel = _CancelRequest()
+        task = asyncio.create_task(
+            self._run(job, provider, campaign_id, session.started_mono, cancel)
+        )
+        self._runs[job.id] = _Run(task, cancel)
+        task.add_done_callback(lambda _t: self._runs.pop(job.id, None))
         log.info("reprocess.enqueue", job_id=job.id, session_id=job.session_id)
         return job
 
@@ -389,12 +459,15 @@ class ReprocessManager:
             msg = f"unknown transcript version {version!r}"
             raise VersionNotFoundError(msg)
         # A job still writing this version would keep inserting rows after the
-        # delete, leaving segments no job row explains.
-        pending = {JobStatus.QUEUED, JobStatus.RUNNING}
+        # delete, leaving segments no job row explains. A CANCELLED job is not
+        # one of them, and that is the whole point of the state: the row only
+        # reaches it once the run has actually stopped writing (see `_run`), so
+        # deleting a version the GM cut short - which is what they cancelled it
+        # in order to do - is exactly as safe as deleting a finished one.
         busy = [
             j
             for j in jobs
-            if j.status in pending
+            if j.status in _CANCELLABLE
             and (j.id == version or (j.operation == "diarize" and j.target == version))
         ]
         if busy:
@@ -405,19 +478,100 @@ class ReprocessManager:
         await self._reprocess.delete_version(session_id, version)
         log.info("reprocess.version.deleted", session_id=session_id, version=version)
 
+    async def cancel(self, job_id: str) -> ReprocessJob:
+        """Stop a queued or running job, keeping everything it has written.
+
+        The GM is watching the version fill up while it runs, which is the
+        whole reason this exists: two minutes in they can already tell whether
+        the model is better than the one on screen, and if it is not, there is
+        no reason to pay for and wait out the rest. So nothing is rolled back -
+        the rows stay, ``segments_added`` keeps its value, and the version
+        stays readable and deletable exactly like a finished one. Cancelling
+        destroys nothing; it only stops more from being made.
+
+        How the run is stopped depends on what it is doing.
+
+        A **re-transcription** walks the recording utterance by utterance, so
+        it is asked to stop rather than interrupted: the flag is raised here
+        and read by the iterator feeding the router (:func:`_aiter`), which
+        simply stops handing over utterances. The run then finishes through its
+        own normal path - the connector and the diarizer close, the last row is
+        committed, the row is finalised once - and there is no half-written
+        state to unpick. The cost is one utterance of latency, bounded by the
+        router's own per-request timeout, because a vendor call already in
+        flight is not interrupted.
+
+        A **diarization** is one long call the flag cannot reach into, so that
+        one is stopped with ``task.cancel()``. See :meth:`_diarize_session` for
+        what it takes to make that safe.
+
+        A **queued** job that the loop has not started yet is stopped before it
+        does anything at all: the flag is raised below before this coroutine's
+        first await, so a task created by ``enqueue`` and not yet scheduled
+        cannot slip past the check at the top of :meth:`_run`. Nothing is read,
+        asked for or billed.
+
+        Raises :class:`JobNotFoundError` for an id that does not exist and
+        :class:`JobNotCancellableError` for one that has already finished.
+        """
+        run = self._runs.get(job_id)
+        # Before the first await, for the queued case above. Setting it on a
+        # job that turns out to be finished below is harmless: the run that
+        # would have read it is over, and the entry goes with the task.
+        first_ask = run is not None and not run.cancel.requested
+        if run is not None:
+            run.cancel.requested = True
+        job = await self._reprocess.get(job_id)
+        if job is None:
+            msg = f"unknown job {job_id!r}"
+            raise JobNotFoundError(msg)
+        if job.status is JobStatus.CANCELLED and first_ask:
+            # Our own request, landed while this coroutine was reading the row:
+            # the task saw the flag and finalised before the read came back.
+            # Answering 409 here would report the caller's own success as a
+            # race it lost.
+            return job
+        if job.status not in _CANCELLABLE:
+            msg = f"job {job_id!r} has already finished ({job.status.value})"
+            raise JobNotCancellableError(msg)
+        if run is None:
+            # A queued/running row this process is not running: only reachable
+            # before the startup sweep has failed it (see `reconcile`). Nothing
+            # is writing it, so recording the GM's decision is safe and is the
+            # only thing left to do about it.
+            job.status = JobStatus.CANCELLED
+            job.finished_at = time.time()
+            await self._reprocess.update(job)
+            log.info("reprocess.cancelled", job_id=job_id, adopted=True)
+            return job
+        log.info("reprocess.cancel.requested", job_id=job_id, operation=job.operation)
+        if job.operation == "diarize":
+            run.task.cancel()
+        # `wait`, not `await task`: the task may be ending in CancelledError,
+        # and that must stop the job, not the request asking it to stop.
+        _ = await asyncio.wait({run.task}, timeout=_CANCEL_SETTLE_S)
+        return await self._reprocess.get(job_id) or job
+
     async def wait(self, job_id: str) -> None:
         """Await completion of a running job's task (no-op if unknown)."""
-        task = self._tasks.get(job_id)
-        if task is not None:
-            await task
+        run = self._runs.get(job_id)
+        if run is not None:
+            await run.task
 
     async def reconcile(self) -> None:
         """Fail jobs left running/queued by a previous process (startup sweep)."""
         await self._reprocess.mark_interrupted()
 
     async def aclose(self) -> None:
-        """Cancel and await any in-flight job tasks (on shutdown)."""
-        tasks = list(self._tasks.values())
+        """Cancel and await any in-flight job tasks (on shutdown).
+
+        Deliberately not a cancellation in the sense :meth:`cancel` means: the
+        flag stays down, so `_run` re-raises rather than marking the row
+        CANCELLED, and the job is left QUEUED/RUNNING for the next process's
+        `reconcile` to fail as interrupted. A restart is not a decision the GM
+        made, and a row claiming they made it would be a lie they cannot act on.
+        """
+        tasks = [run.task for run in self._runs.values()]
         for task in tasks:
             task.cancel()
         for task in tasks:
@@ -430,6 +584,7 @@ class ReprocessManager:
         provider: ProviderConfig | None,
         campaign_id: str | None,
         started_mono: float,
+        cancel: _CancelRequest,
     ) -> None:
         """Run one job, and leave a readable account of it in its own log file.
 
@@ -441,6 +596,9 @@ class ReprocessManager:
         single ``reprocess.enqueue`` line the caller wrote and nothing about
         the run itself, so the one screen meant for answering "what happened to
         this version" could not answer it for the runs that failed silently.
+        A run the GM stopped gets that line too, and it is a distinct one: the
+        first question asked of a half-length version is why it is short, and
+        "it was stopped on request after N segments" answers it outright.
 
         The binding on the first line is what puts them there, and it covers
         the whole body including the failure path: it attributes every line
@@ -450,25 +608,65 @@ class ReprocessManager:
         shows the live capture only (see ``loreline.logging.bind_log_context``).
         """
         bind_log_context(session_id=job.session_id, job_id=job.id)
+        if cancel.requested:
+            # Cancelled in the window between `enqueue` creating this task and
+            # the loop getting round to it: the job never left QUEUED, so it
+            # never opened a connector, never read the recording and never
+            # billed anything. `started_at` stays None, which is the honest
+            # record of a run that did not happen.
+            cancel.stopped = True
+            job.status = JobStatus.CANCELLED
+            job.finished_at = time.time()
+            await self._reprocess.update(job)
+            log.info("reprocess.cancelled", operation=job.operation, segments_added=0, ran=False)
+            return
         job.status = JobStatus.RUNNING
         job.started_at = time.time()
         await self._reprocess.update(job)
         started = time.monotonic()
         log.info("reprocess.start", **_run_description(job))
+        finalised = False
         try:
             if job.operation == "diarize":
                 job.segments_added = await self._diarize_session(job)
             else:
                 job.segments_added = await self._transcribe_session(
-                    job, provider, campaign_id, started_mono
+                    job, provider, campaign_id, started_mono, cancel
                 )
-            job.status = JobStatus.DONE
+            # `stopped`, not `requested`: a flag raised after the work was
+            # already over stops nothing, and the whole version is there.
+            job.status = JobStatus.CANCELLED if cancel.stopped else JobStatus.DONE
             log.info(
-                "reprocess.finished",
+                "reprocess.cancelled" if cancel.stopped else "reprocess.finished",
                 operation=job.operation,
                 segments_added=job.segments_added,
                 elapsed_s=round(time.monotonic() - started, 1),
             )
+        except asyncio.CancelledError:
+            # Not caught by the `except Exception` below - CancelledError is a
+            # BaseException - and that is exactly why it is handled here: a
+            # diarize job stopped by `cancel` arrives as this and would
+            # otherwise leave the row saying "running" with no run behind it.
+            if not cancel.requested:
+                raise  # a shutdown, not a decision: see `aclose`
+            cancel.stopped = True
+            job.status = JobStatus.CANCELLED
+            job.finished_at = time.time()
+            # Shielded, and the `finally` below skipped for it. This task is
+            # already being torn down, so a plain await here can be interrupted
+            # again before SQLite has seen the row - and a row left at
+            # "running" by the very call that stopped it is the one outcome
+            # this whole feature cannot afford.
+            await asyncio.shield(self._reprocess.update(job))
+            finalised = True
+            log.info(
+                "reprocess.cancelled",
+                operation=job.operation,
+                segments_added=job.segments_added,
+                elapsed_s=round(time.monotonic() - started, 1),
+                interrupted=True,
+            )
+            raise
         except Exception as exc:  # any failure marks the job errored
             job.status = JobStatus.ERROR
             job.error = _job_error_message(exc, job)
@@ -482,8 +680,9 @@ class ReprocessManager:
                 elapsed_s=round(time.monotonic() - started, 1),
             )
         finally:
-            job.finished_at = time.time()
-            await self._reprocess.update(job)
+            if not finalised:
+                job.finished_at = time.time()
+                await self._reprocess.update(job)
 
     async def _transcribe_session(
         self,
@@ -491,6 +690,7 @@ class ReprocessManager:
         provider: ProviderConfig | None,
         campaign_id: str | None,
         started_mono: float,
+        cancel: _CancelRequest,
     ) -> int:
         """Re-run STT over the stored utterances as a new transcript version."""
         if provider is None:
@@ -526,7 +726,7 @@ class ReprocessManager:
         try:
             # Blocking file I/O (a whole session's utterances) off the event loop.
             utterances = await asyncio.to_thread(self._audio_store.read_utterances, job.session_id)
-            return await self._drive(router, bus, utterances, job, started_mono)
+            return await self._drive(router, bus, utterances, job, started_mono, cancel)
         finally:
             await _aclose(backend)
             await _aclose(diarizer)
@@ -535,7 +735,12 @@ class ReprocessManager:
         """Diarize the whole continuous session audio once and relabel ONE
         transcript version (``job.target``) globally, giving stable speaker
         identity across the session. Replaces that version's previous
-        diarization; other versions are untouched."""
+        diarization; other versions are untouched.
+
+        Unlike a re-transcription this is one call, not a loop, so there is no
+        boundary at which to ask it to stop: :meth:`cancel` interrupts it with
+        ``task.cancel()`` instead, and the write below is what makes that safe
+        to do."""
         session = await self._sessions.get(job.session_id)
         if session is None:
             msg = f"unknown session {job.session_id!r}"
@@ -571,9 +776,24 @@ class ReprocessManager:
         ]
         await self._transcripts.delete_source(job.session_id, source)
         live = _LiveSegmentCount(job, self._reprocess)
-        for written, event in enumerate(relabeled, start=1):
-            await self._transcripts.add(event)
-            await live.set(written)
+        try:
+            for written, event in enumerate(relabeled, start=1):
+                await self._transcripts.add(event)
+                await live.set(written)
+        except asyncio.CancelledError:
+            # The one place a cancelled run does NOT keep what it wrote, and
+            # for the opposite reason: ANY ``diarize:<version>`` rows supersede
+            # that version's own on read (see ``loreline.export.variant_view``),
+            # so a copy covering the first N rows would not show a partial
+            # relabeling - it would hide every row after them, deleting the
+            # rest of the transcript from every reader's point of view. A whole
+            # copy or none, and the previous diarization is already gone by
+            # here, so "none" means the version falls back to its own labels.
+            # Shielded because this task is being torn down: an interrupted
+            # cleanup is the corrupt state it exists to prevent.
+            job.segments_added = 0
+            await asyncio.shield(self._transcripts.delete_source(job.session_id, source))
+            raise
         return len(relabeled)
 
     async def _drive(
@@ -583,6 +803,7 @@ class ReprocessManager:
         utterances: list[Utterance],
         job: ReprocessJob,
         started_mono: float,
+        cancel: _CancelRequest,
     ) -> int:
         """Subscribe first, then run the router, persisting every emitted event.
 
@@ -596,12 +817,19 @@ class ReprocessManager:
         subscriber sees the text arrive as it is produced rather than only
         after the job ends. The tag is what keeps it out of the original: a
         subscriber files an event under the version its ``source`` names.
+
+        A cancel stops the *feed* rather than this loop (see :func:`_aiter`),
+        which is what keeps the two ends in step: the router finishes the
+        utterance it holds, publishes it, closes the bus, and this loop drains
+        the last event and returns a count that matches the rows on disk.
+        Breaking out here instead would leave `run_task` writing into a bus
+        nobody reads, and the `finally` below waiting for it anyway.
         """
         source = f"{REPROCESS_SOURCE_PREFIX}{job.id}"
         live = _LiveSegmentCount(job, self._reprocess)
         count = 0
         async with bus.subscribe(reliable=True) as stream:
-            run_task = asyncio.create_task(_run_then_close(router, utterances, bus))
+            run_task = asyncio.create_task(_run_then_close(router, _aiter(utterances, cancel), bus))
             try:
                 async for event in stream:
                     rebased = rebase_transcript(event, started_mono)
@@ -616,16 +844,38 @@ class ReprocessManager:
 
 
 async def _run_then_close(
-    router: SttRouter, utterances: list[Utterance], bus: EventBus[TranscriptEvent]
+    router: SttRouter, utterances: AsyncIterator[Utterance], bus: EventBus[TranscriptEvent]
 ) -> None:
     try:
-        await router.run(_aiter(utterances))
+        await router.run(utterances)
     finally:
         await bus.aclose()
 
 
-async def _aiter(items: list[Utterance]) -> AsyncIterator[Utterance]:
+async def _aiter(items: list[Utterance], cancel: _CancelRequest) -> AsyncIterator[Utterance]:
+    """Feed the router the stored recording, one utterance at a time, until it
+    runs out or the GM asks it to stop.
+
+    This is where a cancelled re-transcription actually stops, and the boundary
+    is chosen rather than forced. Between two utterances there is no request in
+    flight, every row the run produced is already committed, and the router,
+    the connector and the diarizer all wind down through the same path they
+    take at the end of a recording - so the job finalises itself and there is
+    nothing half-written for anyone to unpick. ``task.cancel()`` would stop it
+    sooner, at whichever await happened to be current, and would buy those few
+    seconds with all of that.
+
+    The cost is one utterance of latency: a vendor call already in flight is
+    not interrupted, so the press lands when it comes back, bounded by the
+    router's own per-request timeout. ``stopped`` is set here rather than
+    inferred from ``requested`` later because this is the only place that knows
+    the difference between a run that was cut short and one that had already
+    handed over its last utterance when the press arrived.
+    """
     for item in items:
+        if cancel.requested:
+            cancel.stopped = True
+            return
         yield item
 
 

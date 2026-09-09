@@ -94,6 +94,13 @@ async def _best_available_rows(state: AppState, session_id: str) -> list[Transcr
     having written nothing (a provider that answered with silence, a version
     whose rows were deleted afterwards), and an empty version is not an
     improvement on the capture, it is the loss of it.
+
+    ``DONE`` and nothing else, so a CANCELLED run is skipped here however good
+    the part of it that ran was. Its rows are kept and readable on purpose -
+    that is what the GM stopped it to look at - but this picks the text a
+    caller gets when it did not choose a version, and a transcript that covers
+    the first ten minutes of a four-hour session is not it. The GM can still
+    name that version explicitly; what they cannot do is be handed it silently.
     """
     events = await state.transcripts.for_session(session_id)
     for job in await state.reprocess_jobs.for_session(session_id):  # newest first

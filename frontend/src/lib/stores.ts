@@ -24,7 +24,14 @@ export function fmtWhen(ts: number): string {
 
 /** Whether a re-processing job is still going: shared by the version list,
  *  which counts up while it runs, and the page's poll, which stops when the
- *  last one drains. */
+ *  last one drains.
+ *
+ *  'cancelled' is not in flight, and that is what re-enables Delete on a row
+ *  the GM stopped: the row only reaches that status once the run has actually
+ *  stopped writing, so there is nothing left to wait for. The list of live
+ *  states is written out rather than derived from the terminal ones, because
+ *  this is the predicate a poll runs on: a status nobody thought about must
+ *  end the poll, not keep it going forever. */
 export function inFlight(job: ReprocessJob): boolean {
 	return job.status === 'queued' || job.status === 'running'
 }
