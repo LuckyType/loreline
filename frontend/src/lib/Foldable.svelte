@@ -20,7 +20,11 @@
  * The row wraps, which is the whole phone story. The toggle asks for 10rem
  * before it will share a line, so once the actions no longer fit beside that
  * they drop to a line of their own rather than squeezing the title to an
- * ellipsis or pushing the last button off a 320px screen.
+ * ellipsis or pushing the last button off a 320px screen. Nothing then pushes
+ * that second line to the right: what right-aligns the actions while they
+ * share a line is the toggle growing into everything they leave, so once they
+ * are on a line of their own they start where every other line on the phone
+ * starts, at the left margin.
  */
 
 import { ChevronDown } from '@lucide/svelte'
@@ -29,6 +33,7 @@ import type { Snippet } from 'svelte'
 let {
 	title,
 	meta = '',
+	metaContent,
 	open = $bindable(true),
 	bodyClass = 'contents',
 	actions,
@@ -36,6 +41,12 @@ let {
 }: {
 	title: string
 	meta?: string
+	/** The same line as `meta`, when a plain string cannot say it: a snippet is
+	 *  what lets a caller mute the labels in "Provider X  Model Y" while the
+	 *  values stay readable. It is rendered inside the toggle, so it may hold
+	 *  no control of its own - a button inside a button is invalid HTML. Wins
+	 *  over `meta` when both are given. */
+	metaContent?: Snippet
 	open?: boolean
 	/** What the body wrapper is, layout included. Defaults to laying out
 	 *  nothing: the children fall through to the caller's own flow. */
@@ -58,15 +69,19 @@ let {
 			class="size-4 shrink-0 text-muted-foreground transition-transform {open ? '' : '-rotate-90'}"
 		/>
 		<h3 class="m-0 font-medium">{title}</h3>
-		{#if meta}
-			<!-- Truncated rather than left to push: the meta is the least important
-			     thing on the line and the only one that grows without bound, so it
-			     is what gives way when the actions want the room. -->
+		<!-- Truncated rather than left to push: the meta is the least important
+		     thing on the line and the only one that grows without bound, so it
+		     is what gives way when the actions want the room. That is what keeps
+		     a header holding a whole provider-and-model line down to one row on a
+		     320px screen, with the actions still on it. -->
+		{#if metaContent}
+			<span class="min-w-0 truncate text-xs">{@render metaContent()}</span>
+		{:else if meta}
 			<span class="min-w-0 truncate text-xs text-muted-foreground">{meta}</span>
 		{/if}
 	</button>
 	{#if actions}
-		<div class="ml-auto flex flex-wrap items-center justify-end gap-2">
+		<div class="flex flex-wrap items-center gap-2">
 			{@render actions()}
 		</div>
 	{/if}

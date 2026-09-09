@@ -13,8 +13,11 @@ const tabs = [
 ]
 </script>
 
-<h1>Settings</h1>
-<nav class="mt-4 mb-6 flex gap-1 border-b">
+<!-- No "Settings" heading above the tabs: the left nav already says which page
+     this is and highlights it, and it is only ever hidden by someone collapsing
+     it on purpose. The tab strip therefore starts at the page padding, which is
+     where every settings page's first card would sit anyway. -->
+<nav class="mb-6 flex gap-1 border-b">
 	{#each tabs as tab (tab.href)}
 		<a
 			href={tab.href}

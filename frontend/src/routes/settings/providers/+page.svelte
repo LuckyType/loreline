@@ -734,7 +734,18 @@ onMount(load)
 		<CardDescription>Pre-selected when starting or re-processing a session.</CardDescription>
 	</CardHeader>
 	<CardContent class="flex flex-col gap-4">
-		<div class="grid gap-3 md:grid-cols-3">
+		<!-- Four blocks, so four columns once there is room for them: at three the
+		     odd one out dropped onto a row of its own and read as an afterthought
+		     rather than a peer of the other three. Two columns from md up, because
+		     these hold model ids like anthropic/claude-sonnet-5 and a quarter of a
+		     tablet is not enough width to read one.
+
+		     items-start because the blocks are honestly different heights: Summary
+		     carries a third control when the model exposes reasoning effort, and
+		     Video collapses to a single line of advice when no provider can do it.
+		     Stretching that one sentence to match a three-control block would leave
+		     a tall, mostly empty box. -->
+		<div class="grid items-start gap-3 md:grid-cols-2 xl:grid-cols-4">
 			<div class="flex flex-col gap-2.5 rounded-lg border p-3.5">
 				<div class="flex items-center gap-2 font-medium">
 					<Mic class="size-4" />

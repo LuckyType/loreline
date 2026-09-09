@@ -115,12 +115,16 @@ async function mergeSelected() {
 onMount(reload)
 </script>
 
-<h1>History</h1>
+<!-- No page heading: the left nav names this page and highlights it while you
+     are on it, and it only ever hides because someone collapsed it deliberately.
+     The gap the heading used to open up now hangs off the error instead of the
+     card, so the table starts at the page padding whether or not there is an
+     error to show. -->
 {#if error}
-	<p class="mt-2 text-sm text-destructive">{error}</p>
+	<p class="mb-4 text-sm text-destructive">{error}</p>
 {/if}
 
-<Card class="mt-4">
+<Card>
 	<CardContent>
 		<div class="mb-2 flex items-center justify-between">
 			<span class="text-muted-foreground">{selectedIds.length} selected</span>
