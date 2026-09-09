@@ -182,6 +182,42 @@ async def test_update_in_container_reports_up_to_date_without_a_restart() -> Non
     assert len(seen) == 1
 
 
+async def test_update_in_container_carries_the_scripts_notes() -> None:
+    """A success keeps its verdict as the headline and brings the notes with it.
+
+    deploy/update-fast.sh ends by naming the parts of a release it could not
+    deploy, and the diarization service is one: it is built from the checkout
+    rather than pulled, so the fast path never touches it. That note used to be
+    dropped, and an operator reading "Already up to date" had no way to learn
+    that half a release had been skipped. This is the regression guard for it.
+    """
+    seen: list[httpx.Request] = []
+    output = (
+        "image_changed=0\n"
+        "loreline-app-1  ghcr.io/luckytype/loreline  latest\n"
+        "\n"
+        "note: the diarization service is built from this checkout rather than pulled,\n"
+        "      so this fast path never updates it. To rebuild that service:\n"
+        "        docker compose --profile diarization up -d --build diarization\n"
+        "Update complete.\n"
+    )
+    body: dict[str, object] = {"ok": True, "changed": False, "returncode": 0, "output": output}
+    updater, _ = _in_container_updater(_answers(seen, body=body))
+
+    result = await updater.update()
+
+    assert result.ok
+    first, _, rest = result.output.partition("\n")
+    # The verdict still leads, so the page has one clear sentence to show.
+    assert "up to date" in first.lower()
+    # And the note travels with it, command and all.
+    assert "diarization service is built from this checkout" in rest
+    assert "--profile diarization up -d --build diarization" in rest
+    # Compose's own chatter does not.
+    assert "image_changed" not in result.output
+    assert "loreline-app-1" not in result.output
+
+
 async def test_update_in_container_falls_back_when_the_updater_is_absent() -> None:
     def handle(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("connection refused", request=request)
