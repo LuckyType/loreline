@@ -52,7 +52,7 @@ document, and the frontend lint, type check and build.
 | F-23 | The log viewer hides health probes by default, says how many it hid, and offers 200 / 1000 / 5000 lines. |
 | F-24 | An ntfy server and a webhook URL must be an absolute http(s) URL, validated field-wise on the server (so the 422 body cannot echo the token) and mirrored in the form. |
 | F-25 | `AlertTestResult` gained `detail`, populated with the transport error or the vendor's sentence, scrubbed of the channel's token before it is logged or returned. This also closed a pre-existing token leak into the logs. |
-| F-26 | The diarization service takes an explicit one-at-a-time semaphore that `/healthz` never waits on, queues a second caller for 30s then answers 429, drops a `.tolist()` that built ~35 million Python floats per long session, and shuts down within its grace period. The app also refuses to queue a diarize job against a diarizer it knows is unreachable. |
+| F-26 | **Partly. Do not read this row as done, see F-32.** The `.tolist()` that built ~35 million Python floats per long session is gone and shutdown is within its grace period, both real. The one-at-a-time semaphore is in place but does **not** achieve the responsiveness it was for: a re-test against the deployed build proved `/healthz` still does not answer during a diarization. |
 | F-27 | `merged_from` on the wire drives a "merged" badge, and History gained a Duration column. |
 | F-28 | Both redirect paths carry a sanitised `next`, rejecting anything that is not a single-slash same-origin path. |
 | F-29 | `txt` and `md` drop the speaker entirely when nothing in the transcript has one, and keep "Unknown" in the mixed case. |
@@ -1164,3 +1164,81 @@ whitespace case match it rather than staying stuck, so the visible symptom moved
 rather than appeared. Fixed properly on the branch: seed on the transition into
 open, read the prompt untracked, and leave "Reset to summary" as the deliberate
 way back. Not yet deployed.
+
+### F-21 verified: a real 36-minute session diarized successfully
+
+The decisive test, run through the UI against the deployed build with the
+diarization container rebuilt from the new code. Session `e323e5bc…`, 36:08 of
+audio, 150 segments, diarizer `sherpa-onnx` at `http://diarization:8001`.
+
+Polled once a minute for the whole run:
+
+```
+06:49:51 job=running  ... 07:18:02 job=running   07:19:02 job=done 150
+```
+
+About 30 minutes, finishing `done` with **150 segments relabeled**. Under the
+old fixed 120-second timeout this is the exact job that failed at the two minute
+mark with an empty error message, which is what the original audit saw. The
+scaled timeout (60s + 4x audio seconds, so about 2.5 hours for this recording)
+is doing its job.
+
+The transcript now carries speaker labels where it had none:
+
+```
+  1.4  Speaker 1  'Kann das ist die Frage. Wir haben zwei Möglichkeiten. E'
+ 16.4  Speaker 3  'weil er mittags Schlaf gemacht hat. In der Kita heute s'
+ 33.2  Speaker 5  'Richtig vergessen. Ich habe kein Problem, aber'
+ 50.0  Speaker 7  'Hast du jetzt aufgehört zu rauchen eigentlich?'
+```
+
+**One quality observation, not a defect and not something this work changed.**
+The run produced **11 distinct labels** over 150 segments, and the distribution
+is lopsided: `Speaker 1` 46 and `Speaker 7` 40 carry 86 of the 150, with a tail
+of labels holding 1 to 3 segments each. That is the shape of over-clustering,
+one person split across several labels, which is the opposite failure to the one
+ADR 0007 fixed (everyone collapsing onto `Speaker 0`). I ran it with no min or
+max speaker hint, so the service chose the cluster count itself, and I do not
+know how many people are actually on that recording. Worth a look with
+`min_speakers` and `max_speakers` set, which is what those fields on the diarize
+row are for, before concluding anything about the clustering itself.
+
+### F-32 (medium) The diarizer still stops answering while it works, and that now blocks queueing
+
+Correcting my own earlier claim: F-26 was marked fixed on the branch, and the
+production re-test shows it is not.
+
+The container was rebuilt from the new code, verified with
+`grep -c BoundedSemaphore /app/app.py` returning 1. During the 36-minute run
+above, the app's probe reported `diarizer_status: "unreachable"` on 28 of 30
+polls, only going `healthy` two minutes before the job finished. More
+conclusively, from **inside** the container, in a separate OS process:
+
+```
+docker compose exec -T diarization python -c "urllib.request.urlopen('http://127.0.0.1:8001/healthz', timeout=30)"
+```
+
+did not answer within 30 seconds, three attempts running. The client there was
+not the blocked party; the server was.
+
+Why the previous fix could not work: both routes are already plain `def`, so
+both run in Starlette's threadpool, and the semaphore deliberately does not gate
+`/healthz`. None of that helps if the sherpa-onnx binding holds the GIL through
+its native inference, because then no other Python thread in the process is
+scheduled at all, uvicorn's event loop included. Thread-level concurrency cannot
+fix a process-level lock. The remedy is to run the model in a separate process.
+
+Two consequences, both seen live:
+
+1. The Dashboard shows "Diarization: Remote - service not answering" in red for
+   the whole of a healthy long job.
+2. **An interaction between two of this branch's own fixes.** The new enqueue
+   guard refuses a diarize job when the probe grades the endpoint
+   `UNREACHABLE`, so while one diarization runs, queueing another returns
+   `503 the diarization service at http://diarization:8001 is not answering (no
+   answer within 2s) - start it, or fix the endpoint, and press Diarize again`.
+   It tells the operator to start a service that is running and merely busy.
+
+Being fixed now: move the inference to a worker process so the parent keeps
+answering, and reword the guard so it cannot assert a service is down when the
+probe simply could not get a turn.
