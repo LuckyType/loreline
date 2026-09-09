@@ -16,6 +16,11 @@
  *
  * The same recording is played rather than downloaded by the player docked at
  * the foot of the card, which reads that emptiness off the same shared check.
+ *
+ * A generated video is an export too, and the last one anybody thinks to look
+ * for: a session can hold several, so each entry names what made it apart from
+ * the others. They come from the page rather than from a fetch of this card's
+ * own, because the summary card is already polling that same list.
  */
 
 import { ChevronDown } from '@lucide/svelte'
@@ -25,13 +30,14 @@ import { Button } from '$lib/components/ui/button'
 import { CardContent } from '$lib/components/ui/card'
 import { audioIsEmpty, EMPTY_AUDIO_NOTE, fmtDuration, fmtWhen, versionLabel } from '$lib/stores'
 import type { ExportFormat } from '$lib/types'
-import type { Session } from '$lib/wire'
+import type { Session, VideoJob } from '$lib/wire'
 
 let {
 	sessionId,
 	session,
 	audioDurationS,
 	version,
+	videoJobs = [],
 }: {
 	sessionId: string
 	session: Session
@@ -39,6 +45,9 @@ let {
 	/** The transcript version the page is showing: 'original', or a
 	 *  re-transcription's job id. What Export writes. */
 	version: string
+	/** Every video generated from this session, finished or not. The page owns
+	 *  the list; the menu below offers the ones with a file behind them. */
+	videoJobs?: VideoJob[]
 } = $props()
 
 const formats: ExportFormat[] = ['txt', 'md', 'srt', 'vtt', 'json']
@@ -53,11 +62,41 @@ const formatLabels: Record<ExportFormat, string> = {
 const hasAudio = $derived(!!session.audio_path)
 const audioEmpty = $derived(audioIsEmpty(audioDurationS))
 
+// Only a generation with a file behind it. A queued, running or failed job has
+// nothing to hand over, and /api/video/{id}/content answers 409 or 404 for it -
+// an entry that can only fail is worse than no entry.
+const videos = $derived(videoJobs.filter((j) => j.status === 'done' && j.video_path))
+
+/** What one video entry says about itself, so two of them are tellable apart.
+ *
+ * A session can carry several generations and they differ in exactly the three
+ * things the job records: which model made it, how long it runs and how big it
+ * is. The vendor prefix is dropped ('google/veo-3' is 'veo-3' here) because the
+ * part that varies between two entries is never the vendor, and this menu is
+ * narrow. Two runs of the same model at the same settings would still read the
+ * same, which is what the number on the line above is for. */
+function videoDetail(job: VideoJob): string {
+	const parts = [job.model.split('/').pop() || job.model]
+	if (job.duration) parts.push(`${job.duration}s`)
+	if (job.resolution) parts.push(job.resolution)
+	return parts.join(' · ')
+}
+
 let exportOpen = $state(false)
 
 function exportAs(fmt: ExportFormat) {
 	exportOpen = false
 	window.location.href = api.exportUrl(sessionId, fmt, version)
+}
+
+/** Hand over the .mp4. Navigating downloads rather than replacing the page:
+ *  the route serves the file with a filename attached (see get_video_content),
+ *  so the browser treats it as an attachment. The players in the summary's
+ *  video dialog read the same URL, which a media element fetches rather than
+ *  navigates to, so playback is unaffected either way. */
+function exportVideo(jobId: string) {
+	exportOpen = false
+	window.location.href = api.videoContentUrl(jobId)
 }
 
 const durationText = $derived(fmtDuration(session.started_at, session.ended_at))
@@ -113,6 +152,27 @@ const durationText = $derived(fmtDuration(session.started_at, session.ended_at))
 							{audioEmpty ? 'Audio (empty)' : 'Audio (.wav)'}
 						</button>
 					{/if}
+					<!-- Numbered, oldest first, because the number is the only part
+					     guaranteed to differ; the muted line under it says which model
+					     and at what settings, truncated rather than wrapped so one long
+					     model id cannot stretch the menu. Like the audio entry, these
+					     are outside the "Transcript <version>" claim above: a video is
+					     made from the summary, not from a transcript. -->
+					{#each videos as job, i (job.id)}
+						<button
+							class={[
+								'flex w-full flex-col items-start rounded px-3 py-1.5 text-left hover:bg-accent',
+								// The group's own rule, drawn once above the first entry.
+								i === 0 && 'mt-1 border-t pt-2',
+							]}
+							onclick={() => exportVideo(job.id)}
+						>
+							<span>Video {i + 1} (.mp4)</span>
+							<span class="max-w-full truncate text-xs text-muted-foreground">
+								{videoDetail(job)}
+							</span>
+						</button>
+					{/each}
 				</div>
 			{/if}
 		</div>

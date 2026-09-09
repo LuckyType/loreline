@@ -5,8 +5,19 @@
  * Re-processing replays a recording, so it accepts every transcribe-capable
  * provider, including the ones live capture excludes, and it needs a model:
  * the provider row carries none, so there is nothing for the server to fall
- * back to. With no stored audio there is nothing to replay, and the panel says
- * that instead of offering controls that cannot work.
+ * back to.
+ *
+ * A dialog rather than a row at the foot of the version table, because the row
+ * never fitted: a provider dropdown, a model picker, a glossary checkbox and a
+ * button are four controls that wrap into a mess on a phone, and putting them
+ * under a table meant scrolling a scrolling section to reach the one button
+ * anybody came for. The button is in the section's header now and this is what
+ * it opens. With no stored audio there is nothing to replay, so the caller
+ * disables that button with the reason and this never opens at all.
+ *
+ * The component stays mounted while the dialog is shut, which is deliberate:
+ * the provider and model picked last time are still picked on the next open,
+ * and only the seeds below decide what a first open shows.
  */
 
 import { TriangleAlert } from '@lucide/svelte'
@@ -15,18 +26,27 @@ import { ApiError, api } from '$lib/api'
 import { featureBlockedReason, glossaryDropsWarning } from '$lib/capabilities.svelte'
 import { Button } from '$lib/components/ui/button'
 import { Checkbox } from '$lib/components/ui/checkbox'
+import {
+	Dialog,
+	DialogContent,
+	DialogDescription,
+	DialogFooter,
+	DialogHeader,
+	DialogTitle,
+} from '$lib/components/ui/dialog'
+import { Label } from '$lib/components/ui/label'
 import Dropdown from '$lib/Dropdown.svelte'
 import ModelPicker from '$lib/ModelPicker.svelte'
 
 let {
+	open = $bindable(false),
 	sessionId,
-	hasAudio,
 	capturedWith,
 	onqueued,
 	onerror,
 }: {
+	open?: boolean
 	sessionId: string
-	hasAudio: boolean
 	/** The provider the session was captured with, the seed's last resort. */
 	capturedWith?: string | null
 	/** A run has been queued: the caller refetches the job list. Awaited, so
@@ -98,6 +118,9 @@ async function reprocess() {
 			use_glossary: useGlossary,
 		})
 		await onqueued?.()
+		// Only on success: a run that failed to queue leaves the dialog up with
+		// the picks still in it, next to the banner saying why.
+		open = false
 	} catch (err) {
 		onerror?.(err instanceof ApiError ? err.message : 'reprocess failed')
 	} finally {
@@ -106,60 +129,79 @@ async function reprocess() {
 }
 </script>
 
-{#if hasAudio}
-	<div class="flex flex-wrap items-center justify-end gap-2">
-		<span class="text-muted-foreground">New transcription</span>
-		<Dropdown
-			class="max-w-52"
-			bind:value={provider}
-			defaultValue={actionSetup.defaults.stt_provider}
-			options={providers.map((p) => ({ value: p.id, label: p.name }))}
-			placeholder="Provider"
-		/>
-		<ModelPicker
-			provider={selectedProvider}
-			bind:value={model}
-			defaultModel={storedDefault}
-			interaction="transcribe"
-		/>
-		<label
-			class="flex items-center gap-2"
-			title={glossaryBlocked ||
-				glossaryWarning ||
-				"Sends the campaign's terms to the provider as keyterms or a prompt."}
-		>
-			<Checkbox
-				checked={useGlossary}
-				disabled={!!glossaryBlocked}
-				onCheckedChange={(v) => (glossaryPick = v === true)}
-			/>
-			<span class={glossaryBlocked ? 'text-muted-foreground' : ''}>Use glossary</span>
-			{#if glossaryWarning && !glossaryBlocked}
-				<TriangleAlert
-					class="size-3.5 shrink-0 text-amber-500"
-					aria-label="Diarization quality warning"
+<Dialog bind:open>
+	<DialogContent class="sm:max-w-md">
+		<DialogHeader>
+			<DialogTitle>New transcription</DialogTitle>
+			<DialogDescription>
+				Runs this session's recording through a provider again and files the result as another
+				version. It runs in the background - you can close this page.
+			</DialogDescription>
+		</DialogHeader>
+
+		<div class="flex flex-col gap-4">
+			<div class="flex flex-col gap-2">
+				<Label for="reprocess-provider">Provider</Label>
+				<Dropdown
+					id="reprocess-provider"
+					bind:value={provider}
+					defaultValue={actionSetup.defaults.stt_provider}
+					options={providers.map((p) => ({ value: p.id, label: p.name }))}
+					placeholder="Provider"
 				/>
-			{/if}
-		</label>
-		<!-- A model is required: the provider row carries none, so
-		     there is nothing for the server to fall back to. -->
-		<Button
-			variant="outline"
-			onclick={reprocess}
-			disabled={busy || !provider || !model}
-			title={provider && !model ? 'Pick a model to re-process with.' : ''}
-		>
-			{busy ? 'Queuing…' : 'Re-process audio'}
-		</Button>
-	</div>
-	<!-- The icon alone is a tooltip, and the row is too narrow for the
-	     sentence: spelled out here so the trade is readable before the
-	     job is queued, not after the version comes back unlabelled. -->
-	{#if useGlossary && glossaryWarning}
-		<p class="text-right text-xs text-amber-500">{glossaryWarning}</p>
-	{/if}
-{:else}
-	<p class="text-muted-foreground">
-		No stored audio for this session - re-processing and diarization are unavailable.
-	</p>
-{/if}
+			</div>
+
+			<div class="flex flex-col gap-2">
+				<Label for="reprocess-model">Model</Label>
+				<ModelPicker
+					id="reprocess-model"
+					provider={selectedProvider}
+					bind:value={model}
+					defaultModel={storedDefault}
+					interaction="transcribe"
+				/>
+			</div>
+
+			<div class="flex flex-col gap-2">
+				<label
+					class="flex items-center gap-2"
+					title={glossaryBlocked ||
+						glossaryWarning ||
+						"Sends the campaign's terms to the provider as keyterms or a prompt."}
+				>
+					<Checkbox
+						checked={useGlossary}
+						disabled={!!glossaryBlocked}
+						onCheckedChange={(v) => (glossaryPick = v === true)}
+					/>
+					<span class={glossaryBlocked ? 'text-muted-foreground' : ''}>Use glossary</span>
+					{#if glossaryWarning && !glossaryBlocked}
+						<TriangleAlert
+							class="size-3.5 shrink-0 text-amber-500"
+							aria-label="Diarization quality warning"
+						/>
+					{/if}
+				</label>
+				<!-- The icon alone is a tooltip: spelled out here so the trade is
+				     readable before the job is queued, not after the version comes
+				     back unlabelled. -->
+				{#if useGlossary && glossaryWarning}
+					<p class="m-0 text-xs text-amber-500">{glossaryWarning}</p>
+				{/if}
+			</div>
+		</div>
+
+		<DialogFooter>
+			<Button variant="outline" onclick={() => (open = false)}>Cancel</Button>
+			<!-- A model is required: the provider row carries none, so there is
+			     nothing for the server to fall back to. -->
+			<Button
+				onclick={reprocess}
+				disabled={busy || !provider || !model}
+				title={provider && !model ? 'Pick a model to re-process with.' : ''}
+			>
+				{busy ? 'Queuing…' : 'Re-process audio'}
+			</Button>
+		</DialogFooter>
+	</DialogContent>
+</Dialog>

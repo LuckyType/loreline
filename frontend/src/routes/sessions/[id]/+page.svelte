@@ -4,10 +4,16 @@
  * and the recording they all describe, playing at the foot of the card.
  *
  * The page owns only what more than one card reads - the session, its job
- * rows, which version is selected, and where the playhead is - plus the two
- * things that follow the whole page rather than any one card: the poll that
- * runs while a job is in flight, and the socket a running job publishes to.
- * Each card below owns its own controls, its own dialog and its own teardown.
+ * rows, its generated videos, which version is selected, and where the
+ * playhead is - plus the things that follow the whole page rather than any one
+ * card: the polls that run while a job is in flight, and the socket a running
+ * job publishes to. Each card below owns its own controls, its own dialog and
+ * its own teardown.
+ *
+ * The video jobs are here for exactly that reason: the header's export menu
+ * offers the finished ones and the summary card lists and deletes them, and
+ * two cards fetching the same list on their own timers would disagree about
+ * how many there are.
  *
  * The card is sized to the window rather than to its contents, so the player
  * stays reachable without scrolling: header and player are fixed bands, and
@@ -28,10 +34,11 @@ import SessionSummary from '$lib/SessionSummary.svelte'
 import { inFlight, turnKey } from '$lib/stores'
 import TranscriptPanel from '$lib/TranscriptPanel.svelte'
 import TranscriptVersions from '$lib/TranscriptVersions.svelte'
-import type { ReprocessJob, SessionDetail, TranscriptEvent } from '$lib/wire'
+import type { ReprocessJob, SessionDetail, TranscriptEvent, VideoJob } from '$lib/wire'
 
 let detail = $state<SessionDetail | null>(null)
 let jobs = $state<ReprocessJob[]>([])
+let videoJobs = $state<VideoJob[]>([])
 let error = $state('')
 
 const id = $derived(page.params.id ?? '')
@@ -224,6 +231,29 @@ $effect(() => {
 	return () => clearInterval(timer)
 })
 
+async function refreshVideoJobs() {
+	videoJobs = await api.listVideoJobs(id)
+}
+
+const videoRunning = $derived(
+	videoJobs.some((j) => j.status === 'queued' || j.status === 'running'),
+)
+
+/** A generation takes minutes, so this polls only while something is actually
+ *  in flight and stops as soon as the queue drains. Hanging the interval off an
+ *  effect means the same teardown covers all three ways it should stop: the
+ *  queue draining, the flag flipping, and the page unmounting. There is no
+ *  timer left to clear by hand, and none left running behind a dead page.
+ *
+ *  Deliberately independent of whether the video dialog is open: a job that
+ *  finishes while nobody is looking still has to be there, in the export menu
+ *  and on the count, the moment anyone looks again. */
+$effect(() => {
+	if (!videoRunning) return
+	const timer = setInterval(refreshVideoJobs, 5000)
+	return () => clearInterval(timer)
+})
+
 // Nothing here outlives the awaits: it only assigns state, so `async` is safe.
 // Everything that had to be torn down (the socket, the poll) belongs to an
 // effect above, exactly because a teardown returned from an async onMount is
@@ -235,6 +265,7 @@ onMount(async () => {
 	try {
 		detail = await api.getSession(id)
 		await refreshJobs()
+		await refreshVideoJobs()
 	} catch (err) {
 		error = err instanceof ApiError ? err.message : 'failed to load'
 	}
@@ -260,6 +291,7 @@ onMount(async () => {
 				session={detail.session}
 				audioDurationS={detail.audio_duration_s}
 				version={selectedVersion}
+				{videoJobs}
 			/>
 
 			<div class="shrink-0 border-t"></div>
@@ -302,8 +334,10 @@ onMount(async () => {
 				session={detail.session}
 				{speakers}
 				version={selectedVersion}
+				{videoJobs}
 				bind:open={sections.summary}
 				onsummarized={reloadDetail}
+				onvideoschanged={refreshVideoJobs}
 				onerror={setError}
 			/>
 
