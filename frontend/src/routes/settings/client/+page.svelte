@@ -51,9 +51,11 @@ const deviceOptions = $derived([
 ])
 
 // The <pre> lower down would otherwise repeat a single-line opsMessage
-// verbatim (see runUpdate) - only genuinely multi-line output gets its own
-// block.
-const showUpdateOutput = $derived(Boolean(updateResult?.output?.includes('\n')))
+// verbatim (see runUpdate) - only what is left under the headline gets its own
+// block. On a success that is the update script's notes, on a failure its whole
+// transcript; either way, repeating the headline inside it would be noise.
+let updateNotes = $state('')
+const showUpdateOutput = $derived(updateNotes !== '')
 
 async function loadDevices() {
 	try {
@@ -149,11 +151,20 @@ async function runUpdate() {
 		// instead of pointing at the <pre> below, which a one-line output
 		// doesn't render anyway. A failed update comes back as the update
 		// script's own transcript, which is multi-line and does render there.
-		const single = updateResult.output && !updateResult.output.includes('\n')
-		if (single) {
-			opsMessage = updateResult.output
+		// A successful update answers with its verdict on the first line and,
+		// when the update script had something it wanted read, its notes below.
+		// So the headline is that first line rather than a generic "Update
+		// complete.", which would bury the one sentence written by the side
+		// that actually knows what happened. A failure comes back as the
+		// script's own transcript, where no line is a headline, so that keeps
+		// the generic sentence and sends the reader to the block below.
+		const [first = '', ...rest] = (updateResult.output ?? '').split('\n')
+		if (updateResult.ok) {
+			opsMessage = first || 'Update complete.'
+			updateNotes = rest.join('\n').trim()
 		} else {
-			opsMessage = updateResult.ok ? 'Update complete.' : 'Update failed (see output).'
+			opsMessage = first && !rest.length ? first : 'Update failed (see output).'
+			updateNotes = rest.length ? updateResult.output : ''
 		}
 	} catch (err) {
 		opsMessage = err instanceof ApiError ? err.message : 'update failed'
@@ -244,7 +255,7 @@ onDestroy(stopMeter)
 			<p class="mt-2 text-sm text-muted-foreground">{opsMessage}</p>
 		{/if}
 		{#if showUpdateOutput}
-			<pre class="mt-2 max-h-32 overflow-auto font-mono text-xs">{updateResult?.output}</pre>
+			<pre class="mt-2 max-h-32 overflow-auto font-mono text-xs">{updateNotes}</pre>
 		{/if}
 	</CardContent>
 </Card>

@@ -40,6 +40,36 @@ What the labels mean depends on whether the call carries a `session_id`:
   labelled with a number that would name somebody else. Loreline's merge already
   handles words that no segment covers, which is what those words become.
 
+## Where the models run
+
+In a child process, not in the process serving HTTP, and that is what keeps
+`/healthz` answering while a 36-minute recording is being diarized.
+
+sherpa-onnx binds `OfflineSpeakerDiarization.process` through pybind11 without
+`py::call_guard<py::gil_scoped_release>` - unlike the embedding extractor
+beside it, which has one - so that call holds the GIL from beginning to end.
+Nothing else in the interpreter running it is scheduled meanwhile: not another
+request thread, not uvicorn's event loop. Measured against the built container,
+with the models in-process: a `/healthz` request issued from a *separate
+process inside the container* went unanswered for over 30 seconds, three
+attempts in a row, while a 36-minute job ran. The client was never the problem
+and no amount of thread-level concurrency was ever going to fix it.
+
+So `/diarize` sends the uploaded WAV down a pipe to a child that owns both ONNX
+sessions, and the serving process stays free. What crosses is the undecoded WAV
+one way - 69 MB for that 36-minute session, measured at 0.115 s for a round
+trip through the pipe, against minutes of inference - and the segments plus one
+pooled embedding per cluster back. The child is `spawn`ed on first use, keeps
+its models for its whole life, and is replaced by itself if it ever dies, which
+costs the request in flight and a model reload and nothing else.
+
+Two things deliberately did **not** move into it. The session speaker bank
+stays in the process serving HTTP, so a child that dies renumbers nobody (see
+"Session speaker memory"). And readiness is remembered in that same process, so
+a health probe arriving mid-run is answered from memory without a word to the
+busy child - which is the only way to answer at all while the models are, by
+design, unreachable.
+
 ## One at a time
 
 One diarization runs at a time, behind an explicit semaphore (`DiarizeSlot`).
@@ -50,22 +80,22 @@ instead of holding a connection open for minutes.
 
 This is a CPU service with one set of ONNX sessions, so serializing costs
 nothing in throughput: two inferences at once take twice as long each and
-finish no sooner. What it buys is everything else the service answers. It used
-to serialize by accident, with the model on the request thread and no bound at
-all, and a 37-minute session then made it answer nothing whatsoever - including
-the app's 2-second health probe, which reported the diarizer *unreachable* for
-as long as it was busy, while every further press queued more work behind the
-pile. `/healthz` does not take the slot and answers in milliseconds during a
-diarization.
+finish no sooner. Note what the semaphore is and is not for. The version of
+this service that introduced it claimed it was also what kept `/healthz`
+answering during a run. It was not, and could not have been, for the reason in
+the section above; that claim was measured false against the deployed build.
+The semaphore is the bound and the 429, and the child process is the
+responsiveness.
 
-Two limits are worth knowing. A diarization that has started cannot be stopped:
-it is a native call with no cancellation point, so a caller that gives up
-leaves it running to the end, and the slot is about who may *start* one.
-And because of that, the container's uvicorn is given
-`--timeout-graceful-shutdown 5`: without it, `docker stop` waits for the
-in-flight request, exceeds its own grace period, and the container is SIGKILLed
-(exit 137). With it the process exits on its own and the worker thread, which
-is a daemon thread, goes with it.
+A diarization that has started still cannot be stopped: it is a native call
+with no cancellation point in it, so a caller that gives up leaves it running
+to the end, and the slot is about who may *start* one. What a child process
+does change is shutdown. The container's uvicorn is given
+`--timeout-graceful-shutdown 5`, and when that budget is spent the app's own
+shutdown terminates the child outright rather than waiting for what it is
+inside - so `docker stop` finishes inside Docker's ten-second grace period
+instead of ending in a SIGKILL (exit 137). A run interrupted that way is lost,
+which is the right trade: its caller timed out long ago.
 
 ## Session speaker memory
 
@@ -125,12 +155,17 @@ default of twelve is roughly double a large table - it cannot squeeze out a voic
 that is really there, and it still stops a noisy room from growing a speaker list
 nobody can rename. A `max_speakers` sent with a call overrides it for that call.
 
-A restart renumbers. The bank is this process's memory and nothing else (one
-container per box, no store to keep in step), so a service restarted mid-session
-forgets every voice and numbers the next turn from `Speaker 0` again. That is why
-every answer carries `generation`: Loreline logs a warning the first time it
-changes for a session, and the fix is renaming the speakers on the session page,
-since only a human knows which half of the transcript was whom.
+A restart renumbers. The bank is the serving process's memory and nothing else
+(one container per box, no store to keep in step), so a service restarted
+mid-session forgets every voice and numbers the next turn from `Speaker 0`
+again. That is why every answer carries `generation`: Loreline logs a warning
+the first time it changes for a session, and the fix is renaming the speakers
+on the session page, since only a human knows which half of the transcript was
+whom. Note which process that is: the models live in a child (see "Where the
+models run") and the bank does not, so losing the child costs a model reload
+and leaves every session's numbering alone. `generation` names the process the
+bank is actually in, which is the only one whose restart a caller has to hear
+about.
 
 Session memory loads a second copy of the embedding model, once: sherpa-onnx's
 diarization API returns clustered segments and never the embeddings behind them,
@@ -168,9 +203,10 @@ docker run --rm -p 8001:8001 \
 
 If the models are not configured, or fail to load, both `/healthz` and `/diarize`
 return HTTP 503: the first successful call loads them and the result is cached
-for the life of the process, so a misconfigured deployment shows unhealthy
-before a diarize job ever runs, not only once one fails. A *failed* load is
-cached too, for a minute, so a broken deployment does not run a doomed ONNX
-init for every request it is sent, while a volume that mounts late is still
-picked up without a restart. Use `mocks/diarization.py` for offline
-development/tests.
+for the life of the child process holding them, so a misconfigured deployment
+shows unhealthy before a diarize job ever runs, not only once one fails. The
+serving process remembers the verdict as well, which is what lets `/healthz`
+answer while the child is busy. A *failed* load is cached too, for a minute, in
+both places, so a broken deployment does not run a doomed ONNX init for every
+request it is sent, while a volume that mounts late is still picked up without a
+restart. Use `mocks/diarization.py` for offline development/tests.

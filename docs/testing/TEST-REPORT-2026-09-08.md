@@ -52,7 +52,7 @@ document, and the frontend lint, type check and build.
 | F-23 | The log viewer hides health probes by default, says how many it hid, and offers 200 / 1000 / 5000 lines. |
 | F-24 | An ntfy server and a webhook URL must be an absolute http(s) URL, validated field-wise on the server (so the 422 body cannot echo the token) and mirrored in the form. |
 | F-25 | `AlertTestResult` gained `detail`, populated with the transport error or the vendor's sentence, scrubbed of the channel's token before it is logged or returned. This also closed a pre-existing token leak into the logs. |
-| F-26 | The diarization service takes an explicit one-at-a-time semaphore that `/healthz` never waits on, queues a second caller for 30s then answers 429, drops a `.tolist()` that built ~35 million Python floats per long session, and shuts down within its grace period. The app also refuses to queue a diarize job against a diarizer it knows is unreachable. |
+| F-26 | The diarization service runs its models in a child process, which is what keeps `/healthz` answering while a session is diarized; it also takes an explicit one-at-a-time semaphore, queues a second caller for 30s then answers 429, drops a `.tolist()` that built ~35 million Python floats per long session, and terminates that child on shutdown so `docker stop` finishes inside its grace period. The app refuses to queue a diarize job against a diarizer that did not answer, in a message that no longer claims to know why it did not. Recorded because it was measured wrong first time: the semaphore alone, on the reasoning that `/healthz` never waits on it. sherpa-onnx binds `process` without releasing the GIL, so during an inference no thread of that process is scheduled at all and the probe was never merely queued - a re-test found a 30s health probe unanswered three times running, from inside the container. The enqueue guard then compounded it by refusing presses against a healthy service that was only busy, telling the operator to start it. See F-32 for how this was found, and note the child-process fix is on the branch but not yet re-tested on the box. |
 | F-27 | `merged_from` on the wire drives a "merged" badge, and History gained a Duration column. |
 | F-28 | Both redirect paths carry a sanitised `next`, rejecting anything that is not a single-slash same-origin path. |
 | F-29 | `txt` and `md` drop the speaker entirely when nothing in the transcript has one, and keep "Unknown" in the mixed case. |
@@ -1066,3 +1066,179 @@ box, except where a finding explicitly says it was read from source.
    again.
 5. Failed diarize jobs remain on `95f12eed…` and `8da95aa0…` as job rows; they
    changed no transcript.
+
+---
+
+# Re-test against the deployed build, 2026-09-09
+
+`main` at `566db62` was built by CI and deployed to the box with the web UI's
+own Update button. Everything below was re-checked against that running
+deployment, not against the branch.
+
+## Verified fixed in production
+
+| # | Evidence |
+| --- | --- |
+| F-01 | Focusing the health dot and pressing it flips `aria-expanded` false to true and the panel computes to `display: block; visibility: visible`. Escape closes it. Was `display: none` on focus. |
+| F-02 | At 320x720 the Start button is full width, spans x=40 to x=280 inside a 320px viewport, and the whole page has zero unreachable overflow. Was x=292 to x=401 with 28px visible. |
+| F-03 | `gpt-transcribe` On, switch to `gpt-4o-transcribe-diarize` Unsupported, switch to `whisper-1` **On**. A deliberate untick still survives a model switch (Off stays Off), so the distinction holds. |
+| F-04 | Five wrong passwords from this machine: that client then gets 429 on the correct password, while the browser on another machine gets **200**. Both got 429 before. |
+| F-05 | `/api/system/livez` returns `{"status":"ok"}` with no cookie; `/api/system/healthz` returns 401. |
+| F-06 | With a stored device that no longer exists, the Dashboard summary shows "Microphone: Not found - pick another in Settings" as a link to `/settings/client` with a red dot, before Start is pressed. Start stays enabled by design. |
+| F-07 | A recorded session's live Logs pane ends with 4 lines including `audio.capture.stop` and `session.stop`. It stopped at 2 before. |
+| F-08 | `device=Jabra SPEAK 410 USB: Audio (hw:0,0)` renders as one value, with `rate` and `device_rate` still parsed. |
+| F-09 | 156 segments export as 656 cues: **0 overlapping**, 1 cue over 10s (12.8s), no non-positive durations. Was 28 overlapping and 84 over 10s, longest 30.1s. |
+| F-10 | A fresh merge has `ended_at` set, 6.42s, matching its 6.42s of merged audio. |
+| F-11 | With version `2680abb4` selected, export returns that version (1346 prefixed lines); the default returns `original` (683); an unknown version returns `404 unknown transcript version 'nope'`. The Export menu header reads "Transcript 2680abb4". |
+| F-12 | A whitespace-only prompt re-seeds on reopen. See F-31 below for what this uncovered. |
+| F-13 | The summary renders as `h5`/`h6` headings, 40 `<li>` items and `<strong>` runs, with zero literal `##` or `**` left. The renderer contains no `{@html}` and no `innerHTML`. |
+| F-14 | The dialog shows "6672 characters" and warns "That is a whole recap. Video models take a scene, not a chapter". |
+| F-15 | A re-processing run now writes `reprocess.enqueue`, `reprocess.start` (operation, version, provider) and `reprocess.finished` (segments_added, elapsed_s). It wrote only the enqueue line before. |
+| F-16 | After Escape on the version-logs dialog, focus is the "Show logs" button of the row that opened it. It was the section header before. |
+| F-17 | With the switch on and saved, the OpenAI summarize catalogue drops from 131 to 102 with zero tts / embedding / image / moderation / sora entries; transcription still narrows 131 to 9; with the switch off, 131 and `tts-1` is back. |
+| F-18 | The video picker's Favorites group holds only `minimax/hailuo-3-max`. The four STT favourites are gone, and the seeding path was closed too. |
+| F-19 | A provider saved with a three-space key comes back `secret_hint: null, secret_set: false`, and `POST /providers/{id}/secret` with a blank value returns 422. |
+| F-20 | Load models against a dead base URL now reads "Could not read this provider's model list: could not check: ConnectError: All connection attempts failed Check the base URL and that the service is running." It showed nothing before. |
+| F-22 | The banner reads "Last failed job (diarize, 9/6/2026, 1:14:59 AM): ..." and the failing versions' own Diarization cells read "failed". |
+| F-23 | The diarization log card reads "1 of 201 lines shown, 200 health probes hidden"; at 5000 lines, "17 of 1108 shown, 1091 hidden" and the startup history is finally readable. |
+| F-24 | A webhook with `not-a-url` is refused `422` with `loc: ["body","url"]` and "webhook url must be an absolute http:// or https:// URL". A valid one saves 201. |
+| F-25 | A test against a closed port returns `{"ok":false,"detail":"could not connect: All connection attempts failed"}`. |
+| F-27 | The merged row carries a "merged" badge titled "Assembled from 2 sessions, which are still here in their own right." and a 0:06 duration that separates it from its 0:02 source at the same timestamp. |
+| F-28 | Logged out, `/settings/glossary` redirects to `/login?next=%2Fsettings%2Fglossary` and signing in lands on the glossary. `?next=//example.com/pwned` falls back to `/` on the same origin. |
+| F-29 | An undiarized session exports as `[00:01] Hier, sag mal irgendwas.` with no "Unknown:" prefix. |
+
+Both new columns landed cleanly: every session row carries `merged_from` and
+`summary_version` (migrations v19 and v20), and a summary stored before the
+change reads "version not recorded" rather than claiming `original`.
+
+## New findings from the re-test
+
+### F-30 (medium) The update button cannot deploy a change to the bundled diarization service
+
+This is why F-21 and F-26 did not take effect on the first deploy, and it is a
+gap in the deploy story rather than in the fix.
+
+The button hands the job to the updater service, which runs
+`deploy/update-fast.sh`: `git pull --ff-only`, `docker compose pull app`,
+`docker compose up -d --no-build app`. Only the `app` service. The bundled
+diarization service is not pulled from a registry at all, it is **built locally**
+from `services/diarization/`, so a release that changes it is fetched by the
+`git pull` and then never built.
+
+Measured on the box after a successful button deploy: the checkout was at
+`566db62`, my merge, while the diarization container still reported
+`created=2026-09-08T12:08:09Z` and `grep -c BoundedSemaphore /app/app.py` was
+`0`. The new code was on disk and not running. During a diarization the old
+container still went unreachable exactly as F-26 described, four polls in a row,
+while `livez` stayed 200.
+
+`docker compose --profile diarization up -d --build diarization` fixed it, and
+`grep -c BoundedSemaphore` then returned 1.
+
+The README frames the narrow scope as a feature ("Only the `app` service is
+touched, so Caddy, the docker proxy and any enabled profile services keep
+running"), and as isolation it is right. The problem is that nothing tells you
+the other half of the release was skipped. `deploy/update.sh`, the from-source
+path, does rebuild the diarization image when its profile is in `.env`, so the
+two update paths differ in what they actually deploy and only the narrower one
+is wired to the button.
+
+Suggest, in rough order of value: have the updater compare the pulled revision's
+`services/` tree against what is running and say plainly when a profile service
+needs rebuilding; or rebuild changed profile services as part of the button's
+run; or, at minimum, document in the README's "Updating" section that
+`services/diarization/` changes need the manual rebuild, next to the existing
+note that the updater does not update itself.
+
+### F-31 (low) Clearing the video prompt refilled it from under the cursor
+
+Found while verifying F-12 on the deployed build. `GenerateVideoDialog` seeded
+with `$effect(() => { if (open && !prompt.trim()) prompt = summary })`. The
+effect reads `prompt`, so clearing the box re-ran the very effect that seeds it:
+select all, delete, and the whole 6672-character recap was back before the first
+keystroke. Its own comment claimed it re-seeded "each time the dialog opens, but
+never while it is open", which the code did not do.
+
+The empty-string case behaved this way before the F-12 fix too; F-12 made the
+whitespace case match it rather than staying stuck, so the visible symptom moved
+rather than appeared. Fixed properly on the branch: seed on the transition into
+open, read the prompt untracked, and leave "Reset to summary" as the deliberate
+way back. Not yet deployed.
+
+### F-21 verified: a real 36-minute session diarized successfully
+
+The decisive test, run through the UI against the deployed build with the
+diarization container rebuilt from the new code. Session `e323e5bc…`, 36:08 of
+audio, 150 segments, diarizer `sherpa-onnx` at `http://diarization:8001`.
+
+Polled once a minute for the whole run:
+
+```
+06:49:51 job=running  ... 07:18:02 job=running   07:19:02 job=done 150
+```
+
+About 30 minutes, finishing `done` with **150 segments relabeled**. Under the
+old fixed 120-second timeout this is the exact job that failed at the two minute
+mark with an empty error message, which is what the original audit saw. The
+scaled timeout (60s + 4x audio seconds, so about 2.5 hours for this recording)
+is doing its job.
+
+The transcript now carries speaker labels where it had none:
+
+```
+  1.4  Speaker 1  'Kann das ist die Frage. Wir haben zwei Möglichkeiten. E'
+ 16.4  Speaker 3  'weil er mittags Schlaf gemacht hat. In der Kita heute s'
+ 33.2  Speaker 5  'Richtig vergessen. Ich habe kein Problem, aber'
+ 50.0  Speaker 7  'Hast du jetzt aufgehört zu rauchen eigentlich?'
+```
+
+**One quality observation, not a defect and not something this work changed.**
+The run produced **11 distinct labels** over 150 segments, and the distribution
+is lopsided: `Speaker 1` 46 and `Speaker 7` 40 carry 86 of the 150, with a tail
+of labels holding 1 to 3 segments each. That is the shape of over-clustering,
+one person split across several labels, which is the opposite failure to the one
+ADR 0007 fixed (everyone collapsing onto `Speaker 0`). I ran it with no min or
+max speaker hint, so the service chose the cluster count itself, and I do not
+know how many people are actually on that recording. Worth a look with
+`min_speakers` and `max_speakers` set, which is what those fields on the diarize
+row are for, before concluding anything about the clustering itself.
+
+### F-32 (medium) The diarizer still stops answering while it works, and that now blocks queueing
+
+Correcting my own earlier claim: F-26 was marked fixed on the branch, and the
+production re-test shows it is not.
+
+The container was rebuilt from the new code, verified with
+`grep -c BoundedSemaphore /app/app.py` returning 1. During the 36-minute run
+above, the app's probe reported `diarizer_status: "unreachable"` on 28 of 30
+polls, only going `healthy` two minutes before the job finished. More
+conclusively, from **inside** the container, in a separate OS process:
+
+```
+docker compose exec -T diarization python -c "urllib.request.urlopen('http://127.0.0.1:8001/healthz', timeout=30)"
+```
+
+did not answer within 30 seconds, three attempts running. The client there was
+not the blocked party; the server was.
+
+Why the previous fix could not work: both routes are already plain `def`, so
+both run in Starlette's threadpool, and the semaphore deliberately does not gate
+`/healthz`. None of that helps if the sherpa-onnx binding holds the GIL through
+its native inference, because then no other Python thread in the process is
+scheduled at all, uvicorn's event loop included. Thread-level concurrency cannot
+fix a process-level lock. The remedy is to run the model in a separate process.
+
+Two consequences, both seen live:
+
+1. The Dashboard shows "Diarization: Remote - service not answering" in red for
+   the whole of a healthy long job.
+2. **An interaction between two of this branch's own fixes.** The new enqueue
+   guard refuses a diarize job when the probe grades the endpoint
+   `UNREACHABLE`, so while one diarization runs, queueing another returns
+   `503 the diarization service at http://diarization:8001 is not answering (no
+   answer within 2s) - start it, or fix the endpoint, and press Diarize again`.
+   It tells the operator to start a service that is running and merely busy.
+
+Being fixed now: move the inference to a worker process so the parent keeps
+answering, and reword the guard so it cannot assert a service is down when the
+probe simply could not get a turn.

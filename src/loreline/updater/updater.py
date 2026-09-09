@@ -101,6 +101,39 @@ _FAILED_MESSAGE = (
 )
 
 
+def _with_notes(verdict: str, output: str) -> str:
+    """The verdict, plus any `note:` the update script wrote, or just the verdict.
+
+    A successful run used to be reported purely as one of the two sentences
+    above, and the script's own transcript was dropped on the floor. That is
+    almost always right, since the transcript is compose's progress chatter,
+    but not quite: `deploy/update-fast.sh` ends by saying which parts of a
+    release it could *not* deploy, and the diarization service is one of them.
+    It is built from the checkout rather than pulled, so the fast path never
+    touches it, and an operator reading "Already up to date" had no way to
+    learn that half a release had been skipped.
+
+    So the verdict stays the headline and only lines the script deliberately
+    marked as a note are carried with it. Everything else the script prints is
+    still dropped: a report nobody reads is what let this hide in the first
+    place, and pasting a whole transcript under every success would recreate
+    that in a different shape.
+    """
+    notes: list[str] = []
+    for line in output.splitlines():
+        if line.startswith("note:"):
+            notes.append(line)
+        elif notes and line.startswith((" ", "\t")) and line.strip():
+            # Continuation of the note above, which the script indents.
+            notes.append(line)
+        elif notes and not line.strip():
+            # A blank line ends one note; a later `note:` starts another.
+            continue
+    if not notes:
+        return verdict
+    return f"{verdict}\n\n" + "\n".join(notes)
+
+
 class _UpdaterReply(BaseModel):
     """What the updater service answers with; see services/updater/updater.py.
 
@@ -246,9 +279,8 @@ class Updater:
                 output=reply.output[-_MAX_OUTPUT:] or _FAILED_MESSAGE,
             )
         log.info("update.updater.done", changed=reply.changed)
-        return await self._message_result(
-            _APPLYING_MESSAGE if reply.changed else _UP_TO_DATE_MESSAGE, ok=True
-        )
+        verdict = _APPLYING_MESSAGE if reply.changed else _UP_TO_DATE_MESSAGE
+        return await self._message_result(_with_notes(verdict, reply.output), ok=True)
 
     @staticmethod
     def _unexpected(status: int) -> str:
