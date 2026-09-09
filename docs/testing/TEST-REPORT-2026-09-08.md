@@ -1242,3 +1242,79 @@ Two consequences, both seen live:
 Being fixed now: move the inference to a worker process so the parent keeps
 answering, and reword the guard so it cannot assert a service is down when the
 probe simply could not get a turn.
+
+---
+
+# Second deploy and re-test, 2026-09-09
+
+`main` at `8dec650`, built by CI and deployed with the Update button, then the
+diarization container rebuilt by hand (which is F-30 all over again, see below).
+
+### F-32 fixed and verified in production
+
+The diarization service now runs its models in a child process. With a real
+diarization in flight on a 37-minute session, the app's own probe reports:
+
+```
+07:56:21 diarizer=healthy job=running   (six consecutive polls)
+```
+
+Before the change the same probe said `unreachable` on 28 of 30 polls through a
+36-minute run, and a 30-second health request from inside the container went
+unanswered three times running.
+
+The agent that fixed it confirmed the diagnosis at source: sherpa-onnx binds
+`OfflineSpeakerDiarization.process` through pybind11 **without**
+`py::call_guard<py::gil_scoped_release>()`, while the embedding extractor beside
+it has one on every method, so the GIL is held from first frame to last and no
+thread in that process is scheduled. It also rejected the
+`ProcessPoolExecutor(max_workers=1)` I suggested, with a measurement: that pool's
+`atexit` hook joins the worker after a sentinel the worker only reads once its
+current task ends, so a parent calling `shutdown(wait=False,
+cancel_futures=True)` against a 30s task still takes 30s to exit. With a
+diarization in flight that is a `docker stop` ending in SIGKILL every time,
+which is exactly the regression `--timeout-graceful-shutdown 5` was added to
+stop. A `daemon=True` child over a pipe exits in about a second.
+
+The session-scoped speaker bank deliberately did not move: the child returns
+spans plus one pooled voice per cluster, and the bank, its TTL, its cap and the
+matching all stay in the serving process.
+
+The enqueue guard's message was reworded and is live:
+
+```
+the diarization service at http://10.10.50.55:9911 did not answer its health
+check (could not connect: All connection attempts failed). It may be stopped, at
+a different address, or unreachable from here; a service that is only busy still
+answers. Check it and press Diarize again.
+```
+
+It no longer tells an operator to start a service that is running.
+
+### F-30, second half: the note was in a stage nobody was listening to
+
+My first fix for F-30 made the app carry the update script's notes into the
+button's answer instead of discarding them. Deployed, and the note still did not
+appear. The reason is worth recording because it is the same mistake twice.
+
+`deploy/update-fast.sh` runs in two stages, and the updater service invokes them
+separately: the pull half answers the caller, and only then does the apply half
+recreate the app. The script's diarization note was printed at the end of the
+**apply** stage, whose output reaches nobody by construction, because the app has
+already replied and is about to be replaced.
+
+The script's author had already worked this out for the neighbouring note about
+`docker-compose.yml`, and says so in a comment: "Printed here, by the half that
+knows both commits, rather than after the recreate where it used to sit: split
+into stages, the apply half is a separate run of this script and never sees the
+pull's before and after." One note got moved; the other did not.
+
+Fixed by moving it into the pull stage and making it earn its place: it now fires
+only when the pull actually changed `services/diarization` or `services/updater`,
+and only when that container exists, naming the rebuild command. A release that
+touches neither stays quiet.
+
+So F-30 needed three changes, in three different places, to become one visible
+sentence: the script had to print the note where the caller is still listening,
+the app had to stop throwing the output away, and the page had to render it under
+the verdict rather than only for multi-line output.

@@ -185,11 +185,15 @@ async def test_update_in_container_reports_up_to_date_without_a_restart() -> Non
 async def test_update_in_container_carries_the_scripts_notes() -> None:
     """A success keeps its verdict as the headline and brings the notes with it.
 
-    deploy/update-fast.sh ends by naming the parts of a release it could not
-    deploy, and the diarization service is one: it is built from the checkout
-    rather than pulled, so the fast path never touches it. That note used to be
-    dropped, and an operator reading "Already up to date" had no way to learn
-    that half a release had been skipped. This is the regression guard for it.
+    deploy/update-fast.sh names the parts of a release it could not deploy, and
+    the diarization service is one: it is built from the checkout rather than
+    pulled, so this path never touches it. The note used to be dropped twice
+    over. The script printed it after the recreate, in a stage whose output
+    nobody is left listening for, and this app then threw away the output it did
+    get in favour of a canned sentence. An operator reading "Already up to date"
+    had no way to learn that half a release had been skipped. This is the
+    regression guard for the second half; the script's own stage placement is
+    the first.
     """
     seen: list[httpx.Request] = []
     output = (

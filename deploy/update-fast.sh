@@ -200,6 +200,35 @@ if ! git diff --quiet "${PREV_COMMIT}" "${NEW_COMMIT}" -- docker-compose.yml Cad
   echo "      touched another service."
 fi
 
+# The same argument again, for the services this repo builds rather than pulls.
+# `docker compose pull app` fetches one image from a registry; the diarization
+# service and the updater are built from this checkout and published nowhere, so
+# a release that changes them arrives with the git pull above and then simply
+# sits there. That was found the hard way: a deploy of a diarization fix left
+# the container running month-old code while the checkout beside it was current,
+# and nothing said so.
+#
+# Printed here rather than after the recreate, for the reason the note above
+# gives: the apply half is a separate run of this script, it never sees the
+# pull's before and after, and its output reaches nobody because the caller has
+# already been answered by then. Conditional on the diff, so a box whose
+# diarizer is untouched by a release stays quiet, and on the service actually
+# existing, so nobody is told to rebuild something they do not run. `docker ps`
+# and not `compose ps`, which filters by active profile.
+for svc in diarization updater; do
+  if git diff --quiet "${PREV_COMMIT}" "${NEW_COMMIT}" -- "services/${svc}"; then
+    continue
+  fi
+  present="$(run_docker ps -a --filter "label=com.docker.compose.service=${svc}" \
+    --format '{{.Names}}' 2>/dev/null || true)"
+  if [[ -n ${present} ]]; then
+    echo
+    echo "note: this pull changed services/${svc}, which is built from this checkout"
+    echo "      rather than pulled, so this path does not update it. To rebuild it:"
+    echo "        docker compose --profile ${svc} up -d --build ${svc}"
+  fi
+done
+
 if [[ ${STAGE} == pull ]]; then
   echo "Pull complete. Nothing has been applied yet."
   exit 0
@@ -254,13 +283,10 @@ run_docker compose images app || true
 # assume "Update complete" covered it. `docker ps` and not `compose ps`, which
 # filters by active profile; captured and matched rather than piped into
 # `grep -q`, which would SIGPIPE the producer under `set -o pipefail`.
-DIAR_RUNNING="$(run_docker ps --filter label=com.docker.compose.service=diarization --format '{{.Names}}' 2>/dev/null || true)"
-if [[ -n ${DIAR_RUNNING} ]]; then
-  echo
-  echo "note: the diarization service is built from this checkout rather than pulled,"
-  echo "      so this fast path never updates it. To rebuild that service:"
-  echo "        docker compose --profile diarization up -d --build diarization"
-fi
+# Nothing here about the services built from this checkout: that note moved into
+# the pull stage above, where it is conditional on the release actually having
+# changed one and where the caller is still listening. Printed here it reached
+# no one, because the app has already been answered and is about to be replaced.
 
 echo "Update complete."
 }
