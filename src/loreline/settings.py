@@ -47,6 +47,33 @@ class Settings(BaseSettings):
         description="Repo/app dir used for git self-update and rollback.",
     )
     systemd_unit: str = Field(default="loreline", description="systemd unit name for autostart.")
+    # --- Ops / self-update: the revision baked in at image build time ---
+    # A Docker deployment cannot ask git what it is running: the image copies
+    # the source in without a .git directory (see .dockerignore), so
+    # `git rev-parse` inside the container fails and the UI had nothing to show
+    # but a dash. The Dockerfile takes these two as build args and puts them in
+    # the environment; .github/workflows/docker-publish.yml, deploy/install.sh
+    # and deploy/update.sh fill them from the git that does work, on the side
+    # that builds. Blank means "unknown", which is what a plain `docker build`
+    # with no --build-arg gets, and the UI shows a dash for it rather than
+    # inventing something. Outside a container both are ignored unless git
+    # fails, because a real checkout is the live truth there - see
+    # loreline.updater.Updater.current_revision.
+    build_commit: str = Field(
+        default="",
+        description=(
+            "Full commit SHA this build was made from, baked in at image build time. "
+            "Only consulted where git cannot answer."
+        ),
+    )
+    build_described: str = Field(
+        default="",
+        description=(
+            "`git describe --tags --always` for this build: the last reachable tag "
+            "plus distance and short SHA, or a bare short SHA when no tag is "
+            "reachable. The human-readable half of the revision the UI shows."
+        ),
+    )
     docker_api: str = Field(
         default="",
         description=(

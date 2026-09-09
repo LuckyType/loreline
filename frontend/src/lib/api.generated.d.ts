@@ -99,7 +99,13 @@ export interface paths {
         };
         /**
          * Revision
-         * @description Return the currently deployed git commit.
+         * @description Return the deployed commit, and `git describe`'s name for it.
+         *
+         *     Both, rather than one: the SHA is what /rollback takes and what the update
+         *     result reports, while the described string is the only one of the two worth
+         *     reading off a screen. Either can be null where this deployment cannot know
+         *     it - a Docker image built without the revision baked in - and the UI is
+         *     written to show a dash for that instead of a wrong answer.
          */
         get: operations["revision_api_system_revision_get"];
         put?: never;
@@ -1969,11 +1975,13 @@ export interface components {
         };
         /**
          * RevisionResponse
-         * @description Current deployed git revision.
+         * @description Current deployed revision: the commit, and the name git gives it.
          */
         RevisionResponse: {
             /** Commit */
             commit?: string | null;
+            /** Described */
+            described?: string | null;
         };
         /**
          * RollbackRequest

@@ -25,7 +25,18 @@
 
 services:
   app:
-    build: .
+    build:
+      context: .
+      # What revision the built image reports in Settings > Client. git cannot
+      # be asked from inside the container (the image has no .git - see the
+      # Dockerfile), so the side that builds has to say. deploy/install.sh and
+      # deploy/update.sh read both from this checkout's git and hand them to
+      # Compose when they run `up -d --build`; the `:-` defaults keep a bare
+      # `docker compose up -d --build` in a clone working, and an image built
+      # that way simply reports an unknown revision rather than a wrong one.
+      args:
+        LORELINE_BUILD_COMMIT: ${LORELINE_BUILD_COMMIT:-}
+        LORELINE_BUILD_DESCRIBED: ${LORELINE_BUILD_DESCRIBED:-}
     # Published by .github/workflows/docker-publish.yml on every push to main,
     # for linux/amd64 and linux/arm64. Both `build:` and `image:` on one
     # service on purpose, and the order of precedence is unchanged: `up -d

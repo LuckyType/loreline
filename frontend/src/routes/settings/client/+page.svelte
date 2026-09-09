@@ -8,7 +8,7 @@ import { Separator } from '$lib/components/ui/separator'
 import { Switch } from '$lib/components/ui/switch'
 import Dropdown from '$lib/Dropdown.svelte'
 import LevelMeter from '$lib/LevelMeter.svelte'
-import type { InputDevice, UpdateResult } from '$lib/wire'
+import type { InputDevice, RevisionResponse, UpdateResult } from '$lib/wire'
 
 let devices = $state<InputDevice[]>([])
 let deviceSel = $state('')
@@ -18,7 +18,7 @@ let peak = $state(0)
 let meterError = $state('')
 let levelWs: WebSocket | null = null
 
-let revision = $state<string | null>(null)
+let revision = $state<RevisionResponse | null>(null)
 let updating = $state(false)
 let updateResult = $state<UpdateResult | null>(null)
 let autostart = $state<boolean | null>(null)
@@ -35,6 +35,14 @@ let opsMessage = $state('')
 // of leaving the user to find out only when the Test button fails with a raw
 // PortAudio error.
 const deviceMissing = $derived(deviceSel !== '' && !devices.some((d) => d.name === deviceSel))
+// What the Revision row shows, in descending order of how much it tells a
+// person: git's own name for this build (`v0.2.0-93-ge57029c`, or a bare short
+// SHA where no tag is reachable), else ten characters of the commit, else a
+// dash for a deployment that genuinely cannot know - a Docker image built
+// without the revision baked in. The middle case is not hypothetical; see
+// runUpdate for the one path that leaves only a SHA behind.
+const revisionLabel = $derived(revision?.described || revision?.commit?.slice(0, 10) || '-')
+
 const deviceOptions = $derived([
 	{ value: '', label: 'System default' },
 	...devices.map((d) => ({ value: d.name, label: d.name })),
@@ -125,7 +133,7 @@ function stopMeter() {
 
 async function loadOps() {
 	try {
-		revision = (await api.revision()).commit
+		revision = await api.revision()
 	} catch {
 		revision = null
 	}
@@ -141,7 +149,14 @@ async function runUpdate() {
 	updating = true
 	try {
 		updateResult = await api.update()
-		revision = updateResult.new_commit
+		// An update result carries the SHA and nothing else, so adopting it
+		// wholesale would trade git's readable name for ten characters of hex.
+		// Only do that when the commit actually moved - which in a Docker
+		// deployment it does not, the value there being baked into an image
+		// this update has not replaced yet.
+		if (updateResult.new_commit !== revision?.commit) {
+			revision = { commit: updateResult.new_commit, described: null }
+		}
 		// A single-line output is one clear sentence about the outcome, written
 		// by the side that actually knows it: "not available in a Docker
 		// deployment", or - once that deployment can hand the job to the
@@ -232,10 +247,16 @@ onDestroy(stopMeter)
 		{/if}
 		<p class="text-xs text-muted-foreground">Used for every session started from the Dashboard.</p>
 		<Separator class="my-3" />
-		<div class="flex items-center justify-between">
-			<span class="text-muted-foreground">Revision</span>
-			<div class="flex items-center gap-2">
-				<code>{revision ? revision.slice(0, 10) : '-'}</code>
+		<div class="flex items-center justify-between gap-2">
+			<span class="shrink-0 text-muted-foreground">Revision</span>
+			<div class="flex min-w-0 items-center gap-2">
+				<!-- The described string runs to 40-odd characters and this row also
+				     holds a button, so: one line, smaller type, and an ellipsis
+				     rather than a wrap or a squeezed button. It fits whole at any
+				     normal width; on a phone the tail is what gets cut, and the
+				     title carries the full SHA, which names the build exactly
+				     whatever is visible. -->
+				<code class="min-w-0 truncate text-xs" title={revision?.commit}>{revisionLabel}</code>
 				<Button variant="outline" size="sm" onclick={runUpdate} disabled={updating}>
 					{updating ? 'Updating…' : 'Update now'}
 				</Button>

@@ -47,7 +47,22 @@ if sudo docker compose pull --help 2>/dev/null | grep -q -- '--ignore-buildable'
 else
   sudo docker compose pull --ignore-pull-failures
 fi
-sudo docker compose up -d --build --remove-orphans
+# The revision the rebuilt image reports in Settings > Client, read after the
+# pull above so it is the release being deployed rather than the one being
+# replaced. git cannot be asked from inside the container (the image has no
+# .git - see the Dockerfile), so it is baked in here.
+#
+# `--always` guarantees an answer: on a box installed by deploy/install.sh the
+# checkout is shallow, no tag is reachable, and describe degrades to the short
+# SHA rather than failing. `|| true` covers the rest - an empty value is read
+# as an unknown revision and shown as a dash, which beats aborting an update
+# over a cosmetic string.
+#
+# Passed through `env` because sudo does not carry an exported variable across.
+BUILD_COMMIT="$(git rev-parse HEAD 2>/dev/null || true)"
+BUILD_DESCRIBED="$(git describe --tags --always 2>/dev/null || true)"
+sudo env "LORELINE_BUILD_COMMIT=${BUILD_COMMIT}" "LORELINE_BUILD_DESCRIBED=${BUILD_DESCRIBED}" \
+  docker compose up -d --build --remove-orphans
 
 NEW_COMMIT="$(git rev-parse HEAD)"
 echo "new_commit=${NEW_COMMIT}"

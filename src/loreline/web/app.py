@@ -126,6 +126,8 @@ def _build_state(
         runner=command_runner,
         updater_url=settings.updater_url,
         updater_token=settings.updater_token,
+        build_commit=settings.build_commit,
+        build_described=settings.build_described,
     )
     autostart = Autostart(unit=settings.systemd_unit, runner=command_runner)
     transcript_bus: EventBus[TranscriptEvent] = EventBus()

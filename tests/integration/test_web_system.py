@@ -15,12 +15,21 @@ import pytest_asyncio
 from asgi_lifespan import LifespanManager
 from httpx import ASGITransport, AsyncClient
 
+import loreline.updater.updater as updater_module
 import loreline.web.routes.system as system_route
 from loreline.health import HealthReport, HealthStatus
 from loreline.llm import DEFAULT_SYSTEM_PROMPT
 from loreline.settings import Settings
 from loreline.updater.process import CommandResult
 from loreline.web.app import create_app
+
+# The two halves of the revision the UI shows, as git would answer them: the
+# SHA from rev-parse, the readable name from describe. A table rather than two
+# more branches below, which keeps the runner's one method readable.
+_GIT_OUTPUT = {
+    ("git", "rev-parse"): "commit-sha\n",
+    ("git", "describe"): "v0.1.0-4-gcommit\n",
+}
 
 
 class FakeRunner:
@@ -32,8 +41,9 @@ class FakeRunner:
 
     async def __call__(self, argv: list[str], *, cwd: str | None = None) -> CommandResult:
         self.calls.append(argv)
-        if argv[:2] == ["git", "rev-parse"]:
-            return CommandResult(0, "commit-sha\n", "")
+        git_output = _GIT_OUTPUT.get((argv[0], argv[1] if len(argv) > 1 else ""))
+        if git_output is not None:
+            return CommandResult(0, git_output, "")
         if argv[0] == "bash":
             return CommandResult(0, "Update complete.", "")
         if argv[:2] == ["systemctl", "is-enabled"]:
@@ -187,8 +197,35 @@ async def test_diarizer_probe_is_uncached_unlike_the_stored_defaults_probe(
 
 
 async def test_revision(client: AsyncClient) -> None:
+    """Both halves: the SHA /rollback takes back, and the name a person reads."""
     body = (await client.get("/api/system/revision")).json()
     assert body["commit"] == "commit-sha"
+    assert body["described"] == "v0.1.0-4-gcommit"
+
+
+async def test_revision_in_a_container_with_nothing_baked(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A Docker image built with no --build-arg: an unknown revision, not an error.
+
+    Worth an endpoint test rather than only a unit one, because "unknown" is the
+    case the UI used to be stuck in and the route has to keep answering 200 for
+    it. Note the runner never sees a git call: in a container git cannot work at
+    all, so current_revision does not spend a subprocess proving it again.
+    """
+    marker = tmp_path / "dockerenv"
+    marker.touch()
+    monkeypatch.setattr(updater_module, "_DOCKER_MARKER", marker)
+    runner = FakeRunner()
+    app = create_app(settings, command_runner=runner)
+    async with LifespanManager(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            response = await ac.get("/api/system/revision")
+
+    assert response.status_code == 200
+    assert response.json() == {"commit": None, "described": None}
+    assert not any(call[0] == "git" for call in runner.calls)
 
 
 async def test_update(client: AsyncClient) -> None:

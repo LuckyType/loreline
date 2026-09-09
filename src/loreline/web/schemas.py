@@ -410,6 +410,14 @@ class RollbackRequest(BaseModel):
 
 
 class RevisionResponse(BaseModel):
-    """Current deployed git revision."""
+    """Current deployed revision: the commit, and the name git gives it."""
 
+    # The full SHA, and nothing else - this is what UpdateResult's
+    # previous_commit/new_commit already mean, they come from the same method,
+    # and RollbackRequest above takes one back. An identifier, not a label.
     commit: str | None = None
+    # `git describe --tags --always`: last reachable tag, distance, short SHA -
+    # or a bare short SHA where no tag is reachable. The half a person reads.
+    # Null where it is unknown, which is a Docker image built without the
+    # revision baked in; the UI shows a dash rather than guessing.
+    described: str | None = None
