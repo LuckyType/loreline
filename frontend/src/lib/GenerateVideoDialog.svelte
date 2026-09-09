@@ -20,6 +20,7 @@
  *    lists are the fallback for a model that file does not annotate.
  */
 
+import { untrack } from 'svelte'
 import { actionSetup } from '$lib/actionSetup.svelte'
 import { ApiError, api } from '$lib/api'
 import { deprecationNote, videoCapsFor } from '$lib/capabilities.svelte'
@@ -116,14 +117,30 @@ const promptLong = $derived(promptMax === null && prompt.length > PROMPT_LONG_CH
  *  there is nothing for Reset to put back. */
 const promptIsSummary = $derived(prompt === summary)
 
-// Re-seed the prompt each time the dialog opens, but never while it is open -
-// that would wipe an edit in progress. Emptiness is measured after trimming:
-// a box holding a single space is "nothing the GM wrote" every bit as much as
-// an empty one, and testing the raw string left that space seeded forever -
-// Generate disabled on !prompt.trim(), Cancel and reopen changing nothing, and
+// Seed the prompt when the dialog opens, and only then.
+//
+// Two ways to get this wrong, and the obvious spelling hits both. Reading
+// `prompt` inside the effect makes emptying the box refill it from under the
+// cursor, because clearing it re-runs the very effect that seeds it: select
+// all, delete, and the whole recap is back before the first keystroke, which
+// is exactly the gesture someone writing their own prompt starts with.
+// Testing the raw string rather than the trimmed one leaves a box holding a
+// single space seeded forever, with Generate disabled on `!prompt.trim()` and
 // no way back to the summary short of reloading the page.
+//
+// So: fire on the transition into open, read the prompt untracked, and treat
+// blank-after-trimming as unseeded. Emptiness while open is a state the GM is
+// passing through, not a request for the recap back; "Reset to summary" below
+// is the deliberate way to ask for that.
+let wasOpen = false
 $effect(() => {
-	if (open && !prompt.trim()) prompt = summary
+	const isOpen = open
+	if (isOpen && !wasOpen) {
+		untrack(() => {
+			if (!prompt.trim()) prompt = summary
+		})
+	}
+	wasOpen = isOpen
 })
 
 // The list is wanted the moment the dialog shows, not when the model dropdown
