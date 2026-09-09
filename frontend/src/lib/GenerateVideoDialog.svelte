@@ -189,7 +189,7 @@ async function submit() {
 </script>
 
 <Dialog bind:open>
-	<DialogContent class="sm:max-w-lg">
+	<DialogContent class="max-h-[calc(100dvh-2rem)] grid-rows-[auto_minmax(0,1fr)_auto] sm:max-w-2xl">
 		<DialogHeader>
 			<DialogTitle>Generate video</DialogTitle>
 			<DialogDescription>
@@ -198,145 +198,165 @@ async function submit() {
 			</DialogDescription>
 		</DialogHeader>
 
-		{#if providers.length === 0}
-			<p class="text-sm text-muted-foreground">
-				Add an OpenRouter provider in Settings to generate video.
-			</p>
-		{:else}
-			<div class="flex flex-col gap-4">
-				<div class="flex flex-col gap-2">
-					<Label for="video-provider">Provider</Label>
-					<Dropdown
-						id="video-provider"
-						bind:value={providerId}
-						options={providers.map((p) => ({ value: p.id, label: p.name }))}
-						placeholder="Provider"
-					/>
-				</div>
-
-				<div class="flex flex-col gap-2">
-					<Label for="video-model">Model</Label>
-					<Dropdown
-						id="video-model"
-						bind:value={modelId}
-						loading={loadingModels}
-						filterable
-						options={offered.map((m) => ({ value: m.id, label: m.name || m.id }))}
-						placeholder={loadingModels ? 'Loading models…' : 'Select model…'}
-					/>
-					{#if !loadingModels && offered.length === 0 && modelsSettled}
-						<span class="text-xs text-muted-foreground">
-							No video models available - check the provider's API key.
-						</span>
-					{/if}
-					{#if sunset}
-						<span class="text-xs text-amber-500">{sunset}</span>
-					{/if}
-				</div>
-
-				<div class="flex flex-col gap-2">
-					<div class="flex items-center justify-between gap-2">
-						<Label for="video-prompt">Prompt</Label>
-						<!-- The one way back to the seed. Re-opening only re-seeds an empty
-						     box, by design: it must not wipe an edit in progress. -->
-						<Button
-							variant="ghost"
-							size="sm"
-							onclick={() => (prompt = summary)}
-							disabled={!summary || promptIsSummary}
-							title={summary
-								? 'Put the session summary back in the box, discarding your edits'
-								: 'This session has no summary to reset to'}
-						>
-							Reset to summary
-						</Button>
+		<!-- Header and footer stay put, the middle scrolls. The prompt is seeded from
+		     the session summary, which for a long session runs to several thousand
+		     characters, and with nothing capping it the dialog simply grew past the
+		     window until Generate was off screen below it. Capping the whole dialog
+		     at the viewport and giving this one region the only overflow keeps the
+		     title and both buttons reachable at any window height. The sliver of
+		     horizontal slack is so a focus ring on a dropdown is not shaved off by
+		     the edge of the scroll container. -->
+		<div class="-mx-1 min-h-0 overflow-y-auto px-1">
+			{#if providers.length === 0}
+				<p class="text-sm text-muted-foreground">
+					Add an OpenRouter provider in Settings to generate video.
+				</p>
+			{:else}
+				<div class="flex flex-col gap-4">
+					<div class="flex flex-col gap-2">
+						<Label for="video-provider">Provider</Label>
+						<Dropdown
+							id="video-provider"
+							bind:value={providerId}
+							options={providers.map((p) => ({ value: p.id, label: p.name }))}
+							placeholder="Provider"
+						/>
 					</div>
-					<Textarea id="video-prompt" rows={8} bind:value={prompt} />
-					<div class="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
-						<span class="text-xs text-muted-foreground">
-							Seeded from the session summary - a short, shot-like description of one scene
-							generates better than a whole recap.
-						</span>
-						<span
-							class="shrink-0 text-xs {promptOverMax
-								? 'text-destructive'
-								: promptLong
-									? 'text-amber-500'
-									: 'text-muted-foreground'}"
-						>
-							{prompt.length}{promptMax === null ? '' : ` / ${promptMax}`}
-							characters
-						</span>
-					</div>
-					{#if promptOverMax}
-						<span class="text-xs text-destructive">
-							Longer than this model accepts ({promptMax}
-							characters) - it will be rejected.
-						</span>
-					{:else if promptLong}
-						<span class="text-xs text-amber-500">
-							That is a whole recap. Video models take a scene, not a chapter, and some cap the
-							prompt well below this length.
-						</span>
-					{/if}
-				</div>
 
-				{#if model}
-					<div class="grid grid-cols-2 gap-3">
-						{#if durations.length}
-							<div class="flex flex-col gap-2">
-								<Label for="video-duration">Length</Label>
-								<Dropdown
-									id="video-duration"
-									value={duration === null ? '' : String(duration)}
-									onpick={(v) => (duration = v ? Number(v) : null)}
-									options={durations.map((d) => ({ value: String(d), label: `${d}s` }))}
-								/>
-							</div>
+					<div class="flex flex-col gap-2">
+						<Label for="video-model">Model</Label>
+						<Dropdown
+							id="video-model"
+							bind:value={modelId}
+							loading={loadingModels}
+							filterable
+							options={offered.map((m) => ({ value: m.id, label: m.name || m.id }))}
+							placeholder={loadingModels ? 'Loading models…' : 'Select model…'}
+						/>
+						{#if !loadingModels && offered.length === 0 && modelsSettled}
+							<span class="text-xs text-muted-foreground">
+								No video models available - check the provider's API key.
+							</span>
 						{/if}
-						{#if resolutions.length}
-							<div class="flex flex-col gap-2">
-								<Label for="video-resolution">Resolution</Label>
-								<Dropdown
-									id="video-resolution"
-									bind:value={resolution}
-									options={resolutions.map((r) => ({ value: r, label: r }))}
-								/>
-							</div>
-						{/if}
-						{#if aspectRatios.length}
-							<div class="flex flex-col gap-2">
-								<Label for="video-aspect-ratio">Aspect ratio</Label>
-								<Dropdown
-									id="video-aspect-ratio"
-									bind:value={aspectRatio}
-									options={aspectRatios.map((r) => ({ value: r, label: r }))}
-								/>
-							</div>
+						{#if sunset}
+							<span class="text-xs text-amber-500">{sunset}</span>
 						{/if}
 					</div>
-					{#if audioOffered}
-						<label class="flex items-center gap-2">
-							<Checkbox
-								checked={generateAudio}
-								onCheckedChange={(v) => (generateAudio = v === true)}
-							/>
-							<span class="text-sm">Generate audio</span>
-						</label>
+
+					<div class="flex flex-col gap-2">
+						<div class="flex items-center justify-between gap-2">
+							<Label for="video-prompt">Prompt</Label>
+							<!-- The one way back to the seed. Re-opening only re-seeds an empty
+							     box, by design: it must not wipe an edit in progress. -->
+							<Button
+								variant="ghost"
+								size="sm"
+								onclick={() => (prompt = summary)}
+								disabled={!summary || promptIsSummary}
+								title={summary
+									? 'Put the session summary back in the box, discarding your edits'
+									: 'This session has no summary to reset to'}
+							>
+								Reset to summary
+							</Button>
+						</div>
+						<!-- The base textarea sizes itself to its content, so a recap-length
+						     seed would take whatever height the text wants and drag the dialog
+						     up with it. The cap turns that growth into the textarea's own
+						     scrollbar. The floor is there because content sizing ignores the
+						     rows attribute, which would leave an empty box a couple of lines
+						     tall; rows still governs in engines that do not do content sizing. -->
+						<Textarea id="video-prompt" rows={8} class="max-h-64 min-h-40" bind:value={prompt} />
+						<div class="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+							<span class="text-xs text-muted-foreground">
+								Seeded from the session summary - a short, shot-like description of one scene
+								generates better than a whole recap.
+							</span>
+							<span
+								class="shrink-0 text-xs {promptOverMax
+									? 'text-destructive'
+									: promptLong
+										? 'text-amber-500'
+										: 'text-muted-foreground'}"
+							>
+								{prompt.length}{promptMax === null ? '' : ` / ${promptMax}`}
+								characters
+							</span>
+						</div>
+						{#if promptOverMax}
+							<span class="text-xs text-destructive">
+								Longer than this model accepts ({promptMax}
+								characters) - it will be rejected.
+							</span>
+						{:else if promptLong}
+							<span class="text-xs text-amber-500">
+								That is a whole recap. Video models take a scene, not a chapter, and some cap the
+								prompt well below this length.
+							</span>
+						{/if}
+					</div>
+
+					{#if model}
+						<div class="grid grid-cols-2 gap-3">
+							{#if durations.length}
+								<div class="flex flex-col gap-2">
+									<Label for="video-duration">Length</Label>
+									<Dropdown
+										id="video-duration"
+										value={duration === null ? '' : String(duration)}
+										onpick={(v) => (duration = v ? Number(v) : null)}
+										options={durations.map((d) => ({ value: String(d), label: `${d}s` }))}
+									/>
+								</div>
+							{/if}
+							{#if resolutions.length}
+								<div class="flex flex-col gap-2">
+									<Label for="video-resolution">Resolution</Label>
+									<Dropdown
+										id="video-resolution"
+										bind:value={resolution}
+										options={resolutions.map((r) => ({ value: r, label: r }))}
+									/>
+								</div>
+							{/if}
+							{#if aspectRatios.length}
+								<div class="flex flex-col gap-2">
+									<Label for="video-aspect-ratio">Aspect ratio</Label>
+									<Dropdown
+										id="video-aspect-ratio"
+										bind:value={aspectRatio}
+										options={aspectRatios.map((r) => ({ value: r, label: r }))}
+									/>
+								</div>
+							{/if}
+						</div>
+						{#if audioOffered}
+							<label class="flex items-center gap-2">
+								<Checkbox
+									checked={generateAudio}
+									onCheckedChange={(v) => (generateAudio = v === true)}
+								/>
+								<span class="text-sm">Generate audio</span>
+							</label>
+						{/if}
 					{/if}
-				{/if}
-			</div>
-		{/if}
+				</div>
+			{/if}
+		</div>
 
-		{#if error}
-			<p class="mt-2 text-sm text-destructive">{error}</p>
-		{/if}
-
-		<DialogFooter>
-			<Button variant="outline" onclick={() => (open = false)}>Cancel</Button>
-			<Button onclick={submit} disabled={busy || !providerId || !modelId || !prompt.trim()}>
-				{busy ? 'Starting…' : 'Generate'}
-			</Button>
-		</DialogFooter>
+		<!-- The error rides with the footer rather than sitting in the scroll region
+		     above: a submission that failed has to be readable next to the button
+		     that failed, not somewhere up the prompt's own scrollback. -->
+		<div class="flex flex-col gap-4">
+			{#if error}
+				<p class="text-sm text-destructive">{error}</p>
+			{/if}
+			<DialogFooter>
+				<Button variant="outline" onclick={() => (open = false)}>Cancel</Button>
+				<Button onclick={submit} disabled={busy || !providerId || !modelId || !prompt.trim()}>
+					{busy ? 'Starting…' : 'Generate'}
+				</Button>
+			</DialogFooter>
+		</div>
 	</DialogContent>
 </Dialog>
