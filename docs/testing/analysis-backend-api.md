@@ -904,10 +904,14 @@ All behind `require_auth` at router level.
 - **400 `provider cannot generate video`** for any kind other than `openrouter`
   and `xai` (`video.py:43-46`).
 - **422** when `provider_id` is omitted.
-- **Best effort:** an unreachable provider returns `200 []`, not an error
-  (`video/client.py:157-158`). xAI publishes no video catalogue at all, so `[]`
-  is its ordinary answer and the dialog builds its controls from
-  `capabilities.yaml` instead.
+- **Best effort:** a vendor catalogue that cannot be read is not an error. Where
+  there is none to read, or it is down or unparseable, the answer is the models
+  `capabilities.yaml` curates for the kind, hidden entries excluded, in the
+  file's order (`video/client.py`, `list_video_models`). That fallback is the
+  whole answer for xAI, which publishes no video catalogue at all; a live list
+  wins outright where there is one, and the two are never merged. `200 []` is
+  left for a kind that is unreadable and curates nothing, which neither video
+  kind is today.
 
 ### `POST /api/video`
 - **UI action:** session page, Summary section, Generate video dialog, the
@@ -1422,8 +1426,11 @@ Groups follow the route sections above.
 167. `[api-only]` `GET /api/video/models?provider_id=bogus`. Expect 404
      `provider not found`.
 168. `[api-only]` `GET /api/video/models?provider_id=<an xai row>`. Expect **200
-     `[]`**: xAI publishes no video catalogue, and the dialog builds controls
-     from `capabilities.yaml` instead.
+     with `grok-imagine-video-1.5`** and the parameters `capabilities.yaml`
+     records for it (durations 1 to 15, 480p/720p/1080p, seven aspect ratios):
+     xAI publishes no video catalogue, so the curated entry is the answer. It
+     used to be `200 []`, which left the dialog saying "No video models
+     available" about a key that generates video perfectly well.
 169. `[api-only]` `POST /api/video` with `{"session_id":"bogus", ...}`. Expect 404
      `unknown session 'bogus'`.
 170. `[api-only]` `POST /api/video` with a non video provider. Expect 409
