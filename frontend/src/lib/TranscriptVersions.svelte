@@ -16,6 +16,13 @@
  * flight the row offers Cancel where Delete will be, and once it stops -
  * cancelled or otherwise - Delete takes the slot back.
  *
+ * Starting another one is a button in the header rather than a form under the
+ * table (see ReprocessPanel): four controls at the foot of a section that
+ * scrolls meant scrolling to reach the one button anybody came for, and on a
+ * phone they wrapped into a paragraph of widgets. With no stored audio there
+ * is nothing to replay, so the button is disabled with that reason instead of
+ * opening a dialog that could not do anything.
+ *
  * Open, the section takes an equal share of the card's leftover height and
  * scrolls inside it, so a session with a dozen re-transcriptions still leaves
  * room for the transcript below it.
@@ -69,6 +76,13 @@ let {
 
 const hasAudio = $derived(!!detail.session.audio_path)
 
+// Said in two places for one reason: it is the header button's disabled
+// reason, and a tooltip is not a thing a phone can show, so the body says it
+// too on the one kind of session where it applies.
+const NO_AUDIO_NOTE =
+	'No stored audio for this session - re-processing and diarization are unavailable.'
+
+let reprocessOpen = $state(false)
 let logsOpen = $state(false)
 let logsVersion = $state('original')
 // Which "Show logs" button opened the dialog. One dialog serves the whole
@@ -311,6 +325,20 @@ const originalStatus = $derived.by(() => {
 		bind:open
 		bodyClass="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto"
 	>
+		{#snippet actions()}
+			<Button
+				variant="outline"
+				size="sm"
+				onclick={() => (reprocessOpen = true)}
+				disabled={!hasAudio}
+				title={hasAudio
+					? 'Run the stored recording through a provider again, as another version'
+					: NO_AUDIO_NOTE}
+			>
+				New transcription
+			</Button>
+		{/snippet}
+
 		<Table>
 			<TableHeader>
 				<TableRow>
@@ -458,14 +486,18 @@ const originalStatus = $derived.by(() => {
 		{#if lastFailureText}
 			<p class="text-xs text-destructive">{lastFailureText}</p>
 		{/if}
-		<ReprocessPanel
-			{sessionId}
-			{hasAudio}
-			capturedWith={detail.session.primary_provider}
-			onqueued={onchanged}
-			{onerror}
-		/>
+		{#if !hasAudio}
+			<p class="m-0 text-muted-foreground">{NO_AUDIO_NOTE}</p>
+		{/if}
 	</Foldable>
 </CardContent>
 
 <SessionLogsDialog bind:open={logsOpen} {sessionId} version={logsVersion} trigger={logsTrigger} />
+
+<ReprocessPanel
+	bind:open={reprocessOpen}
+	{sessionId}
+	capturedWith={detail.session.primary_provider}
+	onqueued={onchanged}
+	{onerror}
+/>

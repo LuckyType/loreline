@@ -4,7 +4,10 @@
  *
  * A summary is a recap, and a video is generated from that recap, so both
  * triggers live here and both are disabled with the reason when the thing they
- * need is missing: an LLM provider, or a summary to work from.
+ * need is missing: an LLM provider, or a summary to work from. They sit in the
+ * section's header rather than under the recap, because a control buried at
+ * the foot of a body that scrolls is one you have to go looking for - and the
+ * header is drawn whether the section is folded or not.
  *
  * A session has one summary but several transcripts, so the meta line says
  * which version this one was read from alongside the provider and model that
@@ -17,12 +20,15 @@
  * not to, so this renders it (see Markdown.svelte) instead of showing the
  * reader the literal `##`.
  *
+ * Finished videos are not here at all: they are in a dialog off the header
+ * (see SessionVideosDialog), whose trigger carries the count so nobody has to
+ * scroll to the end of a recap to find out one exists.
+ *
  * Open, the section takes an equal share of the card's leftover height and
- * scrolls inside it, so a long recap and a stack of generated videos push
- * neither the transcript nor the player off the screen.
+ * scrolls inside it, so a long recap pushes neither the transcript nor the
+ * player off the screen.
  */
 
-import { onMount } from 'svelte'
 import { actionSetup } from '$lib/actionSetup.svelte'
 import { ApiError, api } from '$lib/api'
 import { Button } from '$lib/components/ui/button'
@@ -31,6 +37,7 @@ import { confirm } from '$lib/confirm.svelte'
 import Foldable from '$lib/Foldable.svelte'
 import GenerateVideoDialog from '$lib/GenerateVideoDialog.svelte'
 import Markdown from '$lib/Markdown.svelte'
+import SessionVideosDialog from '$lib/SessionVideosDialog.svelte'
 import { providerName, versionLabel } from '$lib/stores'
 import SummarizeDialog from '$lib/SummarizeDialog.svelte'
 import { cn } from '$lib/utils'
@@ -41,8 +48,10 @@ let {
 	session,
 	speakers,
 	version,
+	videoJobs,
 	open = $bindable(true),
 	onsummarized,
+	onvideoschanged,
 	onerror,
 }: {
 	sessionId: string
@@ -52,10 +61,16 @@ let {
 	/** The transcript version the page is showing: what a new summary would be
 	 *  read from, which is not necessarily what the stored one was. */
 	version: string
+	/** Every video generated from this session. The page owns the list and the
+	 *  poll behind it, because the export menu in the header reads it too. */
+	videoJobs: VideoJob[]
 	/** Fold state, kept by the page across visits. */
 	open?: boolean
 	/** A summary was stored: the caller refetches the session. */
 	onsummarized?: () => Promise<void> | void
+	/** A generation was queued or deleted: the caller refetches the job list.
+	 *  Awaited, so the count on the trigger is right before anything reads it. */
+	onvideoschanged?: () => Promise<void> | void
 	/** What went wrong. The page owns the banner. */
 	onerror?: (message: string) => void
 } = $props()
@@ -91,40 +106,40 @@ async function openSummarize() {
 // rather than offered and rejected at submit time.
 const videoProviders = $derived(actionSetup.providersFor('video'))
 let videoOpen = $state(false)
-let videoJobs = $state<VideoJob[]>([])
+let videosOpen = $state(false)
 
-const videoRunning = $derived(
-	videoJobs.some((j) => j.status === 'queued' || j.status === 'running'),
-)
-
-/** A generation takes minutes, so this polls only while something is actually
- *  in flight and stops as soon as the queue drains. Hanging the interval off an
- *  effect means the same teardown covers all three ways it should stop: the
- *  queue draining, the flag flipping, and the page unmounting. There is no
- *  timer left to clear by hand, and none left running behind a dead page. */
-$effect(() => {
-	if (!videoRunning) return
-	const timer = setInterval(refreshVideoJobs, 5000)
-	return () => clearInterval(timer)
+/** What the Videos trigger says on hover. The count on its face is every
+ *  generation this session has, which is the number that makes them
+ *  discoverable; it cannot say which of them is watchable now, still running
+ *  or dead, and those are three different reasons to open the dialog. */
+const videosTitle = $derived.by(() => {
+	const done = videoJobs.filter((j) => j.status === 'done').length
+	const running = videoJobs.filter((j) => j.status === 'queued' || j.status === 'running').length
+	const failed = videoJobs.filter((j) => j.status === 'error').length
+	const parts: string[] = []
+	if (done) parts.push(`${done} to watch`)
+	if (running) parts.push(`${running} generating`)
+	if (failed) parts.push(`${failed} failed`)
+	return parts.join(', ')
 })
 
-async function refreshVideoJobs() {
-	videoJobs = await api.listVideoJobs(sessionId)
-}
-
+/** Delete one generation and its file.
+ *
+ * Deleting the last one closes the dialog, because the trigger that opened it
+ * is gone the moment the count reaches zero: leaving an empty dialog behind a
+ * button that no longer exists is a dead end you can only escape by hand. Done
+ * here rather than in an effect - it is the consequence of a press, not a
+ * state to keep in sync. */
 async function deleteVideo(jobId: string) {
 	if (!(await confirm('Delete this video and its file?'))) return
-	await api.deleteVideoJob(jobId)
-	await refreshVideoJobs()
-}
-
-onMount(async () => {
 	try {
-		await refreshVideoJobs()
+		await api.deleteVideoJob(jobId)
+		await onvideoschanged?.()
+		if (videoJobs.length === 0) videosOpen = false
 	} catch (err) {
-		onerror?.(err instanceof ApiError ? err.message : 'failed to load')
+		onerror?.(err instanceof ApiError ? err.message : 'delete failed')
 	}
-})
+}
 </script>
 
 <CardContent class={cn('flex flex-col gap-2', open ? 'min-h-0 flex-1' : 'shrink-0')}>
@@ -134,16 +149,17 @@ onMount(async () => {
 		bind:open
 		bodyClass="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto"
 	>
-		{#if session.summary}
-			<Markdown source={session.summary} />
-		{:else if llmProviders.length === 0}
-			<p class="m-0 text-muted-foreground">
-				Add an LLM provider (OpenAI-compatible chat) in Settings to enable summaries.
-			</p>
-		{:else}
-			<p class="m-0 text-muted-foreground">Not summarized yet.</p>
-		{/if}
-		<div class="flex justify-end gap-2">
+		{#snippet actions()}
+			{#if videoJobs.length}
+				<!-- The count is the whole point of this button. "Videos" on its own
+				     says nothing about whether there is anything behind it, and the
+				     complaint that moved the players in here was precisely that a
+				     finished generation was impossible to notice. No generations, no
+				     button: there would be nothing to open. -->
+				<Button variant="outline" size="sm" onclick={() => (videosOpen = true)} title={videosTitle}>
+					Videos ({videoJobs.length})
+				</Button>
+			{/if}
 			<Button
 				variant="outline"
 				size="sm"
@@ -165,42 +181,16 @@ onMount(async () => {
 			>
 				{session.summary ? 'Re-summarize' : 'Summarize'}
 			</Button>
-		</div>
+		{/snippet}
 
-		{#if videoJobs.length}
-			<div class="mt-3 flex flex-col gap-3 border-t pt-3">
-				{#each videoJobs as job (job.id)}
-					<div class="flex flex-col gap-2">
-						<div class="flex items-center justify-between gap-2">
-							<span class="min-w-0 truncate text-xs text-muted-foreground">
-								{job.model}{job.duration ? ` · ${job.duration}s` : ''}
-								{job.resolution
-									? ` · ${job.resolution}`
-									: ''}
-							</span>
-							<span class="flex shrink-0 items-center gap-2">
-								{#if job.status === 'queued' || job.status === 'running'}
-									<span class="text-xs text-muted-foreground">Generating…</span>
-								{:else if job.status === 'error'}
-									<span class="text-xs text-destructive">{job.error ?? 'failed'}</span>
-								{/if}
-								<Button variant="ghost" size="sm" onclick={() => deleteVideo(job.id)}>
-									Delete
-								</Button>
-							</span>
-						</div>
-						{#if job.status === 'done'}
-							<!-- svelte-ignore a11y_media_has_caption -->
-							<video
-								class="w-full rounded-md border"
-								controls
-								preload="metadata"
-								src={api.videoContentUrl(job.id)}
-							></video>
-						{/if}
-					</div>
-				{/each}
-			</div>
+		{#if session.summary}
+			<Markdown source={session.summary} />
+		{:else if llmProviders.length === 0}
+			<p class="m-0 text-muted-foreground">
+				Add an LLM provider (OpenAI-compatible chat) in Settings to enable summaries.
+			</p>
+		{:else}
+			<p class="m-0 text-muted-foreground">Not summarized yet.</p>
 		{/if}
 	</Foldable>
 </CardContent>
@@ -209,7 +199,9 @@ onMount(async () => {
 	bind:open={videoOpen}
 	{sessionId}
 	summary={session.summary ?? ''}
-	onqueued={refreshVideoJobs}
+	onqueued={onvideoschanged}
 />
+
+<SessionVideosDialog bind:open={videosOpen} jobs={videoJobs} ondelete={deleteVideo} />
 
 <SummarizeDialog bind:open={summarizeOpen} {sessionId} {speakers} {version} {onsummarized} />
