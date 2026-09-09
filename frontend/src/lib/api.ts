@@ -248,6 +248,12 @@ export const api = {
 	getReprocess: (jobId: string) => request<ReprocessJob>(`/api/reprocess/${jobId}`),
 	listReprocess: (sessionId: string) =>
 		request<ReprocessJob[]>(`/api/reprocess?session_id=${sessionId}`),
+	/** Stop a queued or running job, keeping what it has already written. The
+	 *  job comes back as it stands, which for a re-transcription can still be
+	 *  'running': it stops at the end of the utterance it is on, and the
+	 *  caller's poll picks up the settled row. 409 when it already finished. */
+	cancelReprocess: (jobId: string) =>
+		request<ReprocessJob>(`/api/reprocess/${jobId}/cancel`, { method: 'POST' }),
 
 	// --- services (docker) ---
 	listServices: () => request<ServiceState[]>('/api/system/services'),

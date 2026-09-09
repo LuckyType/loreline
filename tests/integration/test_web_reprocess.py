@@ -5,13 +5,16 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import NamedTuple
 
 import httpx
 import pytest_asyncio
 from asgi_lifespan import LifespanManager
+from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from test_web_session import (  # type: ignore[import-not-found]
     FakeBackend,
+    FakeDiarizer,
     FakeSource,
     GlossaryRecordingBackend,
     OutOfCreditBackend,
@@ -22,12 +25,20 @@ from test_web_session import (  # type: ignore[import-not-found]
 from loreline.audio.chunker import SpeechDetector, Utterance
 from loreline.diarization.base import DiarizationProvider
 from loreline.health import HealthReport, HealthStatus, raise_for_vendor_status
-from loreline.models import DiarizationConfig, ProviderConfig, SpeakerSegment, TranscriptEvent
+from loreline.models import (
+    DiarizationConfig,
+    DiarizationMode,
+    JobStatus,
+    ProviderConfig,
+    SpeakerSegment,
+    TranscriptEvent,
+)
 from loreline.reprocess.jobs import stored_audio_backend
 from loreline.secrets import SecretStore
 from loreline.settings import Settings
 from loreline.stt import create_backend
 from loreline.web.app import create_app
+from loreline.web.schemas import ReprocessRequest
 
 # Any model id: the fake backend never looks at it, but the API requires one -
 # a provider row carries no model, so the request is where it is decided.
@@ -534,11 +545,16 @@ async def test_diarize_session_relabels_globally(tmp_path: Path) -> None:
 
 
 async def _wait_done(client: AsyncClient, job_id: str) -> dict[str, object]:
-    """Poll a job until it leaves queued/running, and return the finished row."""
+    """Poll a job until it leaves queued/running, and return the finished row.
+
+    "Cancelled" is one of the ways to leave: a stopped run is over, it just
+    ended on a decision rather than on the end of the recording. Callers assert
+    which of the three they expected.
+    """
     job: dict[str, object] = {}
     for _ in range(50):
         job = (await client.get(f"/api/reprocess/{job_id}")).json()
-        if job["status"] in {"done", "error"}:
+        if job["status"] in {"done", "error", "cancelled"}:
             return job
         await asyncio.sleep(0.02)
     return job
@@ -1104,3 +1120,329 @@ async def test_reprocess_fails_with_the_vendors_reason_when_credit_runs_out(
             assert job["status"] == "error"
             assert "no credits remaining" in job["error"]
             assert job["segments_added"] == 0
+
+
+def _three_utterance_capture(_req: object, _sample_rate: int) -> tuple[FakeSource, SpeechDetector]:
+    """Capture yielding three utterances, so a run has one left to decline.
+
+    Two is not enough to cancel by. The flag is read where the *next* utterance
+    would be handed to the router (see ``loreline.reprocess.jobs._aiter``), so
+    a run parked on its last one has nothing left to refuse and finishes
+    normally, correctly reporting "done". Three gives the press something to
+    actually stop, and leaves the assertion "it wrote fewer than it would have"
+    meaning something.
+    """
+    pattern = ([True] * 5 + [False] * 45) * 2 + [True] * 5
+    frames = iter(pattern)
+
+    def detector(_frame: bytes) -> bool:
+        return next(frames, False)
+
+    return FakeSource(frames=len(pattern)), detector
+
+
+class _Gated(NamedTuple):
+    """A client, the app behind it, and the gate that parks a run mid-flight.
+
+    The gate is what makes cancelling testable at all: a job over in
+    milliseconds cannot be caught in the act, so the backend holds every
+    utterance after the first until a test opens it. ``app`` is here for the
+    repositories - what the run left on disk is half of what these tests are
+    checking, and the HTTP surface only shows the other half.
+    """
+
+    client: AsyncClient
+    app: FastAPI
+    gate: asyncio.Event
+
+
+@pytest_asyncio.fixture
+async def gated(tmp_path: Path) -> AsyncIterator[_Gated]:
+    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t")
+    gate = asyncio.Event()
+    gate.set()  # open for the live capture; the run under test closes it
+
+    def factory(config: ProviderConfig, secrets: SecretStore, model: str | None) -> _GatedBackend:
+        return _GatedBackend(config, secrets, model, gate)
+
+    app = create_app(
+        settings,
+        capture_factory=_three_utterance_capture,  # type: ignore[arg-type]
+        backend_factory=factory,  # type: ignore[arg-type]
+        diarizer_factory=fake_diarizers,
+        diarizer_probe=_reachable_diarizer,
+    )
+    async with LifespanManager(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            yield _Gated(ac, app, gate)
+
+
+async def _cancel_mid_run(gated: _Gated, pid: str, sid: str) -> tuple[str, dict[str, object]]:
+    """Re-transcribe, stop the run after its first segment, return the settled row.
+
+    Deterministic rather than timed. The backend is parked inside its second
+    utterance when Cancel is pressed, so the run is guaranteed to be in flight
+    with exactly one segment on disk; opening the gate lets that second
+    utterance finish and land, and the flag is read at the boundary after it.
+    Which is why the run ends on two segments and not one: cancelling asks a
+    run to stop at its next clean boundary, not to abandon work in progress.
+    """
+    gated.gate.clear()
+    job_id: str = (
+        await gated.client.post(
+            "/api/reprocess", json={"session_id": sid, "provider_id": pid, "model": _MODEL}
+        )
+    ).json()["id"]
+    job: dict[str, object] = {}
+    for _ in range(100):
+        job = (await gated.client.get(f"/api/reprocess/{job_id}")).json()
+        if int(job["segments_added"]) >= 1:  # type: ignore[arg-type]
+            break
+        await asyncio.sleep(0.02)
+    assert job["status"] == "running"
+
+    resp = await gated.client.post(f"/api/reprocess/{job_id}/cancel")
+    assert resp.status_code == 200
+
+    gated.gate.set()
+    ctx = gated.app.state.ctx  # pyright: ignore[reportAny]
+    await ctx.reprocess.wait(job_id)
+    return job_id, (await gated.client.get(f"/api/reprocess/{job_id}")).json()
+
+
+async def test_cancelling_a_running_job_keeps_what_it_already_wrote(gated: _Gated) -> None:
+    """The whole point of the feature: stop early, keep the transcript so far.
+
+    A GM watching a re-transcription fill up can tell within a minute or two
+    whether the model is worth the rest of the recording. Stopping it must not
+    throw away what they were reading - those rows are how they decided, and
+    they are about to read them again before deleting the version.
+    """
+    pid = await _provider(gated.client)
+    sid = await _run_session(gated.client, pid)
+    ctx = gated.app.state.ctx  # pyright: ignore[reportAny]
+    assert len(ctx.audio_store.read_utterances(sid)) == 3
+
+    job_id, job = await _cancel_mid_run(gated, pid, sid)
+
+    assert job["status"] == "cancelled"
+    assert job["error"] is None  # a decision, not a failure
+    # The utterance in flight when the press landed still counted; the third
+    # was never asked for, which is what "it stopped" means here.
+    assert job["segments_added"] == 2
+    rows = (
+        await gated.client.get(f"/api/session/{sid}/transcript", params={"version": job_id})
+    ).json()
+    assert len(rows) == 2
+    # And the version is still readable under its own name, which is what keeps
+    # the partial transcript on screen while the GM decides about it.
+    assert f"reprocess:{job_id}" in {e.source for e in await ctx.transcripts.for_session(sid)}
+
+
+async def test_deleting_a_cancelled_versions_transcript(gated: _Gated) -> None:
+    """The end of the story the feature was asked for: stop it, then bin it.
+
+    The delete guard refuses a version a job is "still being written", and a
+    cancelled job must not look like one - the row only reaches that status
+    once the run has stopped writing, so there is nothing left to protect the
+    version from.
+    """
+    pid = await _provider(gated.client)
+    sid = await _run_session(gated.client, pid)
+    job_id, job = await _cancel_mid_run(gated, pid, sid)
+    assert job["status"] == "cancelled"
+    ctx = gated.app.state.ctx  # pyright: ignore[reportAny]
+
+    resp = await gated.client.delete(f"/api/session/{sid}/transcript", params={"version": job_id})
+    assert resp.status_code == 200
+
+    assert f"reprocess:{job_id}" not in {e.source for e in await ctx.transcripts.for_session(sid)}
+    assert (await gated.client.get("/api/reprocess", params={"session_id": sid})).json() == []
+    # The capture the run was compared against is untouched.
+    assert (await gated.client.get(f"/api/session/{sid}")).json()["transcript"]
+
+
+async def test_a_cancelled_job_is_not_reported_as_a_failure(gated: _Gated) -> None:
+    """The session page's "Last failed job" line reads this list and filters it
+    on ``status == 'error'``. A run the GM stopped themselves must not show up
+    there: nothing broke, and reporting their own decision back to them as the
+    session's most recent failure is both wrong and alarming."""
+    pid = await _provider(gated.client)
+    sid = await _run_session(gated.client, pid)
+    _, job = await _cancel_mid_run(gated, pid, sid)
+    assert job["status"] == "cancelled"
+
+    jobs = (await gated.client.get("/api/reprocess", params={"session_id": sid})).json()
+    assert [j["status"] for j in jobs] == ["cancelled"]
+    assert [j for j in jobs if j["status"] == "error"] == []
+    assert all(j["error"] is None for j in jobs)
+
+
+async def test_cancelling_a_queued_job_stops_it_before_it_runs(tmp_path: Path) -> None:
+    """A job cancelled before the loop ever started it must not run at all.
+
+    Through the manager rather than over HTTP, because that is the only way to
+    press Cancel while the job is genuinely QUEUED: ``enqueue`` creates the
+    task and returns without awaiting anything after it, so control comes back
+    here before the loop has run a line of it. That window is exactly what the
+    flag raised before ``cancel``'s first await exists for. ``started_at``
+    staying None is the proof it never ran - the run sets it before it does
+    anything else at all.
+    """
+    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t")
+    app = create_app(
+        settings,
+        capture_factory=capture_factory,  # type: ignore[arg-type]
+        backend_factory=FakeBackend,  # type: ignore[arg-type]
+        diarizer_factory=fake_diarizers,
+        diarizer_probe=_reachable_diarizer,
+    )
+    async with LifespanManager(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            pid = await _provider(client)
+            sid = await _run_session(client, pid)
+            ctx = app.state.ctx  # pyright: ignore[reportAny]
+
+            job = await ctx.reprocess.enqueue(
+                ReprocessRequest(session_id=sid, provider_id=pid, model=_MODEL)
+            )
+            assert job.status is JobStatus.QUEUED
+            stopped = await ctx.reprocess.cancel(job.id)
+
+            assert stopped.status is JobStatus.CANCELLED
+            assert stopped.started_at is None
+            assert stopped.finished_at is not None
+            assert stopped.segments_added == 0
+            # Nothing was written under the version it would have produced...
+            sources = {e.source for e in await ctx.transcripts.for_session(sid)}
+            assert f"reprocess:{job.id}" not in sources
+            # ...and it stays stopped rather than starting a moment later.
+            await asyncio.sleep(0.05)
+            assert (await client.get(f"/api/reprocess/{job.id}")).json()["status"] == "cancelled"
+
+
+async def test_cancelling_a_finished_job_is_a_conflict(client: AsyncClient) -> None:
+    """A race the page can genuinely lose, so it gets an answer it can read.
+
+    The job list is polled every 1.5s, so a run can reach the end between the
+    poll that drew the Cancel button and the press that arrives here. 409
+    naming the state it finished in, and the row left exactly as it was: "too
+    late, it is done" is a different fact from "too late, it failed", and the
+    page has to be able to tell them apart without a second request.
+    """
+    pid = await _provider(client)
+    sid = await _run_session(client, pid)
+    job_id = (
+        await client.post(
+            "/api/reprocess", json={"session_id": sid, "provider_id": pid, "model": _MODEL}
+        )
+    ).json()["id"]
+    done = await _wait_done(client, job_id)
+    assert done["status"] == "done"
+
+    resp = await client.post(f"/api/reprocess/{job_id}/cancel")
+    assert resp.status_code == 409
+    assert "done" in resp.json()["detail"]
+    assert (await client.get(f"/api/reprocess/{job_id}")).json() == done
+
+
+async def test_cancelling_an_unknown_job_is_a_404(client: AsyncClient) -> None:
+    resp = await client.post("/api/reprocess/does-not-exist/cancel")
+    assert resp.status_code == 404
+
+
+class _BlockingDiarizer:
+    """Diarizer that answers only once a test lets it.
+
+    Stands in for what a diarize job really is: one call that takes minutes and
+    offers no boundary in the middle of itself, so nothing short of
+    interrupting the task can stop it.
+    """
+
+    def __init__(self, released: asyncio.Event) -> None:
+        self._released = released
+
+    async def diarize(
+        self,
+        wav: bytes,
+        *,
+        sample_rate: int = 16000,
+        min_speakers: int | None = None,
+        max_speakers: int | None = None,
+        session_id: str | None = None,
+    ) -> list[SpeakerSegment]:
+        _ = (wav, sample_rate, min_speakers, max_speakers, session_id)
+        await self._released.wait()
+        return [SpeakerSegment(start=-1e12, end=1e12, speaker="Speaker A")]
+
+    async def aclose(self) -> None:
+        return None
+
+
+async def test_cancelling_a_diarize_job_interrupts_the_call_it_is_stuck_in(
+    tmp_path: Path,
+) -> None:
+    """A diarization is stopped by interrupting the task, and leaves no trace.
+
+    There is no utterance loop to stop between, so the cooperative flag cannot
+    reach the work and ``cancel`` cuts the task instead. What must survive that
+    is the version being relabeled: a half-written ``diarize:<version>`` copy
+    supersedes the version's own rows on read, so it would not show a partial
+    relabeling - it would hide every row it had not reached yet. Cancelled
+    here, before any of it is written, the version keeps its own rows outright.
+    """
+    released = asyncio.Event()
+
+    async def diarizers(config: DiarizationConfig) -> DiarizationProvider:
+        # Only the job's own remote config blocks. The live capture that
+        # produced the audio gets the ordinary fake, so nothing can park it.
+        if config.mode is DiarizationMode.REMOTE:
+            return _BlockingDiarizer(released)
+        return FakeDiarizer()
+
+    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t")
+    app = create_app(
+        settings,
+        capture_factory=capture_factory,  # type: ignore[arg-type]
+        backend_factory=FakeBackend,  # type: ignore[arg-type]
+        diarizer_factory=diarizers,
+        diarizer_probe=_reachable_diarizer,
+    )
+    async with LifespanManager(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            pid = await _provider(client)
+            sid = await _run_session(client, pid)
+            before = (await client.get(f"/api/session/{sid}")).json()["transcript"]
+            assert before
+
+            job_id = (
+                await client.post(
+                    "/api/reprocess",
+                    json={
+                        "session_id": sid,
+                        "operation": "diarize",
+                        "target": "original",
+                        "diarization": {"mode": "remote", "endpoint": "http://diar"},
+                    },
+                )
+            ).json()["id"]
+            for _ in range(100):
+                if (await client.get(f"/api/reprocess/{job_id}")).json()["status"] == "running":
+                    break
+                await asyncio.sleep(0.02)
+
+            resp = await client.post(f"/api/reprocess/{job_id}/cancel")
+            assert resp.status_code == 200
+            # A cut task ends at once, so unlike a re-transcription this one has
+            # already settled by the time the endpoint answers.
+            assert resp.json()["status"] == "cancelled"
+            assert resp.json()["segments_added"] == 0
+
+            ctx = app.state.ctx  # pyright: ignore[reportAny]
+            sources = {e.source for e in await ctx.transcripts.for_session(sid)}
+            assert "diarize:original" not in sources
+            assert (await client.get(f"/api/session/{sid}")).json()["transcript"] == before
+            released.set()  # nothing waits on it now; leave no task holding it
