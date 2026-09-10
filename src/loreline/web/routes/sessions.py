@@ -70,7 +70,32 @@ router = APIRouter(prefix="/api/session", tags=["sessions"], dependencies=[Depen
 _MERGE_MIN_SESSIONS = 2
 
 
-def _version_rows(events: Sequence[TranscriptEvent], version: str) -> list[TranscriptEvent]:
+async def _require_version(
+    state: AppState, session_id: str, events: Sequence[TranscriptEvent], version: str
+) -> None:
+    """Raise a 404 naming ``version`` unless it is a transcript this session has.
+
+    :func:`has_version` answers from the rows, and for a version that has run
+    the rows are the version. They are not the whole story for a
+    re-transcription still in flight: the session page lists it and lets the
+    GM select it the moment it is queued, and it has no rows until its first
+    utterance comes back. Guarding on the rows alone turned that selection
+    into a 404 for a version that exists. So a transcribe job row for this
+    session counts too; a job id from another session does not, any more
+    than a typo does.
+    """
+    if has_version(events, version):
+        return
+    job = await state.reprocess_jobs.get(version)
+    if job is not None and job.session_id == session_id and job.operation == "transcribe":
+        return
+    raise HTTPException(
+        status_code=HTTP_404_NOT_FOUND,
+        detail=f"unknown transcript version {version!r}",
+    )
+
+
+async def _version_rows(state: AppState, session_id: str, version: str) -> list[TranscriptEvent]:
     """One version's settled rows, or a 404 naming the version that was asked for.
 
     Every caller that turns a transcript into something a GM pays for or keeps
@@ -79,11 +104,8 @@ def _version_rows(events: Sequence[TranscriptEvent], version: str) -> list[Trans
     not exist would return a plausible file under the wrong name, which is
     exactly the failure this replaced (see :func:`export_session`).
     """
-    if not has_version(events, version):
-        raise HTTPException(
-            status_code=HTTP_404_NOT_FOUND,
-            detail=f"unknown transcript version {version!r}",
-        )
+    events = await state.transcripts.for_session(session_id)
+    await _require_version(state, session_id, events, version)
     return final_rows(variant_view(events, version))
 
 
@@ -203,7 +225,12 @@ async def get_transcript_version(
     state = get_state(request)
     if await state.sessions.get(session_id) is None:
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="session not found")
-    return variant_view(await state.transcripts.for_session(session_id), version)
+    events = await state.transcripts.for_session(session_id)
+    # A typo is a 404 here for the same reason it is on export: an empty
+    # transcript looks exactly like a version that captured nothing, and this
+    # route answered every misspelt version id with one.
+    await _require_version(state, session_id, events, version)
+    return variant_view(events, version)
 
 
 @router.delete("/{session_id}/transcript")
@@ -297,8 +324,7 @@ async def summarize_session(
             status_code=HTTP_400_BAD_REQUEST, detail="provider is not an LLM provider"
         )
     events = relabel_speakers(
-        _version_rows(await state.transcripts.for_session(session_id), version),
-        session.speaker_names,
+        await _version_rows(state, session_id, version), session.speaker_names
     )
     if not events:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="session has no transcript")
@@ -357,8 +383,7 @@ async def export_session(
     if session is None:
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="session not found")
     transcript = relabel_speakers(
-        _version_rows(await state.transcripts.for_session(session_id), version),
-        session.speaker_names,
+        await _version_rows(state, session_id, version), session.speaker_names
     )
     body = render(session, transcript)
     return Response(

@@ -858,6 +858,66 @@ async def test_merge_stamps_each_part_with_the_provider_that_produced_it(tmp_pat
             assert len(rows) == 3
 
 
+async def test_transcript_version_lookup_tells_a_typo_from_a_run_in_flight(tmp_path: Path) -> None:
+    """An unknown version is a 404; a queued re-transcription is an empty 200.
+
+    The transcript route answered every misspelt version id with an empty
+    list, which looks exactly like a version that captured nothing. The one
+    version that legitimately has no rows yet is a re-transcription still in
+    flight: the session page lists it and lets the GM select it the moment it
+    is queued, so that one has to stay readable, on export as well.
+    """
+    settings = Settings(data_dir=tmp_path / "d", auth_password="", jwt_secret="t")
+    app = create_app(settings)
+    async with LifespanManager(app):
+        ctx = app.state.ctx  # pyright: ignore[reportAny]
+        await ctx.sessions.create(Session(id="a", status=SessionStatus.COMPLETED, started_at=100.0))
+        await ctx.sessions.create(Session(id="b", status=SessionStatus.COMPLETED, started_at=200.0))
+        await _row(ctx, "a", "p", "a original", 5.0)
+        await ctx.reprocess_jobs.create(
+            ReprocessJob(
+                id="queued",
+                session_id="a",
+                provider_id="p",
+                status=JobStatus.QUEUED,
+                created_at=10.0,
+            )
+        )
+        # A diarize job relabels a version; it is not one.
+        await ctx.reprocess_jobs.create(
+            ReprocessJob(
+                id="relabel",
+                session_id="a",
+                provider_id="p",
+                operation="diarize",
+                status=JobStatus.QUEUED,
+                created_at=11.0,
+            )
+        )
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            missing = await client.get("/api/session/a/transcript", params={"version": "nope"})
+            assert missing.status_code == 404
+            assert "nope" in missing.json()["detail"]
+            relabel = await client.get("/api/session/a/transcript", params={"version": "relabel"})
+            assert relabel.status_code == 404
+
+            queued = await client.get("/api/session/a/transcript", params={"version": "queued"})
+            assert queued.status_code == 200
+            assert queued.json() == []
+            export = await client.get(
+                "/api/session/a/export", params={"fmt": "txt", "version": "queued"}
+            )
+            assert export.status_code == 200
+
+            # A job is a version of the session it belongs to and of no other.
+            other = await client.get("/api/session/b/transcript", params={"version": "queued"})
+            assert other.status_code == 404
+
+            # The original is always a version a session has, rows or none.
+            assert (await client.get("/api/session/b/transcript")).status_code == 200
+
+
 async def test_merge_ends_where_the_merged_audio_does(tmp_path: Path) -> None:
     """With merged audio the parts advance by their audio length, so that is
     what the merged session runs to - the transcript may stop short of it."""
