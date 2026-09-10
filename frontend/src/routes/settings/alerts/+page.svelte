@@ -79,6 +79,11 @@ const blankChannel = (): AlertChannelWrite => ({
 })
 
 let channels = $state<AlertChannel[]>([])
+/** What the last load ran into, or '' when the table is what the server
+ *  said. A failed load used to become an empty list, which the table renders
+ *  as "no channels configured": the wrong answer, and one nobody could tell
+ *  apart from the right one. */
+let loadError = $state('')
 let chanForm = $state<AlertChannelWrite>(blankChannel())
 let chanSelected = $state<ChannelMeta | null>(null)
 let chanStep = $state(1)
@@ -142,10 +147,14 @@ const urlError = $derived(
 )
 
 async function loadChannels() {
+	loadError = ''
 	try {
 		channels = await api.listAlertChannels()
-	} catch {
-		channels = []
+	} catch (err) {
+		// The last good list stays up under the banner rather than vanishing.
+		loadError = `Could not load the channels: ${
+			err instanceof ApiError ? err.message : 'the request failed'
+		}`
 	}
 }
 
@@ -270,6 +279,18 @@ async function deleteChannel(id: string) {
 onMount(loadChannels)
 </script>
 
+{#if loadError}
+	<!-- Same banner and retry as the providers page: the table below renders
+	     "No alert channels" the moment the list is empty, which is not what a
+	     failed load means. -->
+	<div
+		class="mb-4 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+	>
+		<span>{loadError}</span>
+		<button class="underline underline-offset-2" onclick={loadChannels}>Retry</button>
+	</div>
+{/if}
+
 <Card>
 	<CardHeader>
 		<CardTitle>Push alerts</CardTitle>
@@ -356,7 +377,7 @@ onMount(loadChannels)
 						</TableCell>
 					</TableRow>
 				{/each}
-				{#if channels.length === 0}
+				{#if channels.length === 0 && !loadError}
 					<TableRow>
 						<TableCell colspan={5} class="text-muted-foreground"
 							>No alert channels - click + to add one.</TableCell
