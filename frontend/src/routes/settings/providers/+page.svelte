@@ -595,6 +595,7 @@ async function testAll() {
 }
 
 async function remove(id: string) {
+	message = ''
 	if (
 		!(await confirm({
 			description: 'Delete this provider? This also removes its stored key.',
@@ -602,7 +603,13 @@ async function remove(id: string) {
 		}))
 	)
 		return
-	await api.deleteProvider(id)
+	try {
+		await api.deleteProvider(id)
+	} catch (err) {
+		// The row is still in the table, so the line above it has to say why.
+		message = `Delete failed: ${err instanceof ApiError ? err.message : 'the request failed'}`
+		return
+	}
 	if (editing === id) resetWizard()
 	await reloadProviders()
 }

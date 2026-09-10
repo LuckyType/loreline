@@ -272,8 +272,15 @@ async function deleteChannel(id: string) {
 	chanMsg = ''
 	chanDetail = ''
 	if (!(await confirm({ description: 'Delete this alert channel?', destructive: true }))) return
-	await api.deleteAlertChannel(id)
-	await loadChannels()
+	try {
+		await api.deleteAlertChannel(id)
+		await loadChannels()
+	} catch (err) {
+		// The row is still in the table, so the line above it has to say why,
+		// in the same verdict-and-reason shape as a failed test.
+		chanMsg = 'Delete failed'
+		chanDetail = err instanceof ApiError ? err.message : 'the request failed'
+	}
 }
 
 onMount(loadChannels)
