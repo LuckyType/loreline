@@ -119,9 +119,11 @@ function toggle() {
 					src={api.audioUrl(sessionId)}
 				></audio>
 
+				<!-- The circle stays 32px; on a coarse pointer an invisible 40px square
+				     behind it takes the tap. -->
 				<button
 					type="button"
-					class="flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-full bg-primary text-primary-foreground hover:bg-primary/85"
+					class="relative flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-full bg-primary text-primary-foreground hover:bg-primary/85 pointer-coarse:after:absolute pointer-coarse:after:-inset-1 pointer-coarse:after:content-['']"
 					aria-label={paused ? 'Play the recording' : 'Pause the recording'}
 					title={paused ? 'Play the recording' : 'Pause the recording'}
 					onclick={toggle}
@@ -156,10 +158,13 @@ function toggle() {
 						></span>
 					{/each}
 					<!-- The input covers the whole bar, so a click on a dot lands here
-					     and seeks to that dot's moment like any other click would. -->
+					     and seeks to that dot's moment like any other click would. On a
+					     coarse pointer it also reaches 12px above and below the 16px
+					     bar, a 40px band, still centred on the track so the thumb does
+					     not move. -->
 					<input
 						type="range"
-						class="absolute inset-0 z-10 m-0 w-full cursor-pointer appearance-none bg-transparent [-webkit-appearance:none] [&::-moz-range-thumb]:size-[11px] [&::-moz-range-thumb]:appearance-none [&::-moz-range-thumb]:rounded-full [&::-moz-range-thumb]:border-0 [&::-moz-range-thumb]:bg-foreground [&::-moz-range-thumb]:shadow-[0_0_0_2px_var(--color-primary)] [&::-moz-range-track]:h-1 [&::-moz-range-track]:bg-transparent [&::-webkit-slider-runnable-track]:h-1 [&::-webkit-slider-runnable-track]:bg-transparent [&::-webkit-slider-thumb]:mt-[-3.5px] [&::-webkit-slider-thumb]:size-[11px] [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-foreground [&::-webkit-slider-thumb]:shadow-[0_0_0_2px_var(--color-primary)] [&::-webkit-slider-thumb]:[-webkit-appearance:none]"
+						class="absolute inset-0 z-10 m-0 w-full cursor-pointer appearance-none bg-transparent pointer-coarse:-inset-y-3 [-webkit-appearance:none] [&::-moz-range-thumb]:size-[11px] [&::-moz-range-thumb]:appearance-none [&::-moz-range-thumb]:rounded-full [&::-moz-range-thumb]:border-0 [&::-moz-range-thumb]:bg-foreground [&::-moz-range-thumb]:shadow-[0_0_0_2px_var(--color-primary)] [&::-moz-range-track]:h-1 [&::-moz-range-track]:bg-transparent [&::-webkit-slider-runnable-track]:h-1 [&::-webkit-slider-runnable-track]:bg-transparent [&::-webkit-slider-thumb]:mt-[-3.5px] [&::-webkit-slider-thumb]:size-[11px] [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-foreground [&::-webkit-slider-thumb]:shadow-[0_0_0_2px_var(--color-primary)] [&::-webkit-slider-thumb]:[-webkit-appearance:none]"
 						min="0"
 						max={total || 1}
 						step="any"
