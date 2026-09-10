@@ -786,8 +786,10 @@ async def test_merge_takes_each_source_s_newest_re_transcription(tmp_path: Path)
             # The merged rows are the merged session's own live text: a
             # `reprocess:<job id>` tag carried over would name a job belonging
             # to another session, and the merged session's default view would
-            # then be empty.
-            assert all(e["source"] == "a" or e["source"] == "b" for e in rows)
+            # then be empty. Each is stamped with the provider that produced
+            # it: the job's for a's re-transcription, and b's own id for a
+            # capture with no provider recorded.
+            assert [e["source"] for e in rows] == ["p", "b"]
 
             # A merge never has a stop button pressed, so nothing else was
             # going to fill ended_at in and the header showed a start time and
@@ -797,6 +799,63 @@ async def test_merge_takes_each_source_s_newest_re_transcription(tmp_path: Path)
             # And the row says what it was made from, which is the only thing
             # that tells it apart from its oldest source in the history list.
             assert merged["merged_from"] == ["a", "b"]
+
+
+async def test_merge_stamps_each_part_with_the_provider_that_produced_it(tmp_path: Path) -> None:
+    """A merged row's source is a provider id, and it has to be the right one.
+
+    Every part was stamped with its session's primary provider whatever text
+    it contributed, so a session captured with A and re-transcribed with B
+    landed in the merge saying A had heard words it never did. The stamp is
+    the re-transcription job's provider when that is the text taken, and the
+    capture's when it is not.
+    """
+    settings = Settings(data_dir=tmp_path / "d", auth_password="", jwt_secret="t")
+    app = create_app(settings)
+    async with LifespanManager(app):
+        ctx = app.state.ctx  # pyright: ignore[reportAny]
+        for sid, started in (("a", 100.0), ("b", 200.0), ("c", 300.0)):
+            await ctx.sessions.create(
+                Session(
+                    id=sid,
+                    status=SessionStatus.COMPLETED,
+                    started_at=started,
+                    primary_provider="live",
+                )
+            )
+        # a and c were re-transcribed with a better provider; b never was.
+        await _row(ctx, "a", "live", "a original", 5.0)
+        await _row(ctx, "a", f"{REPROCESS_SOURCE_PREFIX}job-a", "a better", 5.0)
+        await _row(ctx, "b", "live", "b original", 3.0)
+        await _row(ctx, "c", "live", "c original", 4.0)
+        await _row(ctx, "c", f"{REPROCESS_SOURCE_PREFIX}job-c", "c better", 4.0)
+        for sid, job_id in (("a", "job-a"), ("c", "job-c")):
+            await ctx.reprocess_jobs.create(
+                ReprocessJob(
+                    id=job_id,
+                    session_id=sid,
+                    provider_id="better",
+                    model="nova-9000",
+                    status=JobStatus.DONE,
+                    created_at=10.0,
+                )
+            )
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            merged = (await client.post("/api/session/merge", json={"ids": ["c", "a", "b"]})).json()
+            detail = (await client.get(f"/api/session/{merged['id']}")).json()
+            rows = sorted(detail["transcript"], key=lambda e: e["start_ts"])  # pyright: ignore[reportAny]
+
+            assert [(e["text"], e["source"]) for e in rows] == [
+                ("a better", "better"),
+                ("b original", "live"),
+                ("c better", "better"),
+            ]
+            # Two parts stamped with the same provider both land. The stamp is
+            # part of the transcript's (session, source, turn) upsert key, and
+            # the turn id the merge drops is what keeps settled copies from
+            # colliding on it.
+            assert len(rows) == 3
 
 
 async def test_merge_ends_where_the_merged_audio_does(tmp_path: Path) -> None:
