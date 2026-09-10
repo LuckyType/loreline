@@ -2,7 +2,7 @@
 import '../app.css'
 import { Menu, PanelLeft, X } from '@lucide/svelte'
 import type { Snippet } from 'svelte'
-import { onDestroy, onMount } from 'svelte'
+import { onMount, untrack } from 'svelte'
 import { goto } from '$app/navigation'
 import { page } from '$app/state'
 import { ApiError, api } from '$lib/api'
@@ -16,8 +16,6 @@ import { authed, health, logsWs, transcriptWs } from '$lib/stores'
 import type { ConnectionStatus } from '$lib/ws'
 
 let { children }: { children: Snippet } = $props()
-
-let timer: ReturnType<typeof setInterval> | null = null
 
 // Sidebar fold state, kept across visits (best effort - private windows etc.).
 const NAV_KEY = 'loreline.nav-collapsed'
@@ -59,30 +57,52 @@ function closeMobileNav() {
 // unreachable on its likeliest client. The dot is therefore a disclosure
 // button that toggles the panel, dismissed with Escape or a tap outside, and
 // the hover behaviour stays for pointers that have one.
+//
+// That hover is also why closing needs a second flag. The panel used to stay
+// hover-visible after Escape for as long as the pointer sat on it, so Escape
+// did nothing on the very device with a keyboard. `healthDismissed` mutes the
+// hover classes from the moment the panel is dismissed until the pointer next
+// enters the dot, which is the earliest a hover could mean "show me again"
+// rather than "I never moved". The dot is the only way in: a dismissed panel
+// is display none, so there is nothing else in the group to enter. Resetting
+// on enter rather than on leave also keeps a mouse's hover working after an
+// outside click, when the pointer was never inside to begin with.
 let healthOpen = $state(false)
+let healthDismissed = $state(false)
 let healthEl: HTMLDivElement | undefined = $state()
 
 function toggleHealth() {
 	healthOpen = !healthOpen
+	// Closing by a second press must actually close: a phone's emulated hover
+	// sticks to the dot after a tap, and a mouse is still on it by definition.
+	healthDismissed = !healthOpen
 	// Opening refetches, which is what clicking the dot always did. While the
 	// panel is open the 5s poll keeps it current on its own, so there is
 	// nothing left for a second press to refresh.
 	if (healthOpen) void poll()
 }
 
+function dismissHealth() {
+	healthOpen = false
+	healthDismissed = true
+}
+
 function handleWindowKeydown(e: KeyboardEvent) {
 	if (e.key !== 'Escape') return
 	if (mobileNavOpen) closeMobileNav()
-	if (healthOpen) healthOpen = false
+	dismissHealth()
 }
 
 /** Dismiss on a click anywhere but the popover itself, the same way Dropdown
  *  closes its list. The dot lives inside healthEl, so its own click is left
  *  for the toggle above rather than being closed out from under it. */
 function handleDocumentClick(e: MouseEvent) {
-	if (!healthOpen) return
 	if (healthEl?.contains(e.target as Node)) return
-	healthOpen = false
+	dismissHealth()
+}
+
+function handleHealthPointerEnter() {
+	healthDismissed = false
 }
 
 const nav = [
@@ -118,20 +138,34 @@ async function logout() {
 	goto('/login')
 }
 
-let magicCleanup: (() => void) | null = null
+// The health poll only runs while there is a session to poll with. On /login
+// every tick would be a guaranteed 401, and once a 401 has flipped `authed`
+// the same is true anywhere else, so the interval stops there and starts
+// again when the login form flips it back. `authed` begins true so that a
+// deep link's first health call is what decides whether the visitor is signed
+// in, rather than this component assuming either way.
+//
+// Capabilities are served without a session and fetched once per page load,
+// but nothing on the login form reads them, so they wait for the shell too.
+const shouldPoll = $derived($authed && page.url.pathname !== '/login')
 
-onMount(() => {
-	poll()
-	timer = setInterval(poll, 5000)
+function startPolling(): () => void {
+	void poll()
+	const timer = setInterval(poll, 5000)
 	// One fetch per page load, shared by every picker. It fails soft: the
 	// pickers stay populated and the banner below says the gating is off.
-	loadCapabilities()
-	magicCleanup = initMagicBento()
+	void loadCapabilities()
+	return () => clearInterval(timer)
+}
+
+$effect(() => {
+	if (!shouldPoll) return
+	// Untracked so that the state these touch (the capability store, the
+	// health store) cannot restart the interval from inside its own tick.
+	return untrack(startPolling)
 })
-onDestroy(() => {
-	if (timer) clearInterval(timer)
-	magicCleanup?.()
-})
+
+onMount(() => initMagicBento())
 
 const healthColor = $derived(
 	$health == null ? 'bg-amber-500' : $health.status === 'ok' ? 'bg-emerald-500' : 'bg-red-500',
@@ -211,10 +245,13 @@ function wsLabel(status: ConnectionStatus, liveWord: string): string {
 			{/if}
 			<div class="flex-1"></div>
 			<div class="group/health relative flex items-center" bind:this={healthEl}>
+				<!-- 28px of dot and padding is enough for a mouse; a thumb gets a 40px
+				     square around the same dot. -->
 				<button
 					type="button"
-					class="flex items-center rounded-md p-2 hover:bg-accent"
+					class="flex items-center justify-center rounded-md p-2 hover:bg-accent pointer-coarse:min-h-10 pointer-coarse:min-w-10"
 					onclick={toggleHealth}
+					onpointerenter={handleHealthPointerEnter}
 					title="Service health - show details and refresh"
 					aria-label="Service health - show details and refresh"
 					aria-expanded={healthOpen}
@@ -224,9 +261,13 @@ function wsLabel(status: ConnectionStatus, liveWord: string): string {
 				</button>
 				<div
 					id="health-details"
-					class="absolute top-full right-0 z-30 mt-1.5 w-60 rounded-lg border bg-popover p-3 text-sm shadow-lg {healthOpen
-						? 'visible block'
-						: 'invisible hidden group-hover/health:visible group-hover/health:block'}"
+					class={[
+						'absolute top-full right-0 z-30 mt-1.5 w-60 rounded-lg border bg-popover p-3 text-sm shadow-lg',
+						healthOpen ? 'visible block' : 'invisible hidden',
+						!healthOpen &&
+							!healthDismissed &&
+							'group-hover/health:visible group-hover/health:block',
+					]}
 				>
 					<div class="mt-0 mb-1 text-xs font-medium tracking-wider text-muted-foreground uppercase">
 						Client
