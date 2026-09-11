@@ -9,6 +9,7 @@ from fastapi.exceptions import HTTPException
 from pydantic import BaseModel
 from starlette.status import HTTP_404_NOT_FOUND, HTTP_502_BAD_GATEWAY
 
+from loreline.capability_config import Transport
 from loreline.health import HealthReport, HealthStatus
 from loreline.health_probe import probe_provider
 from loreline.models import Interaction, ModelInfo, ProviderConfig, ProviderKind
@@ -46,10 +47,20 @@ class TestResult(BaseModel):
     switches on ``status`` and shows ``detail`` as the badge's tooltip, so the
     vendor's own "API key not valid" reaches the GM instead of the word "down".
     See :mod:`loreline.health`.
+
+    ``interaction`` and ``transport`` say which surface was asked. One probe
+    per row (ADR 0004) grades a kind that summarizes on its chat surface, so
+    without them a "healthy" Gemini row read as "can transcribe" when only
+    the summarize surface had answered; the page prints them beside the
+    verdict. Both null when nothing was probed (a missing key, a kind with no
+    surface), and ``transport`` only set for a transcription surface, where
+    realtime and batch are different endpoints.
     """
 
     status: HealthStatus
     detail: str | None = None
+    interaction: Interaction | None = None
+    transport: Transport | None = None
 
 
 class ProviderModelsRequest(BaseModel):
@@ -158,7 +169,12 @@ async def test_provider(request: Request, provider_id: str) -> TestResult:
 
 
 def _result(report: HealthReport) -> TestResult:
-    return TestResult(status=report.status, detail=report.detail)
+    return TestResult(
+        status=report.status,
+        detail=report.detail,
+        interaction=report.interaction,
+        transport=report.transport,
+    )
 
 
 @router.post("/models")

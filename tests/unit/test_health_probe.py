@@ -321,6 +321,49 @@ async def test_gemini_live_carries_the_key_in_the_query_and_a_quiet_session_is_h
     assert "Authorization" not in handshakes[0].headers
 
 
+# --- the report says which surface it is about --------------------------------
+
+
+async def test_the_report_names_the_chat_surface_it_graded() -> None:
+    """A summarizing kind is graded on its chat surface, so its "healthy" is
+    about summaries. The report says so, which is what lets the badge read
+    "healthy, summarize surface" instead of letting the word stand for every
+    interaction the row serves. No transport: a chat surface has one."""
+    seen = _Seen()
+    report = await probe_provider(_row(ProviderKind.OPENAI), "k", http_transport=seen.transport)
+
+    assert report.status is HealthStatus.HEALTHY
+    assert report.interaction is Interaction.SUMMARIZE
+    assert report.transport is None
+
+
+async def test_the_report_names_the_socket_it_opened() -> None:
+    """A streaming kind is asked on its realtime transcription surface, and a
+    transcription surface is only ever asked over an explicit transport, so
+    the transport is part of the answer."""
+    async with serve(deepgram_handler, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        report = await probe_provider(
+            _row(ProviderKind.DEEPGRAM, f"ws://127.0.0.1:{port}"), "secret"
+        )
+
+    assert report.status is HealthStatus.HEALTHY
+    assert report.interaction is Interaction.TRANSCRIBE
+    assert report.transport == "realtime"
+
+
+async def test_a_verdict_reached_without_a_probe_names_no_surface() -> None:
+    """Nothing was asked, so there is nothing to caption: a keyless cloud row
+    and a self-hosted row with nowhere to point both leave it unset."""
+    keyless = await probe_provider(_row(ProviderKind.GEMINI), None)
+    assert keyless.status is HealthStatus.UNAUTHORIZED
+    assert (keyless.interaction, keyless.transport) == (None, None)
+
+    unplaced = await probe_provider(_row(ProviderKind.OPENAI_COMPAT), "k")
+    assert unplaced.status is HealthStatus.UNKNOWN
+    assert (unplaced.interaction, unplaced.transport) == (None, None)
+
+
 # --- the surfaces the per-kind choice does not ask, declared truthfully -----
 
 

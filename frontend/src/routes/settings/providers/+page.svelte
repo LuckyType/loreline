@@ -70,6 +70,7 @@ import type {
 	ProviderConfig,
 	ProviderCreate,
 	ProviderKind,
+	ProviderTestResult,
 } from '$lib/wire'
 
 /**
@@ -169,9 +170,15 @@ let message = $state('')
  * off the wire, so the page never re-derives a verdict the backend already
  * graded. `detail` is the vendor's own message ("API key not valid.") and is
  * shown as the badge's tooltip: it is what turns "something is wrong" into
- * "fix this field".
+ * "fix this field". `interaction` and `transport` are the surface the probe
+ * asked, also straight off the wire: see `caption`.
  */
-type TestState = { status: HealthStatus | 'testing'; detail?: string | null }
+type TestState = {
+	status: HealthStatus | 'testing'
+	detail?: string | null
+	interaction?: ProviderTestResult['interaction']
+	transport?: ProviderTestResult['transport']
+}
 
 let testResults = $state<Record<string, TestState>>({})
 
@@ -192,6 +199,26 @@ const TEST_BADGE: Record<
 	unauthorized: { label: 'auth failed', variant: 'destructive', dot: 'bg-red-500' },
 	unreachable: { label: 'unreachable', variant: 'destructive', dot: 'bg-red-500' },
 	unknown: { label: 'unknown', variant: 'outline', dot: 'bg-muted-foreground' },
+}
+
+/**
+ * What a row's badge says, and the tooltip behind it.
+ *
+ * One probe per row (ADR 0004) grades a kind that summarizes on its chat
+ * surface, so "healthy" on a Gemini row is about summaries and says nothing
+ * about transcription. The verdict alone used to be the whole label, and read
+ * as "can transcribe"; the surface is part of the sentence now, and the
+ * tooltip keeps the vendor's own words after it. A verdict reached without a
+ * probe (no key stored, no surface declared) names none.
+ */
+function caption(result: TestState): { label: string; title: string | undefined } {
+	const verdict = TEST_BADGE[result.status].label
+	const surface = result.interaction
+		? `${result.interaction} surface${result.transport ? `, ${result.transport}` : ''}`
+		: ''
+	const label = surface ? `${verdict}, ${surface}` : verdict
+	const title = [surface ? label : '', result.detail ?? ''].filter(Boolean).join(': ') || undefined
+	return { label, title }
 }
 let form = $state<Complete<ProviderCreate>>(blank())
 let availableModels = $state<ModelInfo[]>([])
@@ -578,7 +605,7 @@ async function testOne(id: string) {
 	testResults = { ...testResults, [id]: { status: 'testing' } }
 	try {
 		const r = await api.testProvider(id)
-		testResults = { ...testResults, [id]: { status: r.status, detail: r.detail } }
+		testResults = { ...testResults, [id]: r }
 	} catch (e) {
 		// Our own API did not answer, which says nothing about the provider.
 		// Reporting it as unreachable would blame the wrong endpoint.
@@ -686,10 +713,12 @@ onMount(load)
 							{@const result = testResults[p.id]}
 							{#if result}
 								{@const badge = TEST_BADGE[result.status]}
-								<!-- The tooltip carries the vendor's own message, which is the
+								{@const said = caption(result)}
+								<!-- The label names the surface the verdict is about, and the
+								     tooltip carries the vendor's own message after it: the
 								     difference between "unauthorized" and "API key not valid." -->
-								<Badge variant={badge.variant} class="gap-1.5" title={result.detail ?? undefined}
-									><span class="size-2 rounded-full {badge.dot}"></span>{badge.label}</Badge
+								<Badge variant={badge.variant} class="gap-1.5" title={said.title}
+									><span class="size-2 rounded-full {badge.dot}"></span>{said.label}</Badge
 								>
 							{:else}
 								<Badge variant="outline" class="gap-1.5" title="never tested"

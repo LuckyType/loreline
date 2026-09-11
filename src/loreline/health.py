@@ -44,8 +44,9 @@ import httpx
 from websockets.exceptions import InvalidStatus
 
 from loreline.capabilities import requires_api_key
+from loreline.capability_config import Transport
 from loreline.logging import get_logger
-from loreline.models import ProviderKind
+from loreline.models import Interaction, ProviderKind
 
 log = get_logger(__name__)
 
@@ -129,10 +130,20 @@ class HealthReport:
     ``detail`` is what makes ``UNAUTHORIZED`` actionable rather than merely red:
     "API key not valid. Please pass a valid API key." tells a GM what to do,
     and the old boolean threw it away.
+
+    ``interaction`` and ``transport`` name the surface the verdict is about,
+    when one was asked. One probe per row (ADR 0004) grades a kind that
+    summarizes on its chat surface, so "healthy" there says the key works for
+    summaries and nothing about transcription; without the surface on the
+    report the badge read as "can transcribe". Left unset by the graders,
+    which see one answer and not the question, and by a verdict reached
+    without a probe (a missing key, a kind with no surface to ask).
     """
 
     status: HealthStatus
     detail: str | None = None
+    interaction: Interaction | None = None
+    transport: Transport | None = None
 
 
 def missing_credential(kind: ProviderKind, api_key: str | None) -> HealthReport | None:

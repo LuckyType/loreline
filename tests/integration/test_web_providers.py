@@ -282,6 +282,8 @@ async def test_test_route_reports_a_missing_key_without_calling_out(
     assert resp.json() == {
         "status": "unauthorized",
         "detail": "no API key stored for this provider",
+        "interaction": None,
+        "transport": None,
     }
 
 
@@ -305,8 +307,39 @@ async def test_test_route_hands_the_row_and_its_key_to_the_probe_and_renders_the
     resp = await client.post(f"/api/providers/{pid}/test")
 
     assert resp.status_code == 200
-    assert resp.json() == {"status": "unauthorized", "detail": "API key not valid."}
+    assert resp.json() == {
+        "status": "unauthorized",
+        "detail": "API key not valid.",
+        "interaction": None,
+        "transport": None,
+    }
     assert seen == [(ProviderKind.GEMINI, "bad")]
+
+
+async def test_test_route_says_which_surface_the_verdict_is_about(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One probe per row (ADR 0004) grades a summarizing kind on its chat
+    surface, so a "healthy" Gemini row says nothing about transcription. The
+    surface rides along untouched, which is what lets the page print "healthy,
+    summarize surface" rather than let the word stand for the whole row."""
+
+    async def fake_probe(config: ProviderConfig, api_key: str | None) -> HealthReport:
+        return HealthReport(HealthStatus.HEALTHY, interaction=Interaction.SUMMARIZE)
+
+    monkeypatch.setattr("loreline.web.routes.providers.probe_provider", fake_probe)
+    body = {"name": "Gemini", "kind": "gemini", "api_key": "good"}
+    pid = (await client.post("/api/providers", json=body)).json()["id"]
+
+    resp = await client.post(f"/api/providers/{pid}/test")
+
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "status": "healthy",
+        "detail": None,
+        "interaction": "summarize",
+        "transport": None,
+    }
 
 
 async def test_test_route_404s_only_for_a_missing_provider(client: AsyncClient) -> None:
