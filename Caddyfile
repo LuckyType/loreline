@@ -22,6 +22,15 @@
 # (set in docker-compose.yml), because its port is published on the host too.
 # Keep this proxy in front of the app if you want Secure cookies.
 #
+# What `tls internal` cannot do is let a browser record. `getUserMedia` needs a
+# secure context, and a certificate from Caddy's own CA is not one until that CA
+# has been installed by hand on every phone and laptop at the table - which is
+# precisely the device that was supposed to be able to just record. For a
+# trusted certificate on a name every device already believes, see the README
+# section "Recording from a laptop": `tailscale serve` sits in front of the
+# app's published port and this file stays exactly as it is, still serving the
+# LAN addresses it always did.
+#
 # `tls internal` needs a hostname to mint a certificate for. There isn't a
 # fixed one here - this box is reached by whatever LAN IP it happens to have
 # - so `on_demand` tells Caddy to issue a cert for whatever name/IP a client

@@ -27,10 +27,13 @@ side, Svelte 5 and Tailwind 4 in the browser, SQLite for storage.
 
 ## What it does
 
-**Capture.** Continuous recording. Silero VAD cuts it into utterances for
-re-processing and for any model that does not stream; a model that streams
-gets the raw feed directly and decides its own turns, with interim text as it
-goes.
+**Capture.** Continuous recording, from a microphone on the server or from the
+browser you started the session in, which is the same session either way. Silero
+VAD cuts it into utterances for re-processing and for any model that does not
+stream; a model that streams gets the raw feed directly and decides its own
+turns, with interim text as it goes. Recording from a browser needs HTTPS and
+keeps the tab tied to the session, both of which are covered in
+[Recording from a laptop](#recording-from-a-laptop).
 
 **Transcription.** Deepgram, AssemblyAI, Gemini, OpenAI and any
 OpenAI-compatible endpoint you host yourself, such as Speaches or whisper.cpp.
@@ -398,6 +401,98 @@ None of the registry paths work until that workflow has actually run on GitHub
 and the package it publishes has been switched to public. A GHCR package is
 private on first publish, and a private one needs `docker login ghcr.io` before
 any of these pulls succeed.
+
+### Recording from a laptop
+
+The box running Loreline does not have to be the box that hears the table. Pick
+"This device's microphone" in the capture card and the browser records: the
+audio is streamed to the server frame by frame and the session runs exactly as
+a session from a local microphone does, with the same live transcript, the same
+VAD, the same stored WAV and the same re-processing afterwards. A server with no
+sound card, no `/dev/snd` passthrough and no Bluetooth setup can then record a
+whole evening off the laptop that is already open on the table. See
+[`docs/adr/0010`](./docs/adr/0010-the-client-can-be-the-microphone.md).
+
+The trade is worth knowing before the evening starts: **that tab has to stay
+open and that machine has to stay awake for the whole session.** Loreline takes
+a screen wake lock while it records and says on the card whether the browser
+granted it, but a closed lid, a killed tab or a browser that sleeps the page
+ends the recording about 45 seconds later. Everything captured up to that point
+is a complete, re-transcribable WAV. A short disconnect is survivable: the tab
+reconnects by itself, the gap is filled with silence so the recording stays
+aligned, and the log records when audio stopped and resumed.
+
+#### The prerequisite: a trusted certificate
+
+Browsers hand out the microphone only in a **secure context**, which means
+HTTPS or `localhost`. On `http://<lan-ip>/` every browser refuses, and nothing
+in the app can change that; the capture card says so in as many words rather
+than showing a picker that cannot work. The bundled Caddy's `tls internal`
+certificate is not enough either, because it is trusted only on devices where
+you have installed Caddy's local CA by hand.
+
+Tailscale is the way in with the least to install: the box gets a real,
+publicly trusted certificate on its `*.ts.net` name, nothing has to be trusted
+by hand on the laptop or the phone, and it keeps working from outside the
+house.
+
+**Do this first, or nothing else here works.** In the Tailscale admin console,
+under DNS, enable **MagicDNS** and then **HTTPS Certificates**. Both, in that
+order. Without them no certificate is ever issued, and the failure is opaque:
+`tailscale serve` reports nothing useful and the browser simply refuses the
+microphone as before.
+
+Then, on the box, with Tailscale installed and logged in:
+
+```bash
+tailscale status --json | grep -i certdomains   # the *.ts.net name to use
+sudo tailscale serve --bg --https=443 http://127.0.0.1:8000
+tailscale serve status
+```
+
+That proxies `https://<box>.<tailnet>.ts.net/` to the app's published port. The
+certificate is `tailscaled`'s own and renews itself. `sudo tailscale serve
+--https=443 off` undoes it.
+
+Open that HTTPS name on the laptop, allow the microphone once, and
+"This device's microphone" becomes selectable.
+
+If you would rather Caddy held the certificate, it can: mount
+`/var/run/tailscale/tailscaled.sock` into the `caddy` service and use a Caddy
+build with Tailscale certificate support (`tls { get_certificate tailscale }`).
+The official `caddy:2-alpine` image does not include it, so that route means
+building your own image for the same result, which is why `tailscale serve` is
+the one documented here.
+
+#### One setting that fails silently
+
+The app marks the login cookie `Secure` based on the browser's own connection,
+and it believes a proxy's `X-Forwarded-Proto` only from a peer listed in
+`LORELINE_TRUSTED_PROXIES`. With Tailscale terminating TLS in front, the app
+sees a plain HTTP connection from the proxy, so if that proxy's address is not
+trusted, a genuinely HTTPS session gets a cookie that is not marked `Secure`,
+and nothing anywhere reports it.
+
+- **Docker Compose:** already correct. `docker-compose.yml` sets
+  `LORELINE_TRUSTED_PROXIES: 172.16.0.0/12`, and `tailscale serve` is a host
+  process reaching the published port, so it arrives from the compose bridge
+  gateway inside that range. If you have moved Compose onto a custom address
+  pool, add that pool.
+- **Source and systemd:** set `LORELINE_TRUSTED_PROXIES=127.0.0.1/32,::1/128`
+  in `.env` and restart. `tailscaled` connects over the loopback; a LAN client
+  arrives from a LAN address and so cannot claim to be it.
+
+The same list governs the only other header the app reads about a client,
+`X-Forwarded-For`, which decides who the login backoff counts against. Behind a
+proxy without it, five wrong passwords from one machine lock out everyone;
+with it, the backoff is per client again.
+
+#### Plain HTTP is unaffected
+
+TLS is a requirement for this one feature, not for Loreline. `http://<lan-ip>/`
+and `http://<lan-ip>:8000` keep working exactly as before, including the
+server's own microphone, and nothing else on any page changes. If you have no
+use for recording from a browser, none of this section applies to you.
 
 ### Source and systemd
 

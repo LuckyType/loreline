@@ -86,6 +86,14 @@ services:
       # published above, which therefore cannot claim its plain-HTTP connection
       # was TLS. Drop this line if you drop the caddy service: with it unset the
       # app trusts no forwarded header and reads the scheme off the connection.
+      #
+      # It also covers `tailscale serve` on the host, which is how this stack
+      # gets a trusted certificate and therefore how a browser can be the
+      # microphone (README, "Recording from a laptop"). That proxy is a host
+      # process reaching the published port above, so it arrives from the
+      # compose bridge gateway, which is inside this range - if you have moved
+      # Compose onto a custom address pool, add that pool here or an HTTPS
+      # session's login cookie silently loses its Secure flag.
       LORELINE_TRUSTED_PROXIES: 172.16.0.0/12
     volumes:
       - ./data:/app/data
