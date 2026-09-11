@@ -43,10 +43,37 @@ function when(ts: number): string {
 	return new Date(ts * 1000).toLocaleString()
 }
 
-/** "a and b" for two names, "a, b, and c" for more. */
+/** "a" for one name, "a and b" for two, "a, b, and c" for more. */
 function joinNames(names: string[]): string {
+	if (names.length === 1) return `${names[0]}`
 	if (names.length === 2) return `${names[0]} and ${names[1]}`
 	return `${names.slice(0, -1).join(', ')}, and ${names[names.length - 1]}`
+}
+
+/** "1 video", "3 videos". */
+function plural(n: number, one: string, many: string): string {
+	return `${n} ${n === 1 ? one : many}`
+}
+
+/** What deleting these sessions takes with them, as the sentence the confirm says.
+ *
+ * The number of sessions alone undersold it. The audio was named and the rest
+ * was not, and the rest is what cost something: a summary is a model run the
+ * GM paid for, a video is minutes of somebody's GPU, and neither shows in this
+ * table. Summaries are on the rows already; videos are counted from their own
+ * rows because a session row does not carry the number. */
+async function deleteDescription(ids: string[]): Promise<string> {
+	const chosen = sessions.filter((s) => ids.includes(s.id))
+	const summaries = chosen.filter((s) => s.summary).length
+	const videos = (await Promise.all(ids.map((id) => api.listVideoJobs(id)))).reduce(
+		(n, jobs) => n + jobs.length,
+		0,
+	)
+	const one = ids.length === 1
+	const goes = [one ? 'its audio' : 'their audio']
+	if (summaries) goes.push(one ? 'its summary' : plural(summaries, 'summary', 'summaries'))
+	if (videos) goes.push(plural(videos, 'video', 'videos'))
+	return `Delete ${plural(ids.length, 'session', 'sessions')}? This also removes ${joinNames(goes)}.`
 }
 
 async function reload() {
@@ -73,14 +100,17 @@ function toggleAll() {
 
 async function deleteSelected() {
 	if (selectedIds.length === 0) return
-	const ok = await confirm({
-		description: `Delete ${selectedIds.length} session(s)? This also removes their audio.`,
-		destructive: true,
-	})
-	if (!ok) return
 	busy = true
 	error = ''
 	try {
+		// Counting what goes is a round trip, so it sits inside the same
+		// try: a backend that cannot list videos cannot delete sessions either,
+		// and the error line is where that belongs.
+		const ok = await confirm({
+			description: await deleteDescription(selectedIds),
+			destructive: true,
+		})
+		if (!ok) return
 		await api.deleteSessions(selectedIds)
 		await reload()
 	} catch (err) {

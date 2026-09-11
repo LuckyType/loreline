@@ -8,6 +8,7 @@ minutes-long asynchronous flow in milliseconds.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -692,6 +693,33 @@ class TestJobManager:
         assert stored.error == "content policy"
         assert stored.video_path is None
 
+    async def test_deleting_a_running_job_stops_its_generation(
+        self, video_repos: Repos, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A row deleted mid-generation takes the generation with it. Left to
+        run, the poll loop would finish by writing a file that nothing names."""
+        self._instant_polling(monkeypatch)
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            path = request.url.path
+            if path.endswith("/videos"):
+                return httpx.Response(200, json={"id": "gen_3", "status": "pending"})
+            if path.endswith("/content"):
+                return httpx.Response(200, content=b"\x00\x00\x00 ftypmp42")
+            return httpx.Response(200, json={"id": "gen_3", "status": "in_progress"})
+
+        manager = self._manager(tmp_path, httpx.MockTransport(handle), repos=video_repos)
+        job = await manager.enqueue(
+            VideoGenerateRequest(session_id="s1", provider_id="v1", model="m", prompt="p")
+        )
+        await asyncio.sleep(0)  # let the runner submit and start polling
+
+        await manager.delete(job.id)
+
+        assert await video_repos.videos.get(job.id) is None
+        assert not VideoStore(tmp_path / "video").exists(job.id)
+        await manager.wait(job.id)  # nothing is left running under that id
+
     async def test_remote_id_is_persisted_before_polling_begins(
         self, video_repos: Repos, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -953,6 +981,35 @@ class TestVideoRoutes:
         assert (await client.delete(f"/api/video/{job['id']}")).status_code == 200
         assert not state.video_store.exists(job["id"])
         assert (await client.get(f"/api/video/{job['id']}")).status_code == 404
+
+    async def test_deleting_the_session_removes_its_videos(self, client: AsyncClient) -> None:
+        """A session's generated videos go with it.
+
+        The job rows already did (the table cascades on the session row) and
+        the files did not: every deleted session left its ``.mp4`` files on
+        disk with nothing that named them, which is the one kind of storage
+        nothing will ever prune.
+        """
+        session_id, provider_id = await self._setup(client)
+        job = (
+            await client.post(
+                "/api/video",
+                json={
+                    "session_id": session_id,
+                    "provider_id": provider_id,
+                    "model": "m",
+                    "prompt": "p",
+                },
+            )
+        ).json()
+        state = _ctx(client)
+        await state.video.wait(job["id"])
+        assert state.video_store.exists(job["id"])
+
+        deleted = await client.post("/api/session/delete", json={"ids": [session_id]})
+        assert deleted.status_code == 200
+        assert not state.video_store.exists(job["id"])
+        assert await state.video_jobs.get(job["id"]) is None
 
 
 class TestInteractionScoping:

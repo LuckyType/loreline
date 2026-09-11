@@ -786,8 +786,10 @@ async def test_merge_takes_each_source_s_newest_re_transcription(tmp_path: Path)
             # The merged rows are the merged session's own live text: a
             # `reprocess:<job id>` tag carried over would name a job belonging
             # to another session, and the merged session's default view would
-            # then be empty.
-            assert all(e["source"] == "a" or e["source"] == "b" for e in rows)
+            # then be empty. Each is stamped with the provider that produced
+            # it: the job's for a's re-transcription, and b's own id for a
+            # capture with no provider recorded.
+            assert [e["source"] for e in rows] == ["p", "b"]
 
             # A merge never has a stop button pressed, so nothing else was
             # going to fill ended_at in and the header showed a start time and
@@ -797,6 +799,123 @@ async def test_merge_takes_each_source_s_newest_re_transcription(tmp_path: Path)
             # And the row says what it was made from, which is the only thing
             # that tells it apart from its oldest source in the history list.
             assert merged["merged_from"] == ["a", "b"]
+
+
+async def test_merge_stamps_each_part_with_the_provider_that_produced_it(tmp_path: Path) -> None:
+    """A merged row's source is a provider id, and it has to be the right one.
+
+    Every part was stamped with its session's primary provider whatever text
+    it contributed, so a session captured with A and re-transcribed with B
+    landed in the merge saying A had heard words it never did. The stamp is
+    the re-transcription job's provider when that is the text taken, and the
+    capture's when it is not.
+    """
+    settings = Settings(data_dir=tmp_path / "d", auth_password="", jwt_secret="t")
+    app = create_app(settings)
+    async with LifespanManager(app):
+        ctx = app.state.ctx  # pyright: ignore[reportAny]
+        for sid, started in (("a", 100.0), ("b", 200.0), ("c", 300.0)):
+            await ctx.sessions.create(
+                Session(
+                    id=sid,
+                    status=SessionStatus.COMPLETED,
+                    started_at=started,
+                    primary_provider="live",
+                )
+            )
+        # a and c were re-transcribed with a better provider; b never was.
+        await _row(ctx, "a", "live", "a original", 5.0)
+        await _row(ctx, "a", f"{REPROCESS_SOURCE_PREFIX}job-a", "a better", 5.0)
+        await _row(ctx, "b", "live", "b original", 3.0)
+        await _row(ctx, "c", "live", "c original", 4.0)
+        await _row(ctx, "c", f"{REPROCESS_SOURCE_PREFIX}job-c", "c better", 4.0)
+        for sid, job_id in (("a", "job-a"), ("c", "job-c")):
+            await ctx.reprocess_jobs.create(
+                ReprocessJob(
+                    id=job_id,
+                    session_id=sid,
+                    provider_id="better",
+                    model="nova-9000",
+                    status=JobStatus.DONE,
+                    created_at=10.0,
+                )
+            )
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            merged = (await client.post("/api/session/merge", json={"ids": ["c", "a", "b"]})).json()
+            detail = (await client.get(f"/api/session/{merged['id']}")).json()
+            rows = sorted(detail["transcript"], key=lambda e: e["start_ts"])  # pyright: ignore[reportAny]
+
+            assert [(e["text"], e["source"]) for e in rows] == [
+                ("a better", "better"),
+                ("b original", "live"),
+                ("c better", "better"),
+            ]
+            # Two parts stamped with the same provider both land. The stamp is
+            # part of the transcript's (session, source, turn) upsert key, and
+            # the turn id the merge drops is what keeps settled copies from
+            # colliding on it.
+            assert len(rows) == 3
+
+
+async def test_transcript_version_lookup_tells_a_typo_from_a_run_in_flight(tmp_path: Path) -> None:
+    """An unknown version is a 404; a queued re-transcription is an empty 200.
+
+    The transcript route answered every misspelt version id with an empty
+    list, which looks exactly like a version that captured nothing. The one
+    version that legitimately has no rows yet is a re-transcription still in
+    flight: the session page lists it and lets the GM select it the moment it
+    is queued, so that one has to stay readable, on export as well.
+    """
+    settings = Settings(data_dir=tmp_path / "d", auth_password="", jwt_secret="t")
+    app = create_app(settings)
+    async with LifespanManager(app):
+        ctx = app.state.ctx  # pyright: ignore[reportAny]
+        await ctx.sessions.create(Session(id="a", status=SessionStatus.COMPLETED, started_at=100.0))
+        await ctx.sessions.create(Session(id="b", status=SessionStatus.COMPLETED, started_at=200.0))
+        await _row(ctx, "a", "p", "a original", 5.0)
+        await ctx.reprocess_jobs.create(
+            ReprocessJob(
+                id="queued",
+                session_id="a",
+                provider_id="p",
+                status=JobStatus.QUEUED,
+                created_at=10.0,
+            )
+        )
+        # A diarize job relabels a version; it is not one.
+        await ctx.reprocess_jobs.create(
+            ReprocessJob(
+                id="relabel",
+                session_id="a",
+                provider_id="p",
+                operation="diarize",
+                status=JobStatus.QUEUED,
+                created_at=11.0,
+            )
+        )
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            missing = await client.get("/api/session/a/transcript", params={"version": "nope"})
+            assert missing.status_code == 404
+            assert "nope" in missing.json()["detail"]
+            relabel = await client.get("/api/session/a/transcript", params={"version": "relabel"})
+            assert relabel.status_code == 404
+
+            queued = await client.get("/api/session/a/transcript", params={"version": "queued"})
+            assert queued.status_code == 200
+            assert queued.json() == []
+            export = await client.get(
+                "/api/session/a/export", params={"fmt": "txt", "version": "queued"}
+            )
+            assert export.status_code == 200
+
+            # A job is a version of the session it belongs to and of no other.
+            other = await client.get("/api/session/b/transcript", params={"version": "queued"})
+            assert other.status_code == 404
+
+            # The original is always a version a session has, rows or none.
+            assert (await client.get("/api/session/b/transcript")).status_code == 200
 
 
 async def test_merge_ends_where_the_merged_audio_does(tmp_path: Path) -> None:

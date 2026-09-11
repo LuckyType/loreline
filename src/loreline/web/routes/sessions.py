@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import Sequence
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.exceptions import HTTPException
@@ -70,7 +70,32 @@ router = APIRouter(prefix="/api/session", tags=["sessions"], dependencies=[Depen
 _MERGE_MIN_SESSIONS = 2
 
 
-def _version_rows(events: Sequence[TranscriptEvent], version: str) -> list[TranscriptEvent]:
+async def _require_version(
+    state: AppState, session_id: str, events: Sequence[TranscriptEvent], version: str
+) -> None:
+    """Raise a 404 naming ``version`` unless it is a transcript this session has.
+
+    :func:`has_version` answers from the rows, and for a version that has run
+    the rows are the version. They are not the whole story for a
+    re-transcription still in flight: the session page lists it and lets the
+    GM select it the moment it is queued, and it has no rows until its first
+    utterance comes back. Guarding on the rows alone turned that selection
+    into a 404 for a version that exists. So a transcribe job row for this
+    session counts too; a job id from another session does not, any more
+    than a typo does.
+    """
+    if has_version(events, version):
+        return
+    job = await state.reprocess_jobs.get(version)
+    if job is not None and job.session_id == session_id and job.operation == "transcribe":
+        return
+    raise HTTPException(
+        status_code=HTTP_404_NOT_FOUND,
+        detail=f"unknown transcript version {version!r}",
+    )
+
+
+async def _version_rows(state: AppState, session_id: str, version: str) -> list[TranscriptEvent]:
     """One version's settled rows, or a 404 naming the version that was asked for.
 
     Every caller that turns a transcript into something a GM pays for or keeps
@@ -79,15 +104,19 @@ def _version_rows(events: Sequence[TranscriptEvent], version: str) -> list[Trans
     not exist would return a plausible file under the wrong name, which is
     exactly the failure this replaced (see :func:`export_session`).
     """
-    if not has_version(events, version):
-        raise HTTPException(
-            status_code=HTTP_404_NOT_FOUND,
-            detail=f"unknown transcript version {version!r}",
-        )
+    events = await state.transcripts.for_session(session_id)
+    await _require_version(state, session_id, events, version)
     return final_rows(variant_view(events, version))
 
 
-async def _best_available_rows(state: AppState, session_id: str) -> list[TranscriptEvent]:
+class _BestRows(NamedTuple):
+    """What one merge part contributes: its rows, and the provider that produced them."""
+
+    rows: list[TranscriptEvent]
+    provider_id: str
+
+
+async def _best_available_rows(state: AppState, session: Session) -> _BestRows:
     """A session's best text: its newest completed re-transcription, else the original.
 
     "Newest that produced segments" rather than "newest": a job can finish
@@ -101,15 +130,24 @@ async def _best_available_rows(state: AppState, session_id: str) -> list[Transcr
     caller gets when it did not choose a version, and a transcript that covers
     the first ten minutes of a four-hour session is not it. The GM can still
     name that version explicitly; what they cannot do is be handed it silently.
+
+    The provider comes back with the rows because the two are decided
+    together. A merged row is stamped with the provider that produced it (see
+    :func:`merge_sessions`), and for a re-transcription that is the job's
+    provider, not the session's: a session captured with A and re-transcribed
+    with B used to land in the merge stamped A, naming a provider that never
+    heard those words.
     """
-    events = await state.transcripts.for_session(session_id)
-    for job in await state.reprocess_jobs.for_session(session_id):  # newest first
+    events = await state.transcripts.for_session(session.id)
+    for job in await state.reprocess_jobs.for_session(session.id):  # newest first
         if job.operation != "transcribe" or job.status is not JobStatus.DONE:
             continue
         rows = final_rows(variant_view(events, job.id))
         if rows:
-            return rows
-    return final_rows(canonical_transcript(events))
+            return _BestRows(rows, job.provider_id)
+    return _BestRows(
+        final_rows(canonical_transcript(events)), session.primary_provider or session.id
+    )
 
 
 class SessionDetail(BaseModel):
@@ -187,7 +225,12 @@ async def get_transcript_version(
     state = get_state(request)
     if await state.sessions.get(session_id) is None:
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="session not found")
-    return variant_view(await state.transcripts.for_session(session_id), version)
+    events = await state.transcripts.for_session(session_id)
+    # A typo is a 404 here for the same reason it is on export: an empty
+    # transcript looks exactly like a version that captured nothing, and this
+    # route answered every misspelt version id with one.
+    await _require_version(state, session_id, events, version)
+    return variant_view(events, version)
 
 
 @router.delete("/{session_id}/transcript")
@@ -281,8 +324,7 @@ async def summarize_session(
             status_code=HTTP_400_BAD_REQUEST, detail="provider is not an LLM provider"
         )
     events = relabel_speakers(
-        _version_rows(await state.transcripts.for_session(session_id), version),
-        session.speaker_names,
+        await _version_rows(state, session_id, version), session.speaker_names
     )
     if not events:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="session has no transcript")
@@ -341,8 +383,7 @@ async def export_session(
     if session is None:
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="session not found")
     transcript = relabel_speakers(
-        _version_rows(await state.transcripts.for_session(session_id), version),
-        session.speaker_names,
+        await _version_rows(state, session_id, version), session.speaker_names
     )
     body = render(session, transcript)
     return Response(
@@ -370,7 +411,7 @@ async def download_session_audio(request: Request, session_id: str) -> FileRespo
 
 @router.post("/delete")
 async def delete_sessions(request: Request, body: SessionIds) -> OkResponse:
-    """Delete the given sessions, including their transcript and stored audio."""
+    """Delete the given sessions: transcript, stored audio, logs and generated videos."""
     state = get_state(request)
     active = state.manager.current_session_id()
     for session_id in body.ids:
@@ -379,6 +420,11 @@ async def delete_sessions(request: Request, body: SessionIds) -> OkResponse:
         await state.transcripts.delete_session(session_id)
         state.audio_store.delete(session_id)
         state.log_store.delete_session(session_id)  # every version's log file
+        # The video job rows would go with the session row anyway (the table
+        # cascades), and that was the problem: a cascade takes no file with
+        # it, so every generated .mp4 of a deleted session stayed on disk with
+        # nothing left that named it.
+        await state.video.delete_session(session_id)
         await state.sessions.delete(session_id)
     return OkResponse()
 
@@ -433,14 +479,14 @@ async def merge_sessions(request: Request, body: SessionIds) -> Session:
     # Blocking file I/O (copying whole session WAVs) off the event loop.
     durations = await asyncio.to_thread(_merge_audio)
 
-    parts = [await _best_available_rows(state, src.id) for src in sources]
+    parts = [await _best_available_rows(state, src) for src in sources]
     # How far each part advances the merged clock. With merged audio that is the
     # part's audio length, so the transcript stays aligned with the concatenated
     # WAV; without it, the part's own last word is all there is to go on.
     spans = (
         durations
         if durations is not None
-        else [max((e.end_ts for e in rows), default=0.0) for rows in parts]
+        else [max((e.end_ts for e in part.rows), default=0.0) for part in parts]
     )
 
     merged = Session(
@@ -467,24 +513,29 @@ async def merge_sessions(request: Request, body: SessionIds) -> Session:
 
     names: dict[str, str] = {}
     offset = 0.0
-    for src, rows, span in zip(sources, parts, spans, strict=True):
-        for event in rows:
+    for src, part, span in zip(sources, parts, spans, strict=True):
+        for event in part.rows:
             shifted = rebase_transcript(event, -offset)  # negative offset shifts forward
             # The turn id goes with the source session. It is a replace key for
             # a turn still being revised, and these are settled copies that
             # nothing will revise again; carrying it over would only let two
-            # merged sessions' turns collide on it.
+            # merged sessions' turns collide on it. Dropping it is also what
+            # keeps the (session, source, turn) upsert key out of the way:
+            # NULL turn ids never match, so two parts stamped with the same
+            # provider below append rather than overwrite each other.
             # The source tag goes too: a part's rows may come from a re-
             # transcription, and a `reprocess:<job id>` tag on the merged row
             # would name a job belonging to a different session - a version the
             # merged session does not have. They are the merged session's live
-            # text now, which is what an untagged row means.
+            # text now, which is what an untagged row means, and the provider
+            # they are stamped with is the one that produced them: the job's
+            # for a re-transcription, the capture's for an original.
             await state.transcripts.add(
                 shifted.model_copy(
                     update={
                         "session_id": merged_id,
                         "turn_id": None,
-                        "source": src.primary_provider or src.id,
+                        "source": part.provider_id,
                     }
                 )
             )

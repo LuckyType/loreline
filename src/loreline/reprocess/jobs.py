@@ -105,6 +105,20 @@ class JobNotCancellableError(ValueError):
     """Raised when cancelling a job that has already reached a terminal state."""
 
 
+class NothingTranscribedError(RuntimeError):
+    """Raised when a re-transcription ends with every utterance lost to failures.
+
+    Not for a recording that was silent: a vendor that heard nothing answers
+    with no event and no failure, and that run ends done with zero segments,
+    which is the truth. This is for the run where every request failed in a
+    way the router does not retire a provider for (a timeout, a 5xx, a rate
+    limit: see ``classify_request_error``), because the next utterance may
+    well get through. When none of them did, the job used to end "done" with
+    nothing in it, the same row a silent recording produces, and the version
+    table showed no sign that anything had gone wrong.
+    """
+
+
 def stored_audio_backend(
     config: ProviderConfig, secrets: SecretStore, model: str | None
 ) -> STTBackend:
@@ -726,10 +740,28 @@ class ReprocessManager:
         try:
             # Blocking file I/O (a whole session's utterances) off the event loop.
             utterances = await asyncio.to_thread(self._audio_store.read_utterances, job.session_id)
-            return await self._drive(router, bus, utterances, job, started_mono, cancel)
+            written = await self._drive(router, bus, utterances, job, started_mono, cancel)
         finally:
             await _aclose(backend)
             await _aclose(diarizer)
+        if router.dropped:
+            # Into the version's own log whether or not the run still counts
+            # as a success: a version missing a third of its recording says
+            # nothing about the gap on the session page, and "Show logs" is
+            # where a GM looks for it.
+            log.warning(
+                "reprocess.utterances.dropped",
+                dropped=router.dropped,
+                written=written,
+                error=router.last_failure,
+            )
+        # A run the GM stopped stays cancelled, whatever it lost before the
+        # press: their decision is the fact worth recording about that row.
+        if written == 0 and router.dropped and not cancel.stopped:
+            raise NothingTranscribedError(
+                _nothing_transcribed(router.dropped, router.last_failure or "")
+            )
+        return written
 
     async def _diarize_session(self, job: ReprocessJob) -> int:
         """Diarize the whole continuous session audio once and relabel ONE
@@ -951,6 +983,21 @@ def _job_error_message(exc: Exception, job: ReprocessJob) -> str:
     return (
         "The diarization service answered but could not process the audio "
         "(is it configured correctly?)"
+    )
+
+
+def _nothing_transcribed(dropped: int, last_failure: str) -> str:
+    """The row's sentence for a run whose every utterance failed.
+
+    The last failure's reason is the one quoted: with a provider that has
+    gone quiet they are all the same sentence, and where they differ the most
+    recent is the one still true. It is already "<provider>: <detail>" as the
+    router words it, so the detail names the vendor as well as the fault.
+    """
+    if dropped == 1:
+        return f"Nothing was transcribed: the only utterance failed ({last_failure})."
+    return (
+        f"Nothing was transcribed: all {dropped} utterances failed (last failure: {last_failure})."
     )
 
 

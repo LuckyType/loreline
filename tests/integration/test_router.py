@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator, Mapping
 
 import httpx
 import pytest
+from structlog.testing import capture_logs
 
 from loreline.audio.chunker import Utterance
 from loreline.bus import EventBus
@@ -71,6 +72,25 @@ class FailingBackend(FakeBackend):
         _ = (utterance, session_id, glossary)
         msg = "backend unavailable"
         raise RuntimeError(msg)
+
+
+class StallingBackend(FakeBackend):
+    """Never answers: a vendor that accepted the audio and then went quiet.
+
+    The router's ``wait_for`` ends each of its calls with the bare
+    ``TimeoutError`` whose ``str`` is the empty string.
+    """
+
+    async def transcribe(
+        self,
+        utterance: Utterance,
+        *,
+        session_id: str,
+        glossary: object = None,
+    ) -> TranscriptEvent | None:
+        _ = (utterance, session_id, glossary)
+        await asyncio.sleep(60)
+        return None
 
 
 class FlakyBackend(FakeBackend):
@@ -564,3 +584,43 @@ async def test_router_reports_every_dead_provider_when_both_are_gone() -> None:
     assert "primary: You have no credits remaining." in message
     assert "fallback: Invalid key" in message
     assert (primary.calls, fallback.calls) == (1, 1)
+
+
+async def test_router_logs_the_classified_reason_when_the_exception_has_no_words() -> None:
+    """The per-utterance failure line says why, even for a bare ``TimeoutError``.
+
+    ``asyncio.wait_for`` raises a ``TimeoutError`` whose ``str`` is the empty
+    string, so a vendor that had gone quiet filled the version log with
+    ``stt.primary.failed error=`` and nothing after the equals sign, while the
+    classified reason only ever reached the one ``stt.degraded`` line three
+    failures in. The line now carries the same grading the degraded event
+    does: the status, and the exception's own words or its type when it has
+    none.
+    """
+    bus: EventBus[TranscriptEvent] = EventBus()
+    router = SttRouter(
+        StallingBackend("primary"),
+        bus,
+        RouterConfig(session_id="s1", timeout_s=0.01),
+        fallback=FailingBackend("fallback"),
+    )
+    with capture_logs() as logs:
+        await router.run(_n_utterances(1))
+
+    primary = [line for line in logs if line["event"] == "stt.primary.failed"]
+    assert len(primary) == 1
+    assert primary[0]["log_level"] == "warning"
+    assert primary[0]["provider_id"] == "primary"
+    assert primary[0]["status"] == "unreachable"
+    assert primary[0]["error"] == "TimeoutError"
+
+    fallback = [line for line in logs if line["event"] == "stt.fallback.failed"]
+    assert len(fallback) == 1
+    assert fallback[0]["log_level"] == "error"
+    assert fallback[0]["status"] == "unreachable"
+    assert fallback[0]["error"] == "backend unavailable"
+
+    # What a re-transcription reads when it ends with nothing written (see
+    # loreline.reprocess.jobs): how many were lost, and the last reason why.
+    assert router.dropped == 1
+    assert router.last_failure == "fallback: backend unavailable"

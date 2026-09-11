@@ -1122,6 +1122,77 @@ async def test_reprocess_fails_with_the_vendors_reason_when_credit_runs_out(
             assert job["segments_added"] == 0
 
 
+class _TimingOutBackend(FakeBackend):
+    """Never answers in time: every utterance ends in the bare ``TimeoutError``
+    that ``asyncio.wait_for`` raises, the failure with no words of its own and
+    the one the router never retires a provider for."""
+
+    async def transcribe(
+        self,
+        utterance: Utterance,
+        *,
+        session_id: str,
+        glossary: object = None,
+    ) -> TranscriptEvent | None:
+        _ = (utterance, session_id, glossary)
+        raise TimeoutError
+
+
+async def test_a_run_that_lost_every_utterance_to_failures_is_a_failed_job(
+    tmp_path: Path,
+) -> None:
+    """A transient failure on every utterance must end the job failed, not done.
+
+    A timeout retires nobody, since the next utterance may well get through,
+    so a vendor that timed out on every single one left the job "done" with
+    zero segments: the same row a silent recording produces, and the version
+    table showed no sign that anything had gone wrong. The job now carries the
+    reason in the row the session page reads, and the version log says how
+    many were lost.
+    """
+    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t")
+    live = [FakeBackend]  # the capture itself must still work
+
+    def factory(config: ProviderConfig, secrets: SecretStore, model: str | None) -> FakeBackend:
+        cls = live.pop() if live else _TimingOutBackend
+        return cls(config, secrets, model)
+
+    app = create_app(
+        settings,
+        capture_factory=capture_factory,  # type: ignore[arg-type]
+        backend_factory=factory,  # type: ignore[arg-type]
+        diarizer_factory=fake_diarizers,
+        diarizer_probe=_reachable_diarizer,
+    )
+    async with LifespanManager(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            pid = await _provider(client)
+            sid = await _run_session(client, pid)
+
+            enqueue = await client.post(
+                "/api/reprocess", json={"session_id": sid, "provider_id": pid, "model": _MODEL}
+            )
+            job_id = enqueue.json()["id"]
+            ctx = app.state.ctx  # pyright: ignore[reportAny]
+            await ctx.reprocess.wait(job_id)
+
+            job = (await client.get(f"/api/reprocess/{job_id}")).json()
+            assert job["status"] == "error"
+            assert job["segments_added"] == 0
+            assert job["error"].startswith("Nothing was transcribed")
+            # The provider's name and the fault, not an empty string: the
+            # bare TimeoutError has no words, so its type stands in.
+            assert "Fake: TimeoutError" in job["error"]
+
+            logs = (
+                await client.get(f"/api/session/{sid}/logs", params={"version": job_id})
+            ).json()["logs"]
+            assert "reprocess.utterances.dropped" in logs
+            assert "stt.primary.failed" in logs
+            assert "error=TimeoutError" in logs
+
+
 def _three_utterance_capture(_req: object, _sample_rate: int) -> tuple[FakeSource, SpeechDetector]:
     """Capture yielding three utterances, so a run has one left to decline.
 
