@@ -138,17 +138,27 @@ const blankRouting = (): OpenRouterRouting => ({
 	zdr: false,
 })
 
-const blank = (): Complete<ProviderCreate> => ({
-	name: '',
-	kind: 'openai_compat',
-	base_url: '',
-	favorite_models: [],
-	sample_rate: 16000,
-	language: 'de',
-	routing: blankRouting(),
-	enabled: true,
-	api_key: '',
-})
+/**
+ * The wizard's form for one stored row, or for a new provider when there is
+ * none: the one place the form's shape is spelled out, so Edit and a blank
+ * wizard cannot drift apart field by field.
+ */
+function formFor(p: ProviderConfig | null): Complete<ProviderCreate> {
+	return {
+		name: p?.name ?? '',
+		kind: p?.kind ?? 'openai_compat',
+		base_url: p?.base_url ?? '',
+		favorite_models: [...(p?.favorite_models ?? [])],
+		sample_rate: p?.sample_rate ?? 16000,
+		language: p?.language ?? 'de',
+		// A provider saved before routing existed (or any STT kind) has none.
+		routing: p?.routing ? { ...p.routing } : blankRouting(),
+		enabled: p?.enabled ?? true,
+		api_key: '',
+	}
+}
+
+const blank = (): Complete<ProviderCreate> => formFor(null)
 
 let editing = $state<string | null>(null)
 let message = $state('')
@@ -556,18 +566,7 @@ function resetWizard() {
 function edit(p: ProviderConfig) {
 	editing = p.id
 	selectedKind = p.kind
-	form = {
-		name: p.name,
-		kind: p.kind,
-		base_url: p.base_url ?? '',
-		favorite_models: [...p.favorite_models],
-		sample_rate: p.sample_rate,
-		language: p.language,
-		// A provider saved before routing existed (or any STT kind) has none.
-		routing: p.routing ? { ...p.routing } : blankRouting(),
-		enabled: p.enabled,
-		api_key: '',
-	}
+	form = formFor(p)
 	availableModels = []
 	modelsError = ''
 	modelFilter = ''
