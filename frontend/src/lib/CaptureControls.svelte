@@ -811,16 +811,22 @@ onMount(() => {
 						</div>
 					{/if}
 				</div>
+				<!-- Four failures with four different fixes, each a whole sentence naming
+				     where the fix is: a secure context this page cannot grant itself, a
+				     permission, a missing device, a socket. Collapsing them into
+				     "microphone unavailable" is what sends somebody hunting for a setting
+				     that was never the problem. -->
 				{#if fromClient}
 					{#if clientMic.notice}
-						<!-- Four failures with four different fixes, each a whole sentence
-						     naming where the fix is: a secure context this page cannot grant
-						     itself, a permission, a missing device, a socket. Collapsing them
-						     into "microphone unavailable" is what sends somebody hunting for
-						     a setting that was never the problem. -->
 						<span class="text-xs font-medium text-destructive">{clientMic.notice.text}</span>
 					{/if}
 					<span class="text-xs text-muted-foreground">{clientHint}</span>
+				{:else if !clientMic.available && clientMic.notice}
+					<!-- Muted rather than red, and shown even though the server's
+					     microphone is the one selected: a greyed option with the reason
+					     only in a tooltip is the dead picker this was meant to avoid,
+					     while an alarm about a feature nobody asked for is noise. -->
+					<span class="text-xs text-muted-foreground">{clientMic.notice.text}</span>
 				{/if}
 			</div>
 

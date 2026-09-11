@@ -192,10 +192,9 @@ class ClientCaptureSource:
         gap = 0.0 if self._lost_at is None else time.monotonic() - self._lost_at
         self._lost_at = None
         self._channels = hello.channels
-        if hello.sample_rate != self._client_rate or self._pending:
-            self._client_rate = hello.sample_rate
-            self._pending.clear()
-            self._build_resampler(hello.sample_rate)
+        self._client_rate = hello.sample_rate
+        self._pending.clear()
+        self._build_resampler(hello.sample_rate)
         if gap > 0:
             self._pad_silence(gap)
             log.info(
