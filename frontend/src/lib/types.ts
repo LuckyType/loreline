@@ -36,6 +36,22 @@ export type ModelAnnotation = ModelSpec | ModelPattern
  *  them (see loreline.export). */
 export type ExportFormat = 'txt' | 'md' | 'srt' | 'vtt' | 'json'
 
+/**
+ * The "transcribe now" half of an import request.
+ *
+ * Named here rather than in `$lib/wire` because the document does not name it:
+ * an import is a multipart upload, multipart carries flat fields, and
+ * `diarization` is an object - so the block travels as a JSON string in the
+ * `transcribe` form field and the document sees a string. The server parses it
+ * back into `ImportTranscribeOptions` (src/loreline/web/schemas.py), which is
+ * what these three names have to match.
+ */
+export interface ImportTranscribeOptions {
+	provider_id: string
+	model: string
+	use_glossary: boolean
+}
+
 /** The capability badges shown for a provider, in a stable order. */
 export function capabilityBadges(p: { kind: ProviderKind }): string[] {
 	// Badges describe rather than gate, so with no config they say nothing

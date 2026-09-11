@@ -56,6 +56,7 @@ export type Interaction = Schemas['Interaction']
 export type DiarizationModeKind = Schemas['DiarizationMode']
 export type SessionStatusKind = Schemas['SessionStatus']
 export type JobStatusKind = Schemas['JobStatus']
+export type SessionOriginKind = Schemas['SessionOrigin']
 export type AuthScheme = Schemas['AuthScheme']
 export type AlertLevelKind = Schemas['AlertLevel']
 
@@ -136,6 +137,9 @@ export type TranscriptEvent = Complete<Schemas['TranscriptEvent']>
 export type Glossary = Complete<Schemas['Glossary']>
 export type Session = Complete<Schemas['Session']>
 export type SessionDetail = Complete<Schemas['SessionDetail']>
+/** What POST /api/session/import answers with: the new row, and the job id of
+ *  the transcription the request asked for (null when it asked for none). */
+export type ImportedSession = Complete<Schemas['ImportedSession']>
 export type VersionLogs = Complete<Schemas['VersionLogs']>
 export type StartSessionRequest = Schemas['StartSessionRequest']
 export type SummarizeRequest = Schemas['SummarizeRequest']

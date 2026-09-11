@@ -28,13 +28,15 @@ import {
 	TableHeader,
 	TableRow,
 } from '$lib/components/ui/table'
+import ImportRecordingDialog from '$lib/ImportRecordingDialog.svelte'
 import { fmtDuration, providerName } from '$lib/stores'
-import type { Session } from '$lib/wire'
+import type { ImportedSession, Session } from '$lib/wire'
 
 let sessions = $state<Session[]>([])
 let selected = $state<Record<string, boolean>>({})
 let error = $state('')
 let busy = $state(false)
+let importOpen = $state(false)
 
 const selectedIds = $derived(sessions.filter((s) => selected[s.id]).map((s) => s.id))
 const allChecked = $derived(sessions.length > 0 && selectedIds.length === sessions.length)
@@ -142,6 +144,13 @@ async function mergeSelected() {
 	}
 }
 
+/** Straight to the new session: an import is done to look at it, and when the
+ *  request also started a transcription there is already something filling up
+ *  there to watch. */
+function openImported(result: ImportedSession) {
+	goto(`/sessions/${result.session.id}`)
+}
+
 onMount(reload)
 </script>
 
@@ -159,6 +168,16 @@ onMount(reload)
 		<div class="mb-2 flex items-center justify-between">
 			<span class="text-muted-foreground">{selectedIds.length} selected</span>
 			<div class="flex gap-2">
+				<!-- First in the group and not disabled by the selection, because it
+				     is the one action here that makes a session rather than acting on
+				     the ones already listed. -->
+				<Button
+					variant="outline"
+					onclick={() => (importOpen = true)}
+					title="Store a recording you made elsewhere as a session"
+				>
+					Import recording
+				</Button>
 				<Button variant="outline" onclick={mergeSelected} disabled={busy || selectedIds.length < 2}>
 					Merge selected
 				</Button>
@@ -187,7 +206,7 @@ onMount(reload)
 			</TableHeader>
 			<TableBody>
 				{#each sessions as s (s.id)}
-					<TableRow>
+					<TableRow title={s.import_name ? `Imported from ${s.import_name}` : undefined}>
 						<TableCell>
 							<Checkbox bind:checked={selected[s.id]} aria-label="Select session" />
 						</TableCell>
@@ -200,6 +219,13 @@ onMount(reload)
 										title="Assembled from {s.merged_from.length} sessions, which are still here in their own right."
 									>
 										merged
+									</Badge>
+								{/if}
+								<!-- An import has no live transcript and no capture provider, so
+								     without this it reads as a session whose recording failed. -->
+								{#if s.origin === 'import'}
+									<Badge variant="outline" title="Recorded elsewhere and uploaded: {s.import_name}">
+										imported
 									</Badge>
 								{/if}
 							</span>
@@ -238,3 +264,5 @@ onMount(reload)
 		</Table>
 	</CardContent>
 </Card>
+
+<ImportRecordingDialog bind:open={importOpen} onimported={openImported} />
