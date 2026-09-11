@@ -421,3 +421,14 @@ class RevisionResponse(BaseModel):
     # Null where it is unknown, which is a Docker image built without the
     # revision baked in; the UI shows a dash rather than guessing.
     described: str | None = None
+    # The commit HEAD was on before it last moved, from git's reflog, and the
+    # name git gives that one. What the Roll back button offers, and what it
+    # sends back as RollbackRequest.commit. Both null where there is nothing to
+    # go back to: a checkout that has never been updated, or a container.
+    previous_commit: str | None = None
+    previous_described: str | None = None
+    # Why this deployment cannot roll back at all, in a sentence the page shows
+    # beside a disabled button; null where it can. Distinct from
+    # previous_commit being null: a source checkout with nowhere to go back to
+    # hides the button, a Docker deployment says why it is greyed out.
+    rollback_unavailable: str | None = None

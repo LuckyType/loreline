@@ -224,18 +224,28 @@ async def probe_diarizer_endpoint(endpoint: str) -> DiarizerProbeResponse:
 
 @router.get("/revision", dependencies=_auth)
 async def revision(request: Request) -> RevisionResponse:
-    """Return the deployed commit, and `git describe`'s name for it.
+    """Return the deployed commit, `git describe`'s name for it, and the way back.
 
     Both, rather than one: the SHA is what /rollback takes and what the update
     result reports, while the described string is the only one of the two worth
     reading off a screen. Either can be null where this deployment cannot know
     it - a Docker image built without the revision baked in - and the UI is
     written to show a dash for that instead of a wrong answer.
+
+    The previous pair is the same two answers for the commit HEAD was on before
+    it last moved, which is what Settings > Client offers to roll back to, and
+    ``rollback_unavailable`` is the one sentence a Docker deployment shows in
+    place of that offer. Answered here rather than on a route of its own so the
+    page learns everything it needs about the deployment in one call.
     """
     updater = get_state(request).updater
+    previous = await updater.previous_revision()
     return RevisionResponse(
         commit=await updater.current_revision(),
         described=await updater.current_described(),
+        previous_commit=previous,
+        previous_described=await updater.previous_described() if previous else None,
+        rollback_unavailable=updater.rollback_unavailable(),
     )
 
 

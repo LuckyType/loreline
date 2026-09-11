@@ -35,12 +35,17 @@ _GIT_OUTPUT = {
 class FakeRunner:
     """Stand-in for git/systemctl with a togglable autostart state."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, previous: str | None = None) -> None:
         self.calls: list[list[str]] = []
         self.enabled = False
+        # Where the reflog says HEAD was before it last moved. None for a
+        # checkout that has never moved, where git exits non-zero for HEAD@{1}.
+        self.previous = previous
 
     async def __call__(self, argv: list[str], *, cwd: str | None = None) -> CommandResult:
         self.calls.append(argv)
+        if "HEAD@{1}" in argv:
+            return self._reflog(argv)
         git_output = _GIT_OUTPUT.get((argv[0], argv[1] if len(argv) > 1 else ""))
         if git_output is not None:
             return CommandResult(0, git_output, "")
@@ -49,13 +54,16 @@ class FakeRunner:
         if argv[:2] == ["systemctl", "is-enabled"]:
             text = "enabled\n" if self.enabled else "disabled\n"
             return CommandResult(0 if self.enabled else 1, text, "")
-        if argv[:3] == ["sudo", "systemctl", "enable"]:
-            self.enabled = True
-            return CommandResult(0, "", "")
-        if argv[:3] == ["sudo", "systemctl", "disable"]:
-            self.enabled = False
-            return CommandResult(0, "", "")
+        if argv[:2] == ["sudo", "systemctl"] and argv[2:3] in (["enable"], ["disable"]):
+            self.enabled = argv[2] == "enable"
         return CommandResult(0, "", "")
+
+    def _reflog(self, argv: list[str]) -> CommandResult:
+        """What git says about HEAD@{1}: the SHA, its name, or a non-zero exit."""
+        if self.previous is None:
+            return CommandResult(128, "", "fatal: ambiguous argument 'HEAD@{1}'")
+        text = self.previous if argv[1] == "rev-parse" else f"v0.1.0-2-g{self.previous[:7]}"
+        return CommandResult(0, text + "\n", "")
 
 
 @pytest.fixture
@@ -201,6 +209,25 @@ async def test_revision(client: AsyncClient) -> None:
     body = (await client.get("/api/system/revision")).json()
     assert body["commit"] == "commit-sha"
     assert body["described"] == "v0.1.0-4-gcommit"
+    # A checkout that has never been updated has nowhere to roll back to, and
+    # that is not a reason it cannot: the page hides the button, nothing more.
+    assert body["previous_commit"] is None
+    assert body["previous_described"] is None
+    assert body["rollback_unavailable"] is None
+
+
+async def test_revision_names_the_commit_to_roll_back_to(settings: Settings) -> None:
+    """Once the checkout has moved, the response carries where it moved from."""
+    app = create_app(settings, command_runner=FakeRunner(previous="abc1234def"))
+    async with LifespanManager(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            body = (await ac.get("/api/system/revision")).json()
+
+    assert body["commit"] == "commit-sha"
+    assert body["previous_commit"] == "abc1234def"
+    assert body["previous_described"] == "v0.1.0-2-gabc1234"
+    assert body["rollback_unavailable"] is None
 
 
 async def test_revision_in_a_container_with_nothing_baked(
@@ -224,7 +251,14 @@ async def test_revision_in_a_container_with_nothing_baked(
             response = await ac.get("/api/system/revision")
 
     assert response.status_code == 200
-    assert response.json() == {"commit": None, "described": None}
+    body = response.json()
+    assert body["commit"] is None
+    assert body["described"] is None
+    assert body["previous_commit"] is None
+    assert body["previous_described"] is None
+    # A container cannot roll back however many updates it has seen, and the
+    # page shows this sentence in place of the offer rather than a dead button.
+    assert "Docker deployment" in body["rollback_unavailable"]
     assert not any(call[0] == "git" for call in runner.calls)
 
 

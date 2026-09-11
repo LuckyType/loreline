@@ -94,6 +94,17 @@ _REJECTED_MESSAGE = (
 _BUSY_MESSAGE = (
     "An update is already running. Wait for that one to finish rather than starting a second one."
 )
+# Why Settings > Client shows Roll back greyed out on a Docker deployment. The
+# updater service only ever moves forward to whatever the registry publishes,
+# and takes no argument that could name anything else; and the image has no
+# git checkout to reset. What the host can do is named here, since a greyed-out
+# button that says nothing teaches nobody the way round it.
+_ROLLBACK_CONTAINER_MESSAGE = (
+    "Rollback is not available in a Docker deployment: the updater service only "
+    "moves forward to the newest published image. To run an older release, pin its "
+    "image tag (ghcr.io/luckytype/loreline:<version>) in docker-compose.yml on the "
+    "host and recreate the app container."
+)
 _FAILED_MESSAGE = (
     "The updater service reported a failed update without saying why. "
     "`docker compose logs updater` has the detail; update from the host meanwhile: "
@@ -225,6 +236,50 @@ class Updater:
         return await self._revision(
             ["git", "describe", "--tags", "--always"], self._build_described
         )
+
+    async def previous_revision(self) -> str | None:
+        """The commit this checkout was on before HEAD last moved, or None.
+
+        This is what the Roll back button on Settings > Client offers to go
+        back to. It is read from git's own reflog rather than from a record
+        this app keeps: ``HEAD@{1}`` is the previous position of HEAD, which
+        after ``deploy/update-source.sh`` ran ``git pull --ff-only`` is the
+        commit that was deployed before the update. A pull that found nothing
+        new moves nothing and writes no entry, so the answer survives any
+        number of those, and after a rollback it names the commit just left,
+        which is the one way back if the rollback was the mistake.
+
+        None where there is nothing to go back to: a checkout that has never
+        moved, whose reflog has one entry, and a container, which has no
+        checkout at all. A previous position equal to the current one, which a
+        reset to HEAD leaves behind, is nothing to go back to either.
+        """
+        if self._in_container:
+            return None
+        previous = await self._revision(["git", "rev-parse", "--verify", "--quiet", "HEAD@{1}"], "")
+        if previous is None or previous == await self.current_revision():
+            return None
+        return previous
+
+    async def previous_described(self) -> str | None:
+        """``git describe`` for ``HEAD@{1}``, or None where git has no answer.
+
+        The half a person reads in the confirm dialog, the same way
+        ``current_described`` is the half read off the Revision row. Unlike
+        ``previous_revision`` this does not check that HEAD really moved, so
+        the caller asks it only once that has answered with a commit.
+        """
+        return await self._revision(["git", "describe", "--tags", "--always", "HEAD@{1}"], "")
+
+    def rollback_unavailable(self) -> str | None:
+        """Why this deployment cannot roll back at all, or None where it can.
+
+        Distinct from ``previous_revision`` answering None: a source checkout
+        that has never been updated could roll back and has nowhere to go, and
+        the button is simply hidden; a container could not roll back however
+        many updates it has seen, and the button says so instead.
+        """
+        return _ROLLBACK_CONTAINER_MESSAGE if self._in_container else None
 
     async def _revision(self, argv: list[str], baked: str) -> str | None:
         """Answer one revision question, git-first or baked-only; see current_revision."""
@@ -377,8 +432,10 @@ class Updater:
             # deploy/update-fast.sh, which only ever moves forward to whatever
             # the registry currently publishes; rolling back means naming an
             # older image, and naming anything at all is exactly what that
-            # endpoint refuses to accept.
-            return await self._message_result(_CONTAINER_MESSAGE)
+            # endpoint refuses to accept. The page never sends this, since
+            # /revision tells it up front (see rollback_unavailable), but a
+            # direct caller still gets the reason rather than a failed reset.
+            return await self._message_result(_ROLLBACK_CONTAINER_MESSAGE)
         before = await self.current_revision()
         chunks: list[str] = []
         returncode = 0
