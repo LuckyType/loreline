@@ -4827,6 +4827,31 @@
               }
             ],
             "title": "Detail"
+          },
+          "interaction": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Interaction"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "transport": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "realtime",
+                  "batch"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Transport"
           }
         },
         "type": "object",
@@ -4834,7 +4859,7 @@
           "status"
         ],
         "title": "TestResult",
-        "description": "Connection-test outcome for a provider.\n\nDeliberately not a bool. \"Healthy\" is at least three separate facts - the\nendpoint answers, the credential is accepted, the vendor is not currently\nrefusing - and collapsing them meant a provider with a completely invalid\nkey rendered exactly like one whose base URL was a typo. The settings page\nswitches on ``status`` and shows ``detail`` as the badge's tooltip, so the\nvendor's own \"API key not valid\" reaches the GM instead of the word \"down\".\nSee :mod:`loreline.health`."
+        "description": "Connection-test outcome for a provider.\n\nDeliberately not a bool. \"Healthy\" is at least three separate facts - the\nendpoint answers, the credential is accepted, the vendor is not currently\nrefusing - and collapsing them meant a provider with a completely invalid\nkey rendered exactly like one whose base URL was a typo. The settings page\nswitches on ``status`` and shows ``detail`` as the badge's tooltip, so the\nvendor's own \"API key not valid\" reaches the GM instead of the word \"down\".\nSee :mod:`loreline.health`.\n\n``interaction`` and ``transport`` say which surface was asked. One probe\nper row (ADR 0004) grades a kind that summarizes on its chat surface, so\nwithout them a \"healthy\" Gemini row read as \"can transcribe\" when only\nthe summarize surface had answered; the page prints them beside the\nverdict. Both null when nothing was probed (a missing key, a kind with no\nsurface), and ``transport`` only set for a transcription surface, where\nrealtime and batch are different endpoints."
       },
       "TranscribeCapabilities": {
         "properties": {

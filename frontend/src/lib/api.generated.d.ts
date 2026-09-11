@@ -2231,11 +2231,22 @@ export interface components {
          *     switches on ``status`` and shows ``detail`` as the badge's tooltip, so the
          *     vendor's own "API key not valid" reaches the GM instead of the word "down".
          *     See :mod:`loreline.health`.
+         *
+         *     ``interaction`` and ``transport`` say which surface was asked. One probe
+         *     per row (ADR 0004) grades a kind that summarizes on its chat surface, so
+         *     without them a "healthy" Gemini row read as "can transcribe" when only
+         *     the summarize surface had answered; the page prints them beside the
+         *     verdict. Both null when nothing was probed (a missing key, a kind with no
+         *     surface), and ``transport`` only set for a transcription surface, where
+         *     realtime and batch are different endpoints.
          */
         TestResult: {
             status: components["schemas"]["HealthStatus"];
             /** Detail */
             detail?: string | null;
+            interaction?: components["schemas"]["Interaction"] | null;
+            /** Transport */
+            transport?: ("realtime" | "batch") | null;
         };
         /**
          * TranscribeCapabilities

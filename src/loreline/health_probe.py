@@ -31,6 +31,7 @@ all, and answers without touching the network when it already knows
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 import httpx
 
@@ -150,9 +151,10 @@ async def probe_surface(
     probe = endpoint.health
     if endpoint.surface.socket:
         frame = json.dumps(probe.frame) if probe is not None and probe.frame is not None else None
-        return await probe_socket(
+        report = await probe_socket(
             endpoint.url_with_key(api_key), endpoint.request_headers(api_key), frame
         )
+        return _about(report, interaction, transport)
     client = httpx.AsyncClient(
         base_url=endpoint.url,
         headers=endpoint.request_headers(api_key),
@@ -162,6 +164,19 @@ async def probe_surface(
     path = probe.path if probe is not None and probe.path else DEFAULT_HEALTH_PATH
     params: dict[str, str | int] | None = dict(probe.params) if probe and probe.params else None
     try:
-        return await probe_endpoint(client, path, params=params)
+        return _about(await probe_endpoint(client, path, params=params), interaction, transport)
     finally:
         await client.aclose()
+
+
+def _about(
+    report: HealthReport, interaction: Interaction, transport: Transport | None
+) -> HealthReport:
+    """The verdict with the surface it is about written on it.
+
+    The graders see one answer and not the question, so this is the one place
+    that knows both. A transcription surface is always asked over an explicit
+    transport (``surface_for`` refuses one without), so what is stamped is
+    what was asked, never a guess.
+    """
+    return replace(report, interaction=interaction, transport=transport)

@@ -70,6 +70,7 @@ import type {
 	ProviderConfig,
 	ProviderCreate,
 	ProviderKind,
+	ProviderTestResult,
 } from '$lib/wire'
 
 /**
@@ -138,17 +139,27 @@ const blankRouting = (): OpenRouterRouting => ({
 	zdr: false,
 })
 
-const blank = (): Complete<ProviderCreate> => ({
-	name: '',
-	kind: 'openai_compat',
-	base_url: '',
-	favorite_models: [],
-	sample_rate: 16000,
-	language: 'de',
-	routing: blankRouting(),
-	enabled: true,
-	api_key: '',
-})
+/**
+ * The wizard's form for one stored row, or for a new provider when there is
+ * none: the one place the form's shape is spelled out, so Edit and a blank
+ * wizard cannot drift apart field by field.
+ */
+function formFor(p: ProviderConfig | null): Complete<ProviderCreate> {
+	return {
+		name: p?.name ?? '',
+		kind: p?.kind ?? 'openai_compat',
+		base_url: p?.base_url ?? '',
+		favorite_models: [...(p?.favorite_models ?? [])],
+		sample_rate: p?.sample_rate ?? 16000,
+		language: p?.language ?? 'de',
+		// A provider saved before routing existed (or any STT kind) has none.
+		routing: p?.routing ? { ...p.routing } : blankRouting(),
+		enabled: p?.enabled ?? true,
+		api_key: '',
+	}
+}
+
+const blank = (): Complete<ProviderCreate> => formFor(null)
 
 let editing = $state<string | null>(null)
 let message = $state('')
@@ -159,9 +170,15 @@ let message = $state('')
  * off the wire, so the page never re-derives a verdict the backend already
  * graded. `detail` is the vendor's own message ("API key not valid.") and is
  * shown as the badge's tooltip: it is what turns "something is wrong" into
- * "fix this field".
+ * "fix this field". `interaction` and `transport` are the surface the probe
+ * asked, also straight off the wire: see `caption`.
  */
-type TestState = { status: HealthStatus | 'testing'; detail?: string | null }
+type TestState = {
+	status: HealthStatus | 'testing'
+	detail?: string | null
+	interaction?: ProviderTestResult['interaction']
+	transport?: ProviderTestResult['transport']
+}
 
 let testResults = $state<Record<string, TestState>>({})
 
@@ -182,6 +199,26 @@ const TEST_BADGE: Record<
 	unauthorized: { label: 'auth failed', variant: 'destructive', dot: 'bg-red-500' },
 	unreachable: { label: 'unreachable', variant: 'destructive', dot: 'bg-red-500' },
 	unknown: { label: 'unknown', variant: 'outline', dot: 'bg-muted-foreground' },
+}
+
+/**
+ * What a row's badge says, and the tooltip behind it.
+ *
+ * One probe per row (ADR 0004) grades a kind that summarizes on its chat
+ * surface, so "healthy" on a Gemini row is about summaries and says nothing
+ * about transcription. The verdict alone used to be the whole label, and read
+ * as "can transcribe"; the surface is part of the sentence now, and the
+ * tooltip keeps the vendor's own words after it. A verdict reached without a
+ * probe (no key stored, no surface declared) names none.
+ */
+function caption(result: TestState): { label: string; title: string | undefined } {
+	const verdict = TEST_BADGE[result.status].label
+	const surface = result.interaction
+		? `${result.interaction} surface${result.transport ? `, ${result.transport}` : ''}`
+		: ''
+	const label = surface ? `${verdict}, ${surface}` : verdict
+	const title = [surface ? label : '', result.detail ?? ''].filter(Boolean).join(': ') || undefined
+	return { label, title }
 }
 let form = $state<Complete<ProviderCreate>>(blank())
 let availableModels = $state<ModelInfo[]>([])
@@ -556,18 +593,7 @@ function resetWizard() {
 function edit(p: ProviderConfig) {
 	editing = p.id
 	selectedKind = p.kind
-	form = {
-		name: p.name,
-		kind: p.kind,
-		base_url: p.base_url ?? '',
-		favorite_models: [...p.favorite_models],
-		sample_rate: p.sample_rate,
-		language: p.language,
-		// A provider saved before routing existed (or any STT kind) has none.
-		routing: p.routing ? { ...p.routing } : blankRouting(),
-		enabled: p.enabled,
-		api_key: '',
-	}
+	form = formFor(p)
 	availableModels = []
 	modelsError = ''
 	modelFilter = ''
@@ -579,7 +605,7 @@ async function testOne(id: string) {
 	testResults = { ...testResults, [id]: { status: 'testing' } }
 	try {
 		const r = await api.testProvider(id)
-		testResults = { ...testResults, [id]: { status: r.status, detail: r.detail } }
+		testResults = { ...testResults, [id]: r }
 	} catch (e) {
 		// Our own API did not answer, which says nothing about the provider.
 		// Reporting it as unreachable would blame the wrong endpoint.
@@ -595,6 +621,7 @@ async function testAll() {
 }
 
 async function remove(id: string) {
+	message = ''
 	if (
 		!(await confirm({
 			description: 'Delete this provider? This also removes its stored key.',
@@ -602,7 +629,13 @@ async function remove(id: string) {
 		}))
 	)
 		return
-	await api.deleteProvider(id)
+	try {
+		await api.deleteProvider(id)
+	} catch (err) {
+		// The row is still in the table, so the line above it has to say why.
+		message = `Delete failed: ${err instanceof ApiError ? err.message : 'the request failed'}`
+		return
+	}
 	if (editing === id) resetWizard()
 	await reloadProviders()
 }
@@ -680,10 +713,12 @@ onMount(load)
 							{@const result = testResults[p.id]}
 							{#if result}
 								{@const badge = TEST_BADGE[result.status]}
-								<!-- The tooltip carries the vendor's own message, which is the
+								{@const said = caption(result)}
+								<!-- The label names the surface the verdict is about, and the
+								     tooltip carries the vendor's own message after it: the
 								     difference between "unauthorized" and "API key not valid." -->
-								<Badge variant={badge.variant} class="gap-1.5" title={result.detail ?? undefined}
-									><span class="size-2 rounded-full {badge.dot}"></span>{badge.label}</Badge
+								<Badge variant={badge.variant} class="gap-1.5" title={said.title}
+									><span class="size-2 rounded-full {badge.dot}"></span>{said.label}</Badge
 								>
 							{:else}
 								<Badge variant="outline" class="gap-1.5" title="never tested"
