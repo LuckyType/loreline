@@ -37,10 +37,12 @@ from typing import TYPE_CHECKING, Protocol, cast, runtime_checkable
 
 from loreline.audio.chunker import SpeechDetector, Utterance, VadChunker
 from loreline.audio.level import levels
+from loreline.audio.source import CaptureUnavailableError
 from loreline.bus import EventBus
 from loreline.capabilities import supports_inline_diarization, supports_live_capture
 from loreline.logging import bind_log_context, get_logger, log_context
 from loreline.models import (
+    CaptureSourceKind,
     DiarizationMode,
     Session,
     SessionStatus,
@@ -55,6 +57,7 @@ from loreline.stt.router import ProvidersExhaustedError, RouterConfig, SttRouter
 from loreline.stt.streaming import is_streaming
 
 if TYPE_CHECKING:
+    from loreline.audio.client_source import ClientMic
     from loreline.diarization.base import DiarizationProvider
     from loreline.diarization.provider import BuildDiarizer
     from loreline.models import DiarizationConfig, Glossary, ProviderConfig
@@ -75,7 +78,17 @@ log = get_logger(__name__)
 
 
 class CaptureSource(Protocol):
-    """A stoppable source of timestamped PCM frames."""
+    """A stoppable source of timestamped PCM frames.
+
+    Two things are one: ``SoundDeviceSource`` opens a sound card on this
+    machine through PortAudio, and ``ClientCaptureSource`` is fed by a
+    browser's microphone over a WebSocket (``docs/adr/0010``). Everything
+    below this protocol - the capture loop, ``_CaptureStats``, the level
+    publisher, the disk watch, the WAV writer, ``StreamPath``, ``SttRouter`` -
+    is written against the frames and has no idea which one it is reading, and
+    keeping it that way is the whole of what makes a browser capture an
+    ordinary session rather than a second pipeline.
+    """
 
     def frames(self) -> AsyncIterator[tuple[bytes, float]]:
         """Yield ``(pcm_bytes, monotonic_ts)`` until stopped."""
@@ -153,6 +166,36 @@ def _default_capture(
     source = SoundDeviceSource(device=req.device, sample_rate=sample_rate)
     detector = SileroVad(sample_rate=sample_rate)
     return source, detector.is_speech
+
+
+def capture_factory_for(
+    mic: ClientMic, *, build_detector: Callable[[int], SpeechDetector] | None = None
+) -> CaptureFactory:
+    """The application's capture factory: the server's device, or a browser's.
+
+    The whole of the client-microphone feature below the seam is this one
+    branch. ``ClientMic`` is the process's single pending capture socket, so
+    the factory is built once, over it, and closes over nothing else; what a
+    start request chooses is which ``CaptureSource`` gets built, and every
+    collaborator past that point is handed the same thing either way.
+
+    The detector is the same VAD both ways, because the frames are: a client
+    source resamples to the session's rate before anyone downstream sees them,
+    exactly as a device that serves another rate does. ``build_detector`` is
+    injectable for the same reason the factory itself is - constructing Silero
+    loads the optional ``audio`` extra - and defaults to the one detector every
+    VAD pass in this app runs on.
+    """
+
+    def build(req: StartSessionRequest, sample_rate: int) -> tuple[CaptureSource, SpeechDetector]:
+        if req.source is not CaptureSourceKind.CLIENT:
+            return _default_capture(req, sample_rate)
+        from loreline.audio.vad import default_detector  # noqa: PLC0415
+
+        detector = (build_detector or default_detector)(sample_rate)
+        return mic.open(sample_rate), detector
+
+    return build
 
 
 @dataclass(slots=True)
@@ -363,6 +406,7 @@ class _Capture:
 class _Runtime:
     session: Session
     source: CaptureSource
+    source_kind: CaptureSourceKind
     session_bus: EventBus[TranscriptEvent]
     stt: _SttHealth
     live_task: asyncio.Task[None]
@@ -498,6 +542,18 @@ class SessionManager:
         """
         runtime = self._runtime
         return runtime.stats.since_last_frame if runtime is not None else None
+
+    def capture_source(self) -> CaptureSourceKind | None:
+        """Which microphone the active session is listening to, or None while idle.
+
+        The dashboard's answer to "where is this audio coming from". It matters
+        on a second screen: a phone opening the dashboard while the laptop on
+        the table is the microphone has to read the session as capturing and
+        still know that closing *this* page costs nothing, while closing the
+        laptop's tab ends the evening.
+        """
+        runtime = self._runtime
+        return runtime.source_kind if runtime is not None else None
 
     def _check_live_capable(self, config: ProviderConfig, role: str) -> None:
         """Reject a provider that can only transcribe stored audio.
@@ -675,6 +731,7 @@ class SessionManager:
             self._runtime = _Runtime(
                 session=session,
                 source=source,
+                source_kind=req.source,
                 session_bus=session_bus,
                 stt=stt,
                 live_task=live_task,
@@ -774,6 +831,13 @@ class SessionManager:
             return
         try:
             await source.preflight()
+        except CaptureUnavailableError as exc:
+            # A source that already knows what to tell a GM (the browser is not
+            # streaming, the tab has gone). Passed through verbatim rather than
+            # wrapped in the device sentence below, which would send someone to
+            # Settings to pick a microphone that was never the problem.
+            log.warning("session.start.capture_unavailable", error=str(exc))
+            raise SessionConfigError(str(exc)) from exc
         except Exception as exc:
             log.warning("session.start.device_unavailable", device=device, error=str(exc))
             named = "the default input device" if device is None else f"input device {device!r}"

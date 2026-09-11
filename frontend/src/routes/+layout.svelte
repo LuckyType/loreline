@@ -7,6 +7,7 @@ import { goto } from '$app/navigation'
 import { page } from '$app/state'
 import { ApiError, api } from '$lib/api'
 import { capabilities, loadCapabilities } from '$lib/capabilities.svelte'
+import { clientMic } from '$lib/clientMic.svelte'
 import ConfirmDialog from '$lib/ConfirmDialog.svelte'
 import { Badge } from '$lib/components/ui/badge'
 import { Button } from '$lib/components/ui/button'
@@ -17,6 +18,15 @@ import { theme } from '$lib/theme.svelte'
 import type { ConnectionStatus } from '$lib/ws'
 
 let { children }: { children: Snippet } = $props()
+
+// What the header badge says while a session records. "Capturing" alone was
+// true and useless the moment a browser could be the source: the tab that is
+// the microphone has to know not to close, and every other screen has to know
+// it is not the one holding things up.
+const captureBadge = $derived.by(() => {
+	if ($health?.capture_source !== 'client') return 'Capturing…'
+	return clientMic.streaming ? 'Capturing from this browser…' : 'Capturing from a browser…'
+})
 
 // Sidebar fold state, kept across visits (best effort - private windows etc.).
 const NAV_KEY = 'loreline.nav-collapsed'
@@ -210,7 +220,13 @@ function wsLabel(status: ConnectionStatus, liveWord: string): string {
 </script>
 
 <svelte:window onkeydown={handleWindowKeydown} onstorage={(e) => theme.syncFromStorage(e)} />
-<svelte:document onclickcapture={handleDocumentClick} />
+<!-- A browser releases the screen wake lock every time the tab is hidden, so
+     without re-taking it here it would be held only until the first time
+     somebody switched tabs - which is exactly the evening it exists to save. -->
+<svelte:document
+	onclickcapture={handleDocumentClick}
+	onvisibilitychange={() => void clientMic.refreshWakeLock()}
+/>
 
 {#if page.url.pathname === '/login'}
 	{@render children()}
@@ -248,9 +264,13 @@ function wsLabel(status: ConnectionStatus, liveWord: string): string {
 				<span class="text-muted-foreground">{$health?.version ?? ''}</span>
 			</div>
 			{#if $health?.capture_status === 'capturing'}
+				<!-- Which microphone, not just that one is open: a session started
+				     from the laptop and watched from a phone has to read correctly
+				     on both, and only the tab holding the microphone must not be
+				     closed. See ADR 0010. -->
 				<Badge variant="secondary" class="gap-2">
 					<span class="size-2 rounded-full bg-emerald-500"></span>
-					Capturing…
+					{captureBadge}
 				</Badge>
 			{/if}
 			<div class="flex-1"></div>

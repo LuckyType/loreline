@@ -4122,6 +4122,15 @@
         "title": "CapabilityConfig",
         "description": "The whole file."
       },
+      "CaptureSourceKind": {
+        "type": "string",
+        "enum": [
+          "device",
+          "client"
+        ],
+        "title": "CaptureSourceKind",
+        "description": "Which microphone a capture is listening to.\n\n``DEVICE`` is a sound card on the machine running Loreline, opened through\nPortAudio. ``CLIENT`` is the **client microphone**: the browser that\nstarted the session, capturing with ``getUserMedia`` and streaming the\nframes over ``WS /ws/audio/capture`` (see ``docs/adr/0010``). The two are\none seam apart and identical below it - the same frames, the same VAD, the\nsame WAV, the same transcript - so this only ever decides which source the\ncapture factory builds, and after that which sentence the dashboard says.\n\n``DEVICE`` is the default, so every stored default, every script and every\ncaller written before a browser could record keeps working unchanged."
+      },
       "DeviceSetting": {
         "properties": {
           "device": {
@@ -4634,6 +4643,16 @@
               }
             ],
             "title": "Capture Last Frame Age"
+          },
+          "capture_source": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CaptureSourceKind"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "type": "object",
@@ -6355,6 +6374,10 @@
               }
             ],
             "title": "Campaign Id"
+          },
+          "source": {
+            "$ref": "#/components/schemas/CaptureSourceKind",
+            "default": "device"
           },
           "device": {
             "anyOf": [

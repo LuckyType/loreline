@@ -115,6 +115,15 @@ def client_uses_https(request: Request, settings: Settings) -> bool:
     failure of its own login and nobody else's, in the safe direction. The
     dangerous direction, stripping ``Secure`` off a real HTTPS session, is not
     reachable: those requests come through Caddy, which sets the header itself.
+
+    That leftover case is the intended path once TLS is terminated by
+    ``tailscale serve`` on the host rather than by Caddy in the stack (see the
+    README, "Recording from a laptop"): the proxy is a host process reaching
+    the published port, so it arrives from exactly that range, and its
+    ``X-Forwarded-Proto: https`` is what marks a genuinely HTTPS session's
+    cookie ``Secure``. A source install has no compose network and sets
+    ``127.0.0.1/32`` instead, which is safe for the same reason - a LAN client
+    arrives from a LAN address and cannot claim to be the loopback proxy.
     """
     if _peer_is_trusted_proxy(request, settings):
         # Stacked proxies append to the header; the first hop faced the client.

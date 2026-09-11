@@ -8,6 +8,12 @@
  * switch starts the model over. The advanced half folds away, which is why
  * the summary line above it has to state what fallback, diarization and the
  * glossary are set to: folding something away must never hide a problem.
+ *
+ * The microphone row is the one setting that is neither folded nor derived
+ * from the server's defaults: which device records is a fact about the machine
+ * this page is open on (ADR 0010), so it is remembered per browser, and it
+ * decides whether there is any audio at all - which makes it worth more room
+ * than everything folded below it put together.
  */
 
 import { ChevronDown, TriangleAlert } from '@lucide/svelte'
@@ -21,6 +27,12 @@ import {
 	preferredModel,
 } from '$lib/capabilities.svelte'
 import { campaigns } from '$lib/campaigns.svelte'
+import {
+	type CaptureSourceChoice,
+	clientMic,
+	rememberCaptureSource,
+	storedCaptureSource,
+} from '$lib/clientMic.svelte'
 import { Button } from '$lib/components/ui/button'
 import { Card, CardContent } from '$lib/components/ui/card'
 import { Checkbox } from '$lib/components/ui/checkbox'
@@ -180,6 +192,25 @@ async function createCampaign() {
 	}
 }
 
+// --- which microphone records ---
+// Remembered in this browser rather than in the action defaults, deliberately:
+// the box wired to the table's USB mic and the laptop that carries its own are
+// two right answers on one server, and a shared default would have them
+// overwrite each other every session. It also keeps a start that no browser is
+// behind honest - nothing stored server-side can select a source that needs one.
+let captureSource = $state<CaptureSourceChoice>('device')
+const fromClient = $derived(captureSource === 'client')
+// The one condition a client-source session can be started on: this tab holds
+// the microphone and the server is receiving what it hears.
+const clientReady = $derived(clientMic.ready)
+
+function pickClientDevice(id: string) {
+	clientMic.deviceId = id
+	// Switching inputs while streaming re-opens the graph on the new one, so the
+	// meter answers the question the picker was opened to ask.
+	if (clientMic.streaming) void clientMic.start(id)
+}
+
 let error = $state('')
 let busy = $state(false)
 
@@ -193,8 +224,13 @@ const endpointMissing = $derived(diarMode === 'remote' && !diarEndpoint.trim())
 const fallbackModelMissing = $derived(!!fallback && !fallbackModel)
 
 // Everything the advanced panel can get wrong, so the Start button and the
-// collapsed summary agree about whether it is safe to press.
-const startBlocked = $derived(endpointMissing || fallbackModelMissing)
+// collapsed summary agree about whether it is safe to press. A client source
+// with no audio flowing is on that list because the server would refuse the
+// start anyway: better a greyed button beside the reason than a red banner
+// after the table has sat down.
+const startBlocked = $derived(
+	endpointMissing || fallbackModelMissing || (fromClient && !clientReady),
+)
 
 // A stored default (or an earlier pick) of "inline" must not survive a switch
 // to a model that returns no speakers - the backend would reject the start.
@@ -269,7 +305,7 @@ function setDiarMode(mode: string) {
 let storedDevice = $state('')
 let inputDevices = $state.raw<InputDevice[]>([])
 const deviceMissing = $derived(
-	storedDevice !== '' && !inputDevices.some((d) => d.name === storedDevice),
+	!fromClient && storedDevice !== '' && !inputDevices.some((d) => d.name === storedDevice),
 )
 
 // Fallback and diarization are collapsed by default. The summary line has to
@@ -310,6 +346,34 @@ const advancedProblem = $derived(startBlocked || diarProblem)
 const summaryProblem = $derived(advancedProblem || deviceMissing)
 
 const capturing = $derived($health?.capture_status === 'capturing')
+
+// --- where is this audio coming from? ---
+// Read off the server, not off this tab, because every screen has to agree:
+// the phone that opens the dashboard sees the same session the laptop started
+// and has to know it is not the one holding it up. Only the second of these
+// is local, because "is *this* browser the microphone" is the one question
+// the server cannot answer about a client it cannot tell apart.
+const capturingFromClient = $derived(capturing && $health?.capture_source === 'client')
+const weAreTheSource = $derived(capturingFromClient && clientMic.streaming)
+
+// What keeping the tab open costs, said where the choice is made rather than
+// left for the GM to discover with a closed lid and a lost evening.
+const wakeNote = $derived(
+	clientMic.wakeLockHeld
+		? 'The screen is being kept awake for as long as this runs.'
+		: 'This browser would not keep the screen awake, so stop the machine sleeping by hand.',
+)
+
+const clientHint = $derived.by(() => {
+	if (clientMic.streaming) {
+		return `This browser is the microphone: the tab has to stay open and the machine awake for the whole session. ${wakeNote}`
+	}
+	return (
+		'Press "Use this microphone" and watch the meter move before starting - a session no audio is ' +
+		'reaching is refused. Echo cancellation, noise suppression and automatic gain are switched off ' +
+		'on purpose: all three are tuned for one voice on a headset and gate out the quieter half of a table.'
+	)
+})
 
 // --- session elapsed time ---
 // healthz's uptime_seconds is the app process's uptime, not the session's -
@@ -487,7 +551,10 @@ async function start() {
 			},
 			use_glossary: useGlossary,
 			campaign_id: campaignId || null,
+			source: captureSource,
 		})
+		// This browser's habit, kept in this browser. See captureSource.
+		rememberCaptureSource(captureSource)
 		// Remembered for the next session, where it is almost always the same
 		// answer. Stored server-side rather than in this browser: the tablet at
 		// the table and the laptop in the kitchen are the same campaign.
@@ -563,6 +630,13 @@ onMount(() => {
 	// and the session header read the same names.
 	void campaigns.load()
 	void checkStoredDevice()
+	// Restored before anything is pressed, so the laptop that always records
+	// from itself opens on that and the box opens on its own microphone.
+	captureSource = storedCaptureSource()
+	// Asks nothing of the browser: it only reads whether this page could ever
+	// have a microphone, so the insecure-context sentence is on screen before
+	// anyone presses a button that cannot work.
+	clientMic.probe()
 })
 </script>
 
@@ -593,6 +667,32 @@ onMount(() => {
 					{stopping ? 'Finalizing…' : 'Stop session'}
 				</Button>
 			</div>
+			{#if capturingFromClient}
+				<!-- Outside the chain below rather than part of it: which microphone
+				     is recording is true at the same time as a stall, an STT outage
+				     or nothing at all, and on a second screen it is the only line
+				     that says why this page is not the one to keep open. -->
+				<p class="mt-2 border-t border-dashed pt-2 text-sm text-muted-foreground">
+					{#if weAreTheSource}
+						<strong class="font-medium text-foreground">This browser is the microphone.</strong>
+						Keep this tab open and the machine awake: if it goes away, the recording ends about 45
+						seconds later. {wakeNote}
+					{:else}
+						<strong class="font-medium text-foreground"
+							>The audio is coming from another browser, not this one.</strong
+						>
+						Closing this page changes nothing; the recording ends if that browser goes away.
+						<button
+							type="button"
+							class="underline underline-offset-2"
+							onclick={() => clientMic.start(clientMic.deviceId)}
+						>
+							Record from this device instead
+						</button>
+						- which is also how a tab that was reloaded picks its own session back up.
+					{/if}
+				</p>
+			{/if}
 			{#if stopping}
 				<p class="mt-2 border-t border-dashed pt-2 text-sm text-muted-foreground">
 					Transcribing what is still queued and closing the recording. This can take up to half a
@@ -655,6 +755,78 @@ onMount(() => {
 					<span class="text-xs text-muted-foreground">
 						Pick a model to start - it is chosen per session, not stored on the provider.
 					</span>
+				{/if}
+			</div>
+
+			<!-- The microphone, above the fold and never folded away: everything
+			     below this changes what the transcript reads like, and this one
+			     decides whether there is a recording at all. -->
+			<div class="mt-3.5 flex flex-col gap-2 border-t border-dashed pt-3">
+				<div class="grid grid-cols-1 items-end gap-3 sm:grid-cols-[1fr_1fr_auto]">
+					<div class="flex flex-col gap-2">
+						<Label for="capture-source">Microphone</Label>
+						<Dropdown
+							id="capture-source"
+							value={captureSource}
+							onpick={(value) => (captureSource = value as CaptureSourceChoice)}
+							options={[
+								{ value: 'device', label: "The server's microphone" },
+								{
+									value: 'client',
+									label: "This device's microphone",
+									disabled: !clientMic.available,
+									title: clientMic.notice?.text ?? '',
+								},
+							]}
+						/>
+					</div>
+					{#if fromClient}
+						<div class="flex flex-col gap-2">
+							<Label for="client-device">Input</Label>
+							<Dropdown
+								id="client-device"
+								value={clientMic.deviceId}
+								onpick={pickClientDevice}
+								options={[
+									{ value: '', label: 'Default input' },
+									...clientMic.devices.map((device) => ({ value: device.id, label: device.label })),
+								]}
+								placeholder="Default input"
+							/>
+						</div>
+						<div class="flex items-center gap-2">
+							{#if clientMic.streaming}
+								<LevelMeter peak={clientMic.peak} class="w-16 shrink-0" />
+								<Button variant="ghost" size="sm" onclick={() => clientMic.stop()}>Release</Button>
+							{:else}
+								<Button
+									variant="secondary"
+									class="w-full sm:w-auto"
+									disabled={!clientMic.available || clientMic.state === 'starting'}
+									onclick={() => clientMic.start(clientMic.deviceId)}
+								>
+									{clientMic.state === 'starting' ? 'Asking…' : 'Use this microphone'}
+								</Button>
+							{/if}
+						</div>
+					{/if}
+				</div>
+				<!-- Four failures with four different fixes, each a whole sentence naming
+				     where the fix is: a secure context this page cannot grant itself, a
+				     permission, a missing device, a socket. Collapsing them into
+				     "microphone unavailable" is what sends somebody hunting for a setting
+				     that was never the problem. -->
+				{#if fromClient}
+					{#if clientMic.notice}
+						<span class="text-xs font-medium text-destructive">{clientMic.notice.text}</span>
+					{/if}
+					<span class="text-xs text-muted-foreground">{clientHint}</span>
+				{:else if !clientMic.available && clientMic.notice}
+					<!-- Muted rather than red, and shown even though the server's
+					     microphone is the one selected: a greyed option with the reason
+					     only in a tooltip is the dead picker this was meant to avoid,
+					     while an alarm about a feature nobody asked for is noise. -->
+					<span class="text-xs text-muted-foreground">{clientMic.notice.text}</span>
 				{/if}
 			</div>
 

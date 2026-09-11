@@ -4,6 +4,18 @@ Specifics about running Loreline on a real device, the ones that cost time to
 discover. The step-by-step install lives in the README's
 [Deployment](../README.md#deployment) section.
 
+## None of the microphone notes below apply if the browser records
+
+The capture card can record from the device the browser is running on instead
+of from a microphone on the server (`docs/adr/0010`). A box that records that
+way needs no `/dev/snd` passthrough, no PipeWire session, no Ubuntu base image
+and none of the Bluetooth setup below. What it needs instead is a secure
+context, because no browser hands out a microphone over plain HTTP: see the
+README's [Recording from a laptop](../README.md#recording-from-a-laptop).
+
+Everything below is still the right answer for a box that is itself at the
+table, and both paths run the same session.
+
 ## Bluetooth microphones need an Ubuntu-based image
 
 If you use a Bluetooth mic, or any source that exists only inside the host's

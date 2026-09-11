@@ -19,7 +19,7 @@ from loreline import __version__
 from loreline.diarization.remote import probe_diarizer
 from loreline.health import HealthReport, HealthStatus
 from loreline.llm import DEFAULT_RECAP_PROMPT, DEFAULT_SCENE_PROMPT, DEFAULT_SYSTEM_PROMPT
-from loreline.models import SessionStatus
+from loreline.models import CaptureSourceKind, SessionStatus
 from loreline.monitoring import (
     AlertChannel,
     channel_token_secret,
@@ -113,6 +113,13 @@ class HealthResponse(BaseModel):
     A device sends frames whether or not anyone is speaking, so this stays near
     zero all evening on a healthy capture and climbs on a dead one - which is
     the difference between a quiet table and a microphone that stopped."""
+    capture_source: CaptureSourceKind | None = None
+    """Which microphone the active session is listening to; null while idle.
+    ``client`` means a browser is the source (``docs/adr/0010``), which every
+    other screen has to know: a phone opening the dashboard sees a session
+    that is capturing and must not be told it is the one holding it up, while
+    the tab that *is* the source has to be told that closing it ends the
+    recording."""
 
 
 @router.get("/livez")
@@ -170,6 +177,7 @@ async def healthz(request: Request) -> HealthResponse:
         stt_error=state.manager.stt_error(),
         captured_seconds=_rounded(state.manager.captured_seconds()),
         capture_last_frame_age=_rounded(state.manager.capture_last_frame_age()),
+        capture_source=state.manager.capture_source(),
     )
 
 

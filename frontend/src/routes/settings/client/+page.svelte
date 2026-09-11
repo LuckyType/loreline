@@ -321,7 +321,11 @@ onDestroy(stopMeter)
 		{#if meterError}
 			<p class="text-sm text-destructive">{meterError}</p>
 		{/if}
-		<p class="text-xs text-muted-foreground">Used for every session started from the Dashboard.</p>
+		<p class="text-xs text-muted-foreground">
+			Used for every session the Dashboard starts from this recorder's own microphone. A session can
+			also be recorded by the browser it is started in, which uses that device's input and nothing
+			here.
+		</p>
 		<Separator class="my-3" />
 		<div class="flex items-center justify-between gap-2">
 			<span class="shrink-0 text-muted-foreground">Revision</span>

@@ -1866,6 +1866,23 @@ export interface components {
             };
         };
         /**
+         * CaptureSourceKind
+         * @description Which microphone a capture is listening to.
+         *
+         *     ``DEVICE`` is a sound card on the machine running Loreline, opened through
+         *     PortAudio. ``CLIENT`` is the **client microphone**: the browser that
+         *     started the session, capturing with ``getUserMedia`` and streaming the
+         *     frames over ``WS /ws/audio/capture`` (see ``docs/adr/0010``). The two are
+         *     one seam apart and identical below it - the same frames, the same VAD, the
+         *     same WAV, the same transcript - so this only ever decides which source the
+         *     capture factory builds, and after that which sentence the dashboard says.
+         *
+         *     ``DEVICE`` is the default, so every stored default, every script and every
+         *     caller written before a browser could record keeps working unchanged.
+         * @enum {string}
+         */
+        CaptureSourceKind: "device" | "client";
+        /**
          * DeviceSetting
          * @description The persisted default audio input device (device index as a string, or null).
          */
@@ -2114,6 +2131,7 @@ export interface components {
             captured_seconds?: number | null;
             /** Capture Last Frame Age */
             capture_last_frame_age?: number | null;
+            capture_source?: components["schemas"]["CaptureSourceKind"] | null;
         };
         /**
          * HealthStatus
@@ -2978,6 +2996,8 @@ export interface components {
             fallback_provider?: string | null;
             /** Campaign Id */
             campaign_id?: string | null;
+            /** @default device */
+            source?: components["schemas"]["CaptureSourceKind"];
             /** Device */
             device?: number | string | null;
             /** Model */

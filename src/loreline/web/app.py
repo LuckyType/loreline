@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from fastapi import FastAPI
 
 from loreline import __version__
+from loreline.audio.client_source import ClientMic
 from loreline.bus import EventBus
 from loreline.diarization import BuildDiarizer, DiarizerFactory
 from loreline.logbus import LogBroadcaster
@@ -40,7 +41,7 @@ from loreline.reprocess import DiarizerProbe, ReprocessManager
 from loreline.secrets import SecretStore
 from loreline.services import ServiceManager
 from loreline.session import SessionManager
-from loreline.session.manager import BackendFactory, CaptureFactory
+from loreline.session.manager import BackendFactory, CaptureFactory, capture_factory_for
 from loreline.session.recovery import recover_orphaned_indexes
 from loreline.settings import Settings, get_settings
 from loreline.staleness import warn_about_stale_favorites
@@ -111,6 +112,13 @@ class AppState:
     audio_store: AudioStore
     video_store: VideoStore
     log_store: LogStore
+    client_mic: ClientMic
+    """The single pending browser capture socket (``WS /ws/audio/capture``).
+
+    On the state rather than inside the session manager because it outlives
+    any one session: a browser opens its microphone, watches the meter and
+    only then presses Start, and the frames arriving in between are what makes
+    the capture pre-flight answerable."""
     manager: SessionManager
     reprocess: ReprocessManager
     video: VideoManager
@@ -129,6 +137,7 @@ def _build_state(
     broadcaster: LogBroadcaster,
     log_store: LogStore,
     *,
+    client_mic: ClientMic | None,
     capture_factory: CaptureFactory | None,
     backend_factory: BackendFactory | None,
     diarizer_factory: BuildDiarizer | None,
@@ -167,6 +176,10 @@ def _build_state(
     )
     autostart = Autostart(unit=settings.systemd_unit, runner=command_runner)
     transcript_bus: EventBus[TranscriptEvent] = EventBus()
+    # The capture socket registry and the factory that reads it are built
+    # together: "which microphone" is decided once, at the factory, and
+    # nothing below the seam ever asks again.
+    mic = client_mic or ClientMic()
     # One factory for both managers, so a live session and a reprocess job
     # build their diarizer, and resolve its key, the same way.
     diarizers = diarizer_factory or DiarizerFactory(provider_repo, secrets)
@@ -179,7 +192,7 @@ def _build_state(
         transcript_bus=transcript_bus,
         audio_store=audio_store,
         alerter=alert_manager,
-        capture_factory=capture_factory,
+        capture_factory=capture_factory or capture_factory_for(mic),
         backend_factory=backend_factory,
         diarizer_factory=diarizers,
         disk_threshold_bytes=settings.disk_alert_threshold_bytes,
@@ -229,6 +242,7 @@ def _build_state(
         audio_store=audio_store,
         video_store=video_store,
         log_store=log_store,
+        client_mic=mic,
         manager=manager,
         reprocess=reprocess_manager,
         video=video_manager,
@@ -276,6 +290,7 @@ async def _warn_stale_favorites(state: AppState, settings: Settings) -> None:
 def create_app(
     settings: Settings | None = None,
     *,
+    client_mic: ClientMic | None = None,
     capture_factory: CaptureFactory | None = None,
     backend_factory: BackendFactory | None = None,
     diarizer_factory: BuildDiarizer | None = None,
@@ -287,11 +302,15 @@ def create_app(
     """Create and configure the Loreline FastAPI app.
 
     The ``*_factory`` overrides let tests run the session pipeline without audio
-    hardware or live STT endpoints. ``diarizer_probe`` is there for the same
-    reason and for one caller: enqueueing a diarize job first asks whether its
-    diarizer answers (see ``ReprocessManager.enqueue``), and a test that
-    substitutes a diarizer has no service at that endpoint for a real probe to
-    reach.
+    hardware or live STT endpoints. ``client_mic`` is there for a narrower
+    case: a test that wants the real browser-capture socket and the real
+    client source, but a detector that does not need the ``audio`` extra, has
+    to hand the same registry to both this and its own capture factory.
+
+    ``diarizer_probe`` is there for the same reason and for one caller:
+    enqueueing a diarize job first asks whether its diarizer answers (see
+    ``ReprocessManager.enqueue``), and a test that substitutes a diarizer has
+    no service at that endpoint for a real probe to reach.
     """
     settings = settings or get_settings()
     broadcaster = LogBroadcaster()
@@ -310,6 +329,7 @@ def create_app(
             settings,
             broadcaster,
             log_store,
+            client_mic=client_mic,
             capture_factory=capture_factory,
             backend_factory=backend_factory,
             diarizer_factory=diarizer_factory,

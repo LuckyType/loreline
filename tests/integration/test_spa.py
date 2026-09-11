@@ -27,3 +27,18 @@ async def test_api_still_takes_precedence(client: AsyncClient) -> None:
     resp = await client.get("/api/system/healthz")
     assert resp.status_code == 200
     assert resp.json()["status"] == "ok"
+
+
+async def test_the_audio_worklet_is_served_as_javascript(client: AsyncClient) -> None:
+    """The browser fetches this one by URL, so the SPA mount has to hand it over.
+
+    An ``AudioWorklet`` processor cannot be bundled into the app's module graph
+    (``addModule`` takes a URL and the browser runs the script on the audio
+    thread), so the client microphone depends on a static file surviving both
+    the SvelteKit build and this mount - and on it arriving with a JavaScript
+    content type, because a worklet served as anything else is refused outright.
+    """
+    resp = await client.get("/client-mic-worklet.js")
+    assert resp.status_code == 200
+    assert "javascript" in resp.headers["content-type"]
+    assert "registerProcessor" in resp.text

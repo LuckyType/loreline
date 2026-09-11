@@ -89,14 +89,35 @@ three times over, with reconnect handled underneath by ws.ts.
 
 ## Audio and transcript
 
+**Capture source**: Where a session's frames come from, and the one thing a start request
+decides about them: a sound card on this machine through PortAudio, or the **client
+microphone** below. It is one protocol, "a stoppable source of timestamped PCM frames", so
+everything past the capture factory - the capture loop, the stats, the level meter, the disk
+watch, the WAV writer, StreamPath, SttRouter - is written against the frames and cannot tell
+which one it is reading. See `docs/adr/0010`.
+_Avoid_: capture backend, audio input (each named the device rather than the seam)
+
+**Client microphone**: The browser as the capture source: `getUserMedia` in the tab, an
+AudioWorklet turning Float32 into PCM16, and a socket carrying the frames to
+`WS /ws/audio/capture`, where they are resampled and re-blocked into an ordinary capture.
+Every frame is stamped on arrival at the server, never from the browser's clock, and the
+one socket is refused to a second tab rather than swapped. It needs a secure context, which
+is a deployment fact and not an application one. The tab is then the recording: closing it
+ends the session a reconnect window later.
+_Avoid_: browser recording (that is the import, ADR 0008), remote mic
+
 **Capture pre-flight**: Opening and immediately releasing the chosen microphone while the
 start request is still being answered, through the same calls the capture itself makes. A
 device that refuses fails the request. The device is opened at whatever rate it serves and
 resampled to the provider's rate, so "this mic only does 48 kHz" is no longer a refusal.
+For a client microphone the same question is asked of the socket: is a browser attached, and
+has it delivered audio in the last few seconds.
 
 **Capture liveness**: How much audio a running session has received, and how long ago its
 last frame arrived. A microphone delivers frames in silence too, so a climbing age is a
 stopped device rather than a quiet table - which is the one thing "capturing" cannot say.
+A client microphone reads the same either way, and a gap it comes back from is padded with
+silence so the recording's byte offset stays the session clock.
 
 **Utterance**: One voiced stretch of session audio, cut by the VAD chunker, with its
 start and end on the session clock.
