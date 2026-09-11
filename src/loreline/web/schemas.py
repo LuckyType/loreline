@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_va
 
 from loreline.models import (
     ORIGINAL_VERSION,
+    CaptureSourceKind,
     DiarizationConfig,
     OpenRouterRouting,
     ProviderKind,
@@ -110,7 +111,16 @@ class StartSessionRequest(BaseModel):
     primary_provider: str
     fallback_provider: str | None = None
     campaign_id: str | None = None
+    source: CaptureSourceKind = CaptureSourceKind.DEVICE
+    """Which microphone to record from: a sound card on the server, or the
+    browser making this request (see ``docs/adr/0010``). Defaults to the
+    server's device, so every stored default and every existing caller keeps
+    working. ``client`` requires a live ``WS /ws/audio/capture`` socket; a
+    start without one is refused with a sentence about the browser, not about
+    a missing device."""
     device: int | str | None = None
+    """Which sound card, when ``source`` is ``device``. Meaningless for a
+    client capture, where the browser picked the input on its own side."""
     model: str = Field(min_length=1)
     """The model to transcribe with. Required, and the only place it is decided:
     a provider row carries no model any more, so there is nothing to fall back
