@@ -180,6 +180,20 @@ class ActionDefaults(BaseModel):
     A campaign's own ``recap_prompt`` wins over this one: the global default is
     how every table's recaps read, and a campaign that wants something else
     (another language, a voice, a length) says so on itself."""
+    scene_prompt: str = ""
+    """Scene system prompt; blank means the built-in default (served filled in).
+
+    The instructions that condense a recap into the single shot a video model
+    can render, behind "Make it a scene" in the generate dialog."""
+    video_style: str = ""
+    """The look generated scenes are written in; blank means none.
+
+    Prose rather than a menu, because the interesting answers are not a fixed
+    set: "90s anime cel animation", "loose watercolour, visible brush strokes",
+    "gritty photoreal, handheld camera". It shapes the scene the conversion
+    writes rather than being pasted onto the prompt at generate time, so what
+    reaches the video model stays exactly what the GM can read and edit in the
+    box."""
     campaign_id: str = ""
     """The campaign the capture card starts a session in. Remembered here
     rather than in the browser, because it is the same answer at every screen
@@ -305,6 +319,50 @@ class VideoGenerateRequest(BaseModel):
     aspect_ratio: str | None = None
     generate_audio: bool = False
     seed: int | None = None
+    scene_model: str | None = None
+    """The model that condensed ``scene_source`` into ``prompt``, when one did.
+
+    None for a prompt written or edited by hand, which is the whole signal: the
+    pair records a conversion that actually produced the text being sent, so an
+    edit afterwards clears it rather than crediting a model for a line somebody
+    else rewrote."""
+    scene_source: str | None = None
+    """The text the scene was condensed from, as the box held it."""
+
+
+class SceneRequest(BaseModel):
+    """Condense a recap into the one scene a video model can render.
+
+    Unlike the generation itself this is a foreground call: the dialog waits on
+    it and drops the answer into the prompt box, where it can be read and
+    edited before anything is spent on a video.
+    """
+
+    provider_id: str
+    model: str = Field(min_length=1)
+    """Required, for the same reason the summarize route requires one: the
+    provider row carries no model, and what is recorded as the scene's author
+    is exactly what ran."""
+    text: str
+    """What to condense - whatever the dialog's prompt box holds, which starts
+    as the session summary and is whatever the GM has left in it since."""
+    style: str = ""
+    """The look to write the scene in; blank means none.
+
+    Sent by the client rather than read from the stored default here: the
+    dialog seeds its own field from that default, so a GM who clears it for one
+    video means "no style this time", which a server-side fallback would
+    quietly overrule."""
+    reasoning_effort: str | None = None
+    """How hard a reasoning model should think; blank falls back to the stored
+    summarize default, then to the model's own."""
+
+
+class SceneResult(BaseModel):
+    """The scene the conversion wrote, and the model that wrote it."""
+
+    scene: str
+    model: str
 
 
 class VersionLogs(BaseModel):

@@ -87,6 +87,29 @@ DEFAULT_PREVIOUSLY_ON_PROMPT = (
     "doing and what is still open. Do not mention the recaps or yourself."
 )
 
+# The one that turns a recap into something a video model can draw. A recap is
+# a chapter: several beats, causation, names, and none of that survives contact
+# with a model that renders a few seconds of a single shot. So this asks for
+# one moment, described the way a shot list describes one.
+#
+# It asks for English on purpose, and that is the line to change if the trade
+# stops being worth it: video models are trained overwhelmingly on English
+# captions, so a German recap converted into a German scene renders visibly
+# worse than the same scene written in English. Overridable globally (kv
+# `action_defaults.scene_prompt`) with the same blank-means-default rule the
+# summary and recap prompts have.
+DEFAULT_SCENE_PROMPT = (
+    "You turn the recap of a tabletop RPG session into one scene description "
+    "for a video model. Describe a single moment, not a sequence: one subject, "
+    "one action, one place. Be concrete and visual - who or what is in frame, "
+    "what they are doing, where, in what light, from what camera distance and "
+    "angle, and the mood of the shot. Do not narrate the plot, do not write "
+    "dialogue, and do not use proper names a model cannot picture; say what "
+    "the character or the place looks like instead. Write the scene in "
+    "English even when the recap is in another language. Answer with the "
+    "scene and nothing else: two or three sentences, under 800 characters."
+)
+
 # Reasoning-effort levels, in the order the pickers show them. Not hand-written:
 # read off the OpenRouter SDK's generated request model, so the set tracks their
 # OpenAPI spec instead of drifting from it. "none" disables reasoning for a

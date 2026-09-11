@@ -137,6 +137,11 @@ class VideoManager:
             provider_id=req.provider_id,
             model=req.model,
             prompt=prompt,
+            # Blank is the same answer as absent here: a client that always
+            # sends the fields and a client that never heard of them must not
+            # produce two different records of "nobody converted this".
+            scene_model=(req.scene_model or "").strip() or None,
+            scene_source=(req.scene_source or "").strip() or None,
             duration=req.duration,
             resolution=req.resolution,
             aspect_ratio=req.aspect_ratio,

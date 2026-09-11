@@ -1,7 +1,7 @@
 """Shared plumbing for the routes that ask an LLM for a text.
 
-Four routes now hand a transcript (or a stack of recaps) to a chat model: the
-summary, the recap, the extraction and the campaign's "previously on". They
+Five routes now hand a text to a chat model: the summary, the recap, the
+extraction, the campaign's "previously on" and the video scene. They
 differ in the prompt and in where the answer is stored, and they agreed on
 everything else by copying it - which provider row is usable, where its key
 comes from, which prompt wins when a campaign, the stored defaults and the
@@ -16,7 +16,7 @@ from fastapi.exceptions import HTTPException
 from starlette.status import HTTP_400_BAD_REQUEST, HTTP_404_NOT_FOUND
 
 from loreline.capabilities import supports
-from loreline.llm import DEFAULT_RECAP_PROMPT
+from loreline.llm import DEFAULT_RECAP_PROMPT, DEFAULT_SCENE_PROMPT
 from loreline.models import Interaction, ProviderConfig
 from loreline.web.deps import load_action_defaults
 
@@ -64,3 +64,28 @@ async def recap_prompt(state: AppState, campaign_id: str | None) -> str:
             return campaign.recap_prompt.strip()
     defaults = await load_action_defaults(state)
     return defaults.recap_prompt.strip() or DEFAULT_RECAP_PROMPT
+
+
+async def scene_prompt(state: AppState, style: str) -> str:
+    """The scene instructions: the stored default, else the built-in text, plus a style.
+
+    Two levels rather than the recap's three, deliberately: there is no
+    per-campaign override yet, and when there is one it slots in above the
+    stored default exactly as :func:`recap_prompt` does it.
+
+    ``style`` is the look the scene should be written in, and it arrives from
+    the client rather than being read here. That is what keeps the promise
+    VideoGenerateRequest makes: the video model is sent whatever the GM left in
+    the prompt box and nothing else, so a style has to shape the text while it
+    is still in the box, where it can be read and edited, instead of being
+    appended to the request behind them.
+    """
+    defaults = await load_action_defaults(state)
+    instructions = defaults.scene_prompt.strip() or DEFAULT_SCENE_PROMPT
+    look = style.strip()
+    if not look:
+        return instructions
+    return (
+        f"{instructions}\n\nRender the scene in this visual style, and describe "
+        f"the style as part of the scene: {look}"
+    )

@@ -171,6 +171,9 @@ export type SearchResults = Complete<Schemas['SearchResults']>
 export type VideoModelInfo = Complete<Schemas['VideoModelInfo']>
 export type VideoJob = Complete<Schemas['VideoJob']>
 export type VideoGenerateRequest = Schemas['VideoGenerateRequest']
+/** Condense whatever is in the prompt box into one renderable shot. */
+export type SceneRequest = Schemas['SceneRequest']
+export type SceneResult = Complete<Schemas['SceneResult']>
 
 // --- system and monitoring --------------------------------------------------
 

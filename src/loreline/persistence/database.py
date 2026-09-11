@@ -471,6 +471,15 @@ MIGRATIONS: list[str] = [
     """,
     # v24 - full-text search over the transcript (see FTS5_MIGRATION below).
     FTS5_MIGRATION,
+    # v25 - what a generated video's prompt was made from. A prompt condensed
+    # from a recap by a model records that model and the recap it read; a
+    # prompt the GM wrote or edited leaves both NULL, which is what tells the
+    # two apart afterwards. Nullable with no backfill on purpose: every row
+    # that predates this was typed by hand as far as anyone can prove.
+    """
+    ALTER TABLE video_jobs ADD COLUMN scene_model  TEXT;
+    ALTER TABLE video_jobs ADD COLUMN scene_source TEXT;
+    """,
 ]
 
 

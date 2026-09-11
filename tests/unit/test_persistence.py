@@ -20,6 +20,7 @@ from loreline.models import (
     SessionOrigin,
     SessionStatus,
     TranscriptEvent,
+    VideoJob,
     Word,
 )
 from loreline.persistence import (
@@ -29,6 +30,7 @@ from loreline.persistence import (
     ReprocessRepository,
     SessionRepository,
     TranscriptRepository,
+    VideoRepository,
 )
 from loreline.persistence.database import MIGRATIONS
 from loreline.web.deps import ACTION_DEFAULTS_KEY
@@ -41,6 +43,7 @@ _V_DROP_VOSK = 14  # v15: delete rows of the removed vosk kind and what named th
 _V_DROP_PROVIDER_MODEL = 15  # v16: drop providers.model, chosen per request now
 _V_DROP_PROVIDER_WIRE = 16  # v17: drop providers.protocol and providers.capabilities
 _V_HAS_SPEAKERS = 20  # v21: reprocess_jobs.has_speakers, backfilled from each job's rows
+_V_VIDEO_SCENE = 24  # v25: video_jobs.scene_model / scene_source, the converted prompt's record
 
 
 @pytest_asyncio.fixture
@@ -715,3 +718,76 @@ async def test_migration_backfills_has_speakers_from_the_rows_each_job_wrote(
             "empty": False,  # no rows at all
             "pass": True,  # the relabeled copy it wrote, tagged with its target
         }
+
+
+async def test_video_job_records_the_scene_its_prompt_was_converted_from(db: Database) -> None:
+    """Both halves of a converted prompt survive the round trip, and a
+    hand-written one stores neither - that absence is the only thing that tells
+    a model's scene from a GM's own line afterwards."""
+    videos = VideoRepository(db)
+    await SessionRepository(db).create(Session(id="s1", started_at=0.0))
+
+    await videos.create(
+        VideoJob(
+            id="converted",
+            session_id="s1",
+            provider_id="p1",
+            model="alibaba/wan-3.0",
+            prompt="A lone rider on a burning bridge, dusk, wide shot.",
+            scene_model="gpt-5.6-luna",
+            scene_source="The party crossed the bridge, at length.",
+            created_at=1.0,
+        )
+    )
+    await videos.create(
+        VideoJob(
+            id="by-hand",
+            session_id="s1",
+            provider_id="p1",
+            model="alibaba/wan-3.0",
+            prompt="a wizard walks into a tavern",
+            created_at=2.0,
+        )
+    )
+
+    converted = await videos.get("converted")
+    assert converted is not None
+    assert converted.scene_model == "gpt-5.6-luna"
+    assert converted.scene_source == "The party crossed the bridge, at length."
+
+    by_hand = await videos.get("by-hand")
+    assert by_hand is not None
+    assert by_hand.scene_model is None
+    assert by_hand.scene_source is None
+
+
+async def test_v25_adds_the_scene_columns_to_an_existing_database(db: Database) -> None:
+    """An install that already has generated videos gains the columns without
+    losing its rows, and every one of them reads as hand written - which is the
+    honest answer for a prompt nobody recorded a conversion for."""
+    conn = db.connection
+    await SessionRepository(db).create(Session(id="s1", started_at=0.0))
+    videos = VideoRepository(db)
+    await videos.create(
+        VideoJob(
+            id="old",
+            session_id="s1",
+            provider_id="p1",
+            model="alibaba/wan-3.0",
+            prompt="a wizard walks into a tavern",
+            created_at=1.0,
+        )
+    )
+
+    # Take the columns away to stand in for a pre-v25 database, then run only
+    # the migration under test (see the v16 test above for why).
+    await conn.execute("ALTER TABLE video_jobs DROP COLUMN scene_model;")
+    await conn.execute("ALTER TABLE video_jobs DROP COLUMN scene_source;")
+    await conn.executescript(MIGRATIONS[_V_VIDEO_SCENE])
+    await conn.commit()
+
+    migrated = await videos.get("old")
+    assert migrated is not None
+    assert migrated.prompt == "a wizard walks into a tavern"
+    assert migrated.scene_model is None
+    assert migrated.scene_source is None

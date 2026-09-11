@@ -16,6 +16,8 @@
  * opens, and one that finishes while it is open appears in place.
  */
 
+import { ChevronDown } from '@lucide/svelte'
+import { SvelteSet } from 'svelte/reactivity'
 import { Button } from '$lib/components/ui/button'
 import {
 	Dialog,
@@ -51,6 +53,17 @@ function jobMeta(job: VideoJob): string {
 	if (job.resolution) parts.push(job.resolution)
 	return parts.join(' · ')
 }
+
+/** Which prompts are open. Collapsed is the default and the list stays
+ *  scannable for it: a prompt runs from one line to a whole recap, and a list
+ *  of them at full height is a list nobody scrolls to the video in. By id
+ *  rather than a flag on the row, because the rows are refetched by the page's
+ *  poll while this is open and a flag would be thrown away with them. */
+const openPrompts = new SvelteSet<string>()
+
+function togglePrompt(jobId: string) {
+	if (!openPrompts.delete(jobId)) openPrompts.add(jobId)
+}
 </script>
 
 <Dialog bind:open>
@@ -81,6 +94,34 @@ function jobMeta(job: VideoJob): string {
 							{/if}
 							<Button variant="ghost" size="sm" onclick={() => ondelete?.(job.id)}>Delete</Button>
 						</span>
+					</div>
+					<!-- The prompt this was generated from, which was stored from the
+					     first version and never shown: a finished video is otherwise
+					     four seconds of something with no record of what was asked for,
+					     and the one question a second attempt starts from is what the
+					     first one said. -->
+					<div class="flex flex-col gap-0.5">
+						<button
+							type="button"
+							class="flex w-full items-start gap-1.5 rounded-md text-left text-xs text-muted-foreground"
+							aria-expanded={openPrompts.has(job.id)}
+							onclick={() => togglePrompt(job.id)}
+						>
+							<ChevronDown
+								class="mt-0.5 size-3.5 shrink-0 transition-transform {openPrompts.has(job.id)
+									? ''
+									: '-rotate-90'}"
+							/>
+							<span class="min-w-0 {openPrompts.has(job.id) ? 'whitespace-pre-wrap' : 'truncate'}">
+								{job.prompt}
+							</span>
+						</button>
+						{#if job.scene_model}
+							<!-- Named rather than implied: a prompt a model condensed out of
+							     the recap and one the GM wrote are different things to judge a
+							     result against, and only the job knows which this was. -->
+							<span class="pl-5 text-xs text-muted-foreground">Scene by {job.scene_model}</span>
+						{/if}
 					</div>
 					{#if job.status === 'done'}
 						<!-- svelte-ignore a11y_media_has_caption -->

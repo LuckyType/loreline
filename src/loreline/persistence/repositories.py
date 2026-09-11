@@ -550,10 +550,10 @@ class VideoRepository:
         await self._db.connection.execute(
             """
             INSERT INTO video_jobs
-                (id, session_id, provider_id, model, prompt, duration, resolution,
-                 aspect_ratio, generate_audio, seed, status, remote_id, video_path,
-                 created_at, started_at, finished_at, error)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                (id, session_id, provider_id, model, prompt, scene_model, scene_source,
+                 duration, resolution, aspect_ratio, generate_audio, seed, status,
+                 remote_id, video_path, created_at, started_at, finished_at, error)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
             """,
             (
                 job.id,
@@ -561,6 +561,8 @@ class VideoRepository:
                 job.provider_id,
                 job.model,
                 job.prompt,
+                job.scene_model,
+                job.scene_source,
                 job.duration,
                 job.resolution,
                 job.aspect_ratio,
@@ -643,6 +645,8 @@ def _row_to_video_job(row: aiosqlite.Row) -> VideoJob:
         provider_id=row["provider_id"],
         model=row["model"],
         prompt=row["prompt"],
+        scene_model=row["scene_model"],
+        scene_source=row["scene_source"],
         duration=row["duration"],
         resolution=row["resolution"],
         aspect_ratio=row["aspect_ratio"],

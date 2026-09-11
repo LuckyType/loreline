@@ -18,7 +18,7 @@ from starlette.status import HTTP_404_NOT_FOUND, HTTP_409_CONFLICT, HTTP_503_SER
 from loreline import __version__
 from loreline.diarization.remote import probe_diarizer
 from loreline.health import HealthReport, HealthStatus
-from loreline.llm import DEFAULT_RECAP_PROMPT, DEFAULT_SYSTEM_PROMPT
+from loreline.llm import DEFAULT_RECAP_PROMPT, DEFAULT_SCENE_PROMPT, DEFAULT_SYSTEM_PROMPT
 from loreline.models import SessionStatus
 from loreline.monitoring import (
     AlertChannel,
@@ -282,42 +282,60 @@ async def set_autostart(request: Request, body: AutostartUpdate) -> AutostartSta
     return AutostartState(enabled=enabled)
 
 
+# The prompt fields that are editable copies of a built-in text, and the text
+# each one falls back to. Stated once because there are three of them now and
+# the rule is the same for all three in both directions: served filled in so
+# the settings page shows concrete instructions, stored blank when it still
+# says what the built-in text says, so an untouched field keeps tracking later
+# improvements to that text rather than pinning today's copy.
+_BUILT_IN_PROMPTS: dict[str, str] = {
+    "summarize_prompt": DEFAULT_SYSTEM_PROMPT,
+    "recap_prompt": DEFAULT_RECAP_PROMPT,
+    "scene_prompt": DEFAULT_SCENE_PROMPT,
+}
+
+
+def _filled_in(defaults: ActionDefaults) -> ActionDefaults:
+    """A copy with every blank prompt showing the built-in text it stands for."""
+    filled = {
+        field: text
+        for field, text in _BUILT_IN_PROMPTS.items()
+        if not getattr(defaults, field).strip()
+    }
+    return defaults.model_copy(update=filled) if filled else defaults
+
+
+def _blanked(defaults: ActionDefaults) -> ActionDefaults:
+    """A copy with every prompt that still says the built-in text stored blank."""
+    blanked = {
+        field: ""
+        for field, text in _BUILT_IN_PROMPTS.items()
+        if getattr(defaults, field).strip() in ("", text)
+    }
+    return defaults.model_copy(update=blanked) if blanked else defaults
+
+
 @router.get("/defaults", dependencies=_auth)
 async def get_defaults(request: Request) -> ActionDefaults:
     """Return the per-action default models/mode used to pre-select the pickers.
 
-    A blank stored summary or recap prompt is served as the built-in default
-    text, so the settings UI always shows the concrete, editable instructions -
-    clearing the field and saving is the reset-to-default gesture.
+    A blank stored prompt is served as the built-in default text, so the
+    settings UI always shows the concrete, editable instructions - clearing the
+    field and saving is the reset-to-default gesture.
     """
-    defaults = await load_action_defaults(get_state(request))
-    if not defaults.summarize_prompt.strip():
-        defaults.summarize_prompt = DEFAULT_SYSTEM_PROMPT
-    if not defaults.recap_prompt.strip():
-        defaults.recap_prompt = DEFAULT_RECAP_PROMPT
-    return defaults
+    return _filled_in(await load_action_defaults(get_state(request)))
 
 
 @router.put("/defaults", dependencies=_auth)
 async def set_defaults(request: Request, body: ActionDefaults) -> ActionDefaults:
     """Persist the per-action defaults.
 
-    A summary or recap prompt equal to the built-in default (or blank) is
-    stored blank, so an untouched field keeps tracking future improvements to
-    the built-in text instead of pinning today's copy. The response mirrors
-    GET: served filled in.
+    A prompt equal to its built-in default (or blank) is stored blank; see
+    :data:`_BUILT_IN_PROMPTS`. The response mirrors GET: served filled in.
     """
-    stored = body
-    if stored.summarize_prompt.strip() in ("", DEFAULT_SYSTEM_PROMPT):
-        stored = stored.model_copy(update={"summarize_prompt": ""})
-    if stored.recap_prompt.strip() in ("", DEFAULT_RECAP_PROMPT):
-        stored = stored.model_copy(update={"recap_prompt": ""})
+    stored = _blanked(body)
     await get_state(request).settings_repo.set(ACTION_DEFAULTS_KEY, stored.model_dump_json())
-    if not stored.summarize_prompt:
-        stored = stored.model_copy(update={"summarize_prompt": DEFAULT_SYSTEM_PROMPT})
-    if not stored.recap_prompt:
-        stored = stored.model_copy(update={"recap_prompt": DEFAULT_RECAP_PROMPT})
-    return stored
+    return _filled_in(stored)
 
 
 def _channel_view(channel: AlertChannel, secrets: SecretStore) -> AlertChannelView:

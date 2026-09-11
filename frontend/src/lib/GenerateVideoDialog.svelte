@@ -3,7 +3,7 @@
  * "Generate video" - turns a session summary into a video prompt and submits
  * it to an OpenRouter video model.
  *
- * Two things shape this dialog:
+ * Three things shape this dialog:
  *
  * 1. The prompt is *seeded* from the summary, never bound to it. The GM edits
  *    what actually gets sent, and a summary is a recap, not a shot
@@ -11,7 +11,13 @@
  *    Which is why the box carries a character count and a Reset button: an
  *    eight-hour session's recap seeds several thousand characters, and there
  *    is no way to put it back once it has been cut about.
- * 2. The parameter controls are built from the chosen model. Video models
+ * 2. A recap is not a shot description, and "Make it a scene" is the one
+ *    click that turns it into one: the same chat model that writes the
+ *    summaries rewrites the box as a single renderable moment, in the style
+ *    the field below asks for. It is a conversion, not a binding - the answer
+ *    lands in the box and the GM still owns what is sent, which is what lets
+ *    the style be visible and editable rather than pasted on server side.
+ * 3. The parameter controls are built from the chosen model. Video models
  *    differ in which durations, resolutions and aspect ratios they accept
  *    (some accept no duration at all), and a model handed a parameter it does
  *    not support rejects the whole request - so anything the model does not
@@ -35,7 +41,9 @@ import {
 	DialogHeader,
 	DialogTitle,
 } from '$lib/components/ui/dialog'
+import { Input } from '$lib/components/ui/input'
 import { Label } from '$lib/components/ui/label'
+import ModelPicker from '$lib/ModelPicker.svelte'
 import { videoCatalog } from '$lib/modelCatalog.svelte'
 import { Textarea } from '$lib/components/ui/textarea'
 import type { VideoJob } from '$lib/wire'
@@ -65,6 +73,33 @@ let aspectRatio = $state('')
 let generateAudio = $state(false)
 let busy = $state(false)
 let error = $state('')
+
+// --- the scene conversion --------------------------------------------------
+//
+// Runs on the summarizing model by default, because that is the one already
+// configured to read a transcript and answer in prose. The picker is seeded,
+// never stored: this is a per-dialog choice, and a GM who wants a different
+// model for every conversion should not have to name a new default to get one.
+const sceneProvider = $derived(actionSetup.preferredProvider('summarize'))
+const sceneDefaultModel = $derived(actionSetup.pairedDefault('summarize', sceneProvider))
+let sceneModel = $derived(actionSetup.preferredModelFor('summarize', sceneProvider))
+// Seeded from the stored default (Settings, Video style) and editable here, so
+// one video can look different without a trip to Settings. What the box shows
+// is what the conversion is asked for; clearing it means no particular style.
+let style = $derived(actionSetup.defaults.video_style)
+let converting = $state(false)
+let sceneError = $state('')
+/** The box's contents just before the last conversion, so one can be undone.
+ *  Null when there is nothing to go back to. */
+let beforeScene = $state<string | null>(null)
+/** What the last conversion wrote, what wrote it, and what it read. */
+let scene = $state<{ text: string; model: string; source: string } | null>(null)
+/** The conversion the prompt can honestly be credited to: the last one, and
+ *  only while the box still holds exactly what it wrote. Any edit after a
+ *  conversion - a word changed, a sentence cut - makes the prompt the GM's
+ *  again, and a job that claimed a model wrote it would be recording a text
+ *  that model never produced. */
+const converted = $derived(scene && scene.text === prompt ? scene : null)
 
 const provider = $derived(providers.find((p) => p.id === providerId))
 const providerKind = $derived(provider?.kind)
@@ -163,6 +198,48 @@ $effect(() => {
 	if (!audioOffered) generateAudio = false
 })
 
+/** Put the summary back and drop the conversion with it: what is in the box
+ *  is the recap again, and neither the undo nor the credit means anything. */
+function resetToSummary() {
+	prompt = summary
+	beforeScene = null
+	scene = null
+	sceneError = ''
+}
+
+function undoScene() {
+	if (beforeScene === null) return
+	prompt = beforeScene
+	beforeScene = null
+	scene = null
+	sceneError = ''
+}
+
+/** Rewrite the box as one shot. A failure says why and leaves the box exactly
+ *  as it was: this is a step towards a prompt, and losing the recap to a rate
+ *  limit would cost more than the conversion was worth. */
+async function makeScene() {
+	if (!sceneProvider || !sceneModel) return
+	const source = prompt
+	sceneError = ''
+	converting = true
+	try {
+		const result = await api.videoScene({
+			provider_id: sceneProvider.id,
+			model: sceneModel,
+			text: source,
+			style,
+		})
+		beforeScene = source
+		scene = { text: result.scene, model: result.model, source }
+		prompt = result.scene
+	} catch (err) {
+		sceneError = err instanceof ApiError ? err.message : 'could not write the scene'
+	} finally {
+		converting = false
+	}
+}
+
 async function submit() {
 	error = ''
 	busy = true
@@ -172,6 +249,11 @@ async function submit() {
 			provider_id: providerId,
 			model: modelId,
 			prompt,
+			// Saved with the video, and null unless a conversion really produced
+			// exactly this text. The absence is the honest record of a prompt
+			// somebody wrote themselves.
+			scene_model: converted?.model ?? null,
+			scene_source: converted?.source ?? null,
 			// Only ever send what this model actually supports.
 			duration: durations.length ? duration : null,
 			resolution: resolutions.length ? resolution || null : null,
@@ -244,21 +326,43 @@ async function submit() {
 					</div>
 
 					<div class="flex flex-col gap-2">
-						<div class="flex items-center justify-between gap-2">
+						<div class="flex flex-wrap items-center justify-between gap-2">
 							<Label for="video-prompt">Prompt</Label>
-							<!-- The one way back to the seed. Re-opening only re-seeds an empty
-							     box, by design: it must not wipe an edit in progress. -->
-							<Button
-								variant="ghost"
-								size="sm"
-								onclick={() => (prompt = summary)}
-								disabled={!summary || promptIsSummary}
-								title={summary
-									? 'Put the session summary back in the box, discarding your edits'
-									: 'This session has no summary to reset to'}
-							>
-								Reset to summary
-							</Button>
+							<div class="flex flex-wrap items-center gap-1">
+								<!-- One conversion deep, so a scene that reads worse than the
+								     recap it came from is one click away from being the recap
+								     again. Only the last one: keeping a stack would be a text
+								     editor, and the box already is one. -->
+								{#if beforeScene !== null}
+									<Button variant="ghost" size="sm" onclick={undoScene} disabled={converting}>
+										Undo
+									</Button>
+								{/if}
+								<Button
+									variant="secondary"
+									size="sm"
+									onclick={makeScene}
+									disabled={converting || !prompt.trim() || !sceneProvider || !sceneModel}
+									title={sceneProvider
+										? 'Rewrite the box as one shot a video model can render'
+										: 'Add an LLM provider in Settings to convert the recap'}
+								>
+									{converting ? 'Writing the scene…' : 'Make it a scene'}
+								</Button>
+								<!-- The one way back to the seed. Re-opening only re-seeds an empty
+								     box, by design: it must not wipe an edit in progress. -->
+								<Button
+									variant="ghost"
+									size="sm"
+									onclick={resetToSummary}
+									disabled={!summary || promptIsSummary}
+									title={summary
+										? 'Put the session summary back in the box, discarding your edits'
+										: 'This session has no summary to reset to'}
+								>
+									Reset to summary
+								</Button>
+							</div>
 						</div>
 						<!-- The base textarea sizes itself to its content, so a recap-length
 						     seed would take whatever height the text wants and drag the dialog
@@ -286,13 +390,50 @@ async function submit() {
 						{#if promptOverMax}
 							<span class="text-xs text-destructive">
 								Longer than this model accepts ({promptMax}
-								characters) - it will be rejected.
+								characters) - it will be rejected. "Make it a scene" rewrites it as one shot.
 							</span>
 						{:else if promptLong}
 							<span class="text-xs text-amber-700 dark:text-amber-500">
 								That is a whole recap. Video models take a scene, not a chapter, and some cap the
-								prompt well below this length.
+								prompt well below this length - "Make it a scene" above condenses it into one.
 							</span>
+						{/if}
+						<!-- The conversion's own two controls sit with the button they drive
+						     rather than up with the video model: neither of them reaches the
+						     video model, they decide what gets written into the box above. -->
+						{#if sceneProvider}
+							<div class="grid gap-3 sm:grid-cols-2">
+								<div class="flex flex-col gap-1.5">
+									<Label class="text-xs text-muted-foreground" for="video-scene-model">
+										Scene model ({sceneProvider.name})
+									</Label>
+									<ModelPicker
+										id="video-scene-model"
+										interaction="summarize"
+										provider={sceneProvider}
+										bind:value={sceneModel}
+										defaultModel={sceneDefaultModel}
+										disabled={converting}
+									/>
+								</div>
+								<div class="flex flex-col gap-1.5">
+									<Label class="text-xs text-muted-foreground" for="video-scene-style">Style</Label>
+									<Input
+										id="video-scene-style"
+										bind:value={style}
+										disabled={converting}
+										placeholder="90s anime cel animation"
+									/>
+								</div>
+							</div>
+							{#if sceneError}
+								<span class="text-xs text-destructive">{sceneError}</span>
+							{:else if converted}
+								<span class="text-xs text-muted-foreground">
+									Scene by {converted.model} - edit it freely; an edited prompt is saved as your
+									own.
+								</span>
+							{/if}
 						{/if}
 					</div>
 
