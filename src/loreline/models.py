@@ -59,6 +59,22 @@ class SessionStatus(StrEnum):
     ERROR = "error"
 
 
+class SessionOrigin(StrEnum):
+    """Where a session's audio came from.
+
+    An import is not a second kind of session: it produces the same continuous
+    WAV and the same utterance index a capture does, and every feature reads
+    them the same way (see ``docs/adr/0008``). What this records is the one
+    thing that differs, that nobody ever listened to an import live, so its
+    "original" transcript version is empty by construction and no re-run can
+    ever fill it. Readers that would otherwise present that emptiness as a
+    failed capture check this instead.
+    """
+
+    CAPTURE = "capture"
+    IMPORT = "import"
+
+
 class JobStatus(StrEnum):
     """Lifecycle state of a re-processing job.
 
@@ -336,6 +352,16 @@ class Session(BaseModel):
     # in the history list - same start time, same status, same provider - so
     # this is what lets a reader tell the two apart without opening both.
     merged_from: list[str] = Field(default_factory=list[str])
+    origin: SessionOrigin = SessionOrigin.CAPTURE
+    """Whether this recording was captured here or imported from a file.
+
+    Defaulted rather than required because every session that existed before
+    imports did was a capture, and because a capture never has to say so."""
+    import_name: str | None = None
+    """The uploaded file's own name, for an import; None for a capture.
+
+    The only name the recording ever had, and the only thing that tells four
+    phone recordings of the same evening apart in the history list."""
 
 
 class VideoModelInfo(BaseModel):

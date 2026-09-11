@@ -2099,6 +2099,10 @@ export interface components {
             summary_version?: string | null;
             /** Merged From */
             merged_from?: string[];
+            /** @default capture */
+            origin?: components["schemas"]["SessionOrigin"];
+            /** Import Name */
+            import_name?: string | null;
         };
         /**
          * SessionDetail
@@ -2119,6 +2123,20 @@ export interface components {
             /** Ids */
             ids?: string[];
         };
+        /**
+         * SessionOrigin
+         * @description Where a session's audio came from.
+         *
+         *     An import is not a second kind of session: it produces the same continuous
+         *     WAV and the same utterance index a capture does, and every feature reads
+         *     them the same way (see ``docs/adr/0008``). What this records is the one
+         *     thing that differs, that nobody ever listened to an import live, so its
+         *     "original" transcript version is empty by construction and no re-run can
+         *     ever fill it. Readers that would otherwise present that emptiness as a
+         *     failed capture check this instead.
+         * @enum {string}
+         */
+        SessionOrigin: "capture" | "import";
         /**
          * SessionStatus
          * @description Lifecycle state of a capture session.

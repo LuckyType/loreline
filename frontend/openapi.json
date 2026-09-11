@@ -4524,6 +4524,21 @@
             },
             "type": "array",
             "title": "Merged From"
+          },
+          "origin": {
+            "$ref": "#/components/schemas/SessionOrigin",
+            "default": "capture"
+          },
+          "import_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Import Name"
           }
         },
         "type": "object",
@@ -4579,6 +4594,15 @@
         "type": "object",
         "title": "SessionIds",
         "description": "A set of session ids for bulk operations (delete / merge)."
+      },
+      "SessionOrigin": {
+        "type": "string",
+        "enum": [
+          "capture",
+          "import"
+        ],
+        "title": "SessionOrigin",
+        "description": "Where a session's audio came from.\n\nAn import is not a second kind of session: it produces the same continuous\nWAV and the same utterance index a capture does, and every feature reads\nthem the same way (see ``docs/adr/0008``). What this records is the one\nthing that differs, that nobody ever listened to an import live, so its\n\"original\" transcript version is empty by construction and no re-run can\never fill it. Readers that would otherwise present that emptiness as a\nfailed capture check this instead."
       },
       "SessionStatus": {
         "type": "string",
