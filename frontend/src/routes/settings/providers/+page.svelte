@@ -5,6 +5,7 @@ import {
 	Filter,
 	Cloud,
 	Mic,
+	Palette,
 	Pencil,
 	Plus,
 	Server,
@@ -242,6 +243,18 @@ const selected = $derived(catalog.find((c) => c.kind === selectedKind))
 // "default" tags in the pickers, so they reflect what is saved, not the
 // (possibly unsaved) current selection.
 let draft = $state<ActionDefaults>(completeDefaults())
+
+/** One-click fills for the style field. "Style" is too abstract to act on
+ *  cold, and the field is free prose precisely because the good answers are
+ *  not a fixed menu - so these are examples of the shape of an answer, not the
+ *  set of them. Picking one replaces what is there; it is meant as a starting
+ *  point to edit. */
+const STYLE_SUGGESTIONS = [
+	'90s anime cel animation',
+	'loose watercolour, visible brush strokes',
+	'gritty photoreal, handheld camera',
+	'dark oil painting, candlelit',
+]
 let defaultsMsg = $state('')
 // This default is pre-selected when *starting or re-processing* a session (the
 // card below says so), and re-processing replays stored audio - the
@@ -937,6 +950,54 @@ onMount(load)
 				A recap is the players' account of the session, which is not the GM's summary above it. A
 				campaign can override this on its own page. Clear it and save to restore the built-in
 				default.
+			</p>
+		</div>
+
+		<div class="flex flex-col gap-2.5 rounded-lg border p-3.5">
+			<div class="flex items-center gap-2 font-medium">
+				<AlignLeft class="size-4" />
+				Scene system prompt
+			</div>
+			<Textarea
+				id="def-scene-prompt"
+				rows={5}
+				bind:value={draft.scene_prompt}
+				placeholder="Instructions for turning a recap into a single shot"
+			/>
+			<p class="m-0 text-xs text-muted-foreground">
+				Used by "Make it a scene" in the generate dialog. A video model renders one shot of a few
+				seconds, so this asks for one moment rather than the whole evening. Clear it and save to
+				restore the built-in default.
+			</p>
+		</div>
+
+		<div class="flex flex-col gap-2.5 rounded-lg border p-3.5">
+			<div class="flex items-center gap-2 font-medium">
+				<Palette class="size-4" />
+				Video style
+			</div>
+			<Input
+				id="def-video-style"
+				bind:value={draft.video_style}
+				placeholder="90s anime cel animation"
+			/>
+			<div class="flex flex-wrap gap-2">
+				{#each STYLE_SUGGESTIONS as suggestion (suggestion)}
+					<Button
+						variant="outline"
+						size="sm"
+						onclick={() => (draft.video_style = suggestion)}
+						disabled={draft.video_style === suggestion}
+					>
+						{suggestion}
+					</Button>
+				{/each}
+			</div>
+			<p class="m-0 text-xs text-muted-foreground">
+				What your videos should look like, in your own words - the examples above are starting
+				points to edit, not a menu. It shapes the scene the conversion writes, so the look is in the
+				prompt you can still read and change before generating. The generate dialog can use a
+				different one for a single video. Blank means no particular style.
 			</p>
 		</div>
 

@@ -43,6 +43,8 @@ const NO_DEFAULTS: ActionDefaults = {
 	summarize_prompt: '',
 	summarize_reasoning_effort: '',
 	recap_prompt: '',
+	scene_prompt: '',
+	video_style: '',
 	campaign_id: '',
 	video_provider: '',
 	video_model: '',
