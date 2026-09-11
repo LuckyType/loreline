@@ -1034,7 +1034,9 @@ onMount(load)
 						     several could not be read: the first is a URL or a service to
 						     fix before this row is worth saving, the second is a caveat on
 						     a list that is otherwise usable. -->
-						<span class="text-xs {availableModels.length ? 'text-amber-500' : 'text-destructive'}">
+						<span
+							class="text-xs {availableModels.length ? 'text-amber-700 dark:text-amber-500' : 'text-destructive'}"
+						>
 							{modelsError}
 						</span>
 					{/if}
@@ -1051,7 +1053,7 @@ onMount(load)
 									<span class="min-w-0 flex-1 truncate">{opt.label}</span>
 									{#if opt.sunset}
 										<span
-											class="shrink-0 text-xs whitespace-nowrap text-amber-500"
+											class="shrink-0 text-xs whitespace-nowrap text-amber-700 dark:text-amber-500"
 											title="The vendor is retiring this model on {opt.sunset}."
 										>
 											retiring {opt.sunset}
@@ -1103,7 +1105,7 @@ onMount(load)
 							placeholder={editing ? '•••• unchanged' : ''}
 						/>
 						{#if keyMissing}
-							<span class="text-xs text-amber-500">
+							<span class="text-xs text-amber-700 dark:text-amber-500">
 								No key saved - you won't be able to test or transcribe with this provider until you
 								add one.
 							</span>

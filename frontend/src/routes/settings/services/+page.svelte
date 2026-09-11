@@ -83,6 +83,16 @@ async function toggle(svc: ServiceState) {
 		error = ''
 	} catch (err) {
 		error = err instanceof ApiError ? err.message : `failed to update ${svc.name}`
+		// The row still shows the state it had before the press, and that can be
+		// stale: a stop the server gave up waiting on has usually finished by
+		// the time its error arrives here. Ask again now rather than leave a
+		// container labelled running until the next poll, and keep the message
+		// above the table, which load() would clear.
+		try {
+			services = await api.listServices()
+		} catch {
+			/* the poll retries */
+		}
 	} finally {
 		busy = { ...busy, [svc.name]: false }
 	}

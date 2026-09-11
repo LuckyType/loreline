@@ -99,13 +99,19 @@ export interface paths {
         };
         /**
          * Revision
-         * @description Return the deployed commit, and `git describe`'s name for it.
+         * @description Return the deployed commit, `git describe`'s name for it, and the way back.
          *
          *     Both, rather than one: the SHA is what /rollback takes and what the update
          *     result reports, while the described string is the only one of the two worth
          *     reading off a screen. Either can be null where this deployment cannot know
          *     it - a Docker image built without the revision baked in - and the UI is
          *     written to show a dash for that instead of a wrong answer.
+         *
+         *     The previous pair is the same two answers for the commit HEAD was on before
+         *     it last moved, which is what Settings > Client offers to roll back to, and
+         *     ``rollback_unavailable`` is the one sentence a Docker deployment shows in
+         *     place of that offer. Answered here rather than on a route of its own so the
+         *     page learns everything it needs about the deployment in one call.
          */
         get: operations["revision_api_system_revision_get"];
         put?: never;
@@ -1993,6 +1999,12 @@ export interface components {
             commit?: string | null;
             /** Described */
             described?: string | null;
+            /** Previous Commit */
+            previous_commit?: string | null;
+            /** Previous Described */
+            previous_described?: string | null;
+            /** Rollback Unavailable */
+            rollback_unavailable?: string | null;
         };
         /**
          * RollbackRequest

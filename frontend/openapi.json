@@ -109,7 +109,7 @@
           "system"
         ],
         "summary": "Revision",
-        "description": "Return the deployed commit, and `git describe`'s name for it.\n\nBoth, rather than one: the SHA is what /rollback takes and what the update\nresult reports, while the described string is the only one of the two worth\nreading off a screen. Either can be null where this deployment cannot know\nit - a Docker image built without the revision baked in - and the UI is\nwritten to show a dash for that instead of a wrong answer.",
+        "description": "Return the deployed commit, `git describe`'s name for it, and the way back.\n\nBoth, rather than one: the SHA is what /rollback takes and what the update\nresult reports, while the described string is the only one of the two worth\nreading off a screen. Either can be null where this deployment cannot know\nit - a Docker image built without the revision baked in - and the UI is\nwritten to show a dash for that instead of a wrong answer.\n\nThe previous pair is the same two answers for the commit HEAD was on before\nit last moved, which is what Settings > Client offers to roll back to, and\n``rollback_unavailable`` is the one sentence a Docker deployment shows in\nplace of that offer. Answered here rather than on a route of its own so the\npage learns everything it needs about the deployment in one call.",
         "operationId": "revision_api_system_revision_get",
         "responses": {
           "200": {
@@ -4250,6 +4250,39 @@
               }
             ],
             "title": "Described"
+          },
+          "previous_commit": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Previous Commit"
+          },
+          "previous_described": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Previous Described"
+          },
+          "rollback_unavailable": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rollback Unavailable"
           }
         },
         "type": "object",

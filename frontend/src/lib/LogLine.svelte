@@ -29,13 +29,14 @@ const parsed = $derived.by(() => {
 	return { ts: m[1], level: m[2].toLowerCase(), event: m[3], extras }
 })
 
+// Two shades each: the 400s read on a dark ground and wash out on white.
 const levelClass: Record<string, string> = {
 	debug: 'text-muted-foreground',
-	info: 'text-sky-400',
-	warning: 'text-amber-400',
-	warn: 'text-amber-400',
-	error: 'text-red-400',
-	critical: 'text-red-500 font-semibold',
+	info: 'text-sky-700 dark:text-sky-400',
+	warning: 'text-amber-700 dark:text-amber-400',
+	warn: 'text-amber-700 dark:text-amber-400',
+	error: 'text-red-700 dark:text-red-400',
+	critical: 'text-red-700 dark:text-red-500 font-semibold',
 }
 </script>
 
@@ -52,7 +53,7 @@ const levelClass: Record<string, string> = {
 			{#if extra.k}
 				<span>
 					<span class="text-muted-foreground">{extra.k}=</span
-					><span class="text-emerald-400">{extra.v}</span>
+					><span class="text-emerald-700 dark:text-emerald-400">{extra.v}</span>
 				</span>
 			{:else}
 				<span class="text-muted-foreground">{extra.v}</span>

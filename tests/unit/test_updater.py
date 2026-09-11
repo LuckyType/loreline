@@ -130,6 +130,73 @@ async def test_current_revision_treats_empty_git_output_as_no_answer() -> None:
     assert await updater.current_revision() == "baked-sha"
 
 
+# --- the way back: previous_revision ------------------------------------------
+# Read from git's reflog, not from a record this app keeps: HEAD@{1} is where
+# the checkout was before HEAD last moved, which after update-source.sh's pull
+# is the commit that was deployed before it.
+
+
+async def test_previous_revision_reads_the_reflog() -> None:
+    """HEAD@{1} is what Roll back offers, and describe is how the dialog names it."""
+
+    def handle(argv: list[str]) -> CommandResult:
+        if "HEAD@{1}" in argv:
+            text = "old-sha\n" if argv[1] == "rev-parse" else "v0.1.0-3-gold\n"
+            return CommandResult(0, text, "")
+        if _is_rev_parse(argv):
+            return CommandResult(0, "new-sha\n", "")
+        return CommandResult(0, "", "")
+
+    runner = FakeRunner(handle)
+    updater = Updater(app_dir=Path("/app"), runner=runner, in_container=False)
+
+    assert await updater.previous_revision() == "old-sha"
+    assert await updater.previous_described() == "v0.1.0-3-gold"
+    assert updater.rollback_unavailable() is None
+    # --verify --quiet: a missing entry is an exit status, not a fatal message
+    # on stderr and a bare "HEAD@{1}" echoed back on stdout.
+    assert ["git", "rev-parse", "--verify", "--quiet", "HEAD@{1}"] in runner.calls
+
+
+async def test_previous_revision_is_none_for_a_checkout_that_never_moved() -> None:
+    """A fresh clone's reflog has one entry, and git exits non-zero for HEAD@{1}."""
+
+    def handle(argv: list[str]) -> CommandResult:
+        if "HEAD@{1}" in argv:
+            return CommandResult(128, "", "fatal: ambiguous argument 'HEAD@{1}'")
+        return CommandResult(0, "sha\n", "")
+
+    updater = Updater(app_dir=Path("/app"), runner=FakeRunner(handle), in_container=False)
+
+    assert await updater.previous_revision() is None
+    # Nothing to go back to is not the same as being unable to: the button is
+    # hidden, not explained away.
+    assert updater.rollback_unavailable() is None
+
+
+async def test_previous_revision_is_none_when_head_did_not_really_move() -> None:
+    """`git reset --hard HEAD` writes a reflog entry that leads nowhere."""
+    runner = FakeRunner(lambda argv: CommandResult(0, "same-sha\n", ""))
+    updater = Updater(app_dir=Path("/app"), runner=runner, in_container=False)
+
+    assert await updater.previous_revision() is None
+
+
+async def test_previous_revision_in_a_container_never_asks_git() -> None:
+    """No checkout to reset, so no reflog to read, and the page is told why."""
+    runner = FakeRunner(lambda argv: CommandResult(0, "sha\n", ""))
+    updater = Updater(app_dir=Path("/app"), runner=runner, in_container=True, build_commit="sha")
+
+    assert await updater.previous_revision() is None
+    assert await updater.previous_described() is None
+    assert runner.calls == []
+    reason = updater.rollback_unavailable()
+    assert reason is not None
+    assert "Docker deployment" in reason
+    # The refusal names the way round it, the same rule update's message follows.
+    assert "image tag" in reason
+
+
 async def test_update_reports_commits() -> None:
     head = {"value": "old-sha"}
 
@@ -179,7 +246,7 @@ async def test_rollback_refuses_in_container() -> None:
     result = await updater.rollback("deadbeef")
 
     assert not result.ok
-    assert "deploy/update.sh" in result.output
+    assert "Docker deployment" in result.output
     assert not any(a[:2] == ["git", "reset"] for a in runner.calls)
 
 
@@ -420,7 +487,7 @@ async def test_rollback_in_container_never_calls_the_updater() -> None:
     result = await updater.rollback("deadbeef")
 
     assert not result.ok
-    assert "deploy/update.sh" in result.output
+    assert "Docker deployment" in result.output
     assert not seen
 
 

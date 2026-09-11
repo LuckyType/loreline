@@ -5,7 +5,12 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/* The palette is picked by the class on <html>, set before first paint by the
+   script in app.html and kept current by src/lib/theme.svelte.ts. color-scheme
+   goes with it so native scrollbars and form controls follow, and so
+   light-dark() resolves for the few colours computed in JS (speaker names). */
 :root {
+	color-scheme: light;
 	--background: oklch(1 0 0);
 	--foreground: oklch(0.145 0 0);
 	--card: oklch(1 0 0);
@@ -41,6 +46,7 @@
 }
 
 .dark {
+	color-scheme: dark;
 	--background: oklch(0.145 0 0);
 	--foreground: oklch(0.985 0 0);
 	--card: oklch(0.205 0 0);
@@ -182,9 +188,14 @@
 	border-radius: 50%;
 	pointer-events: none;
 	transform: translate(-50%, -50%);
-	mix-blend-mode: screen;
+	/* Screen lightens, which only reads on a dark ground; on a light one it
+	   would blend to nothing, so the light palette darkens instead. */
+	mix-blend-mode: multiply;
 	opacity: 0;
 	transition: opacity 0.3s ease;
 	/* Below dialogs/popovers (z-50 and up) - the glow must never wash over a modal. */
 	z-index: 30;
+}
+.dark .magic-spotlight {
+	mix-blend-mode: screen;
 }

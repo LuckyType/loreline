@@ -13,6 +13,7 @@ import { Button } from '$lib/components/ui/button'
 import { loginUrlWithNext } from '$lib/loginRedirect'
 import { initMagicBento } from '$lib/magicBento'
 import { authed, health, logsWs, transcriptWs } from '$lib/stores'
+import { theme } from '$lib/theme.svelte'
 import type { ConnectionStatus } from '$lib/ws'
 
 let { children }: { children: Snippet } = $props()
@@ -167,6 +168,14 @@ $effect(() => {
 
 onMount(() => initMagicBento())
 
+// The class on <html> picks the palette. app.html's inline script sets it
+// before the first paint; this keeps it current afterwards, for a pick on
+// Settings > Client, the device switching under `system`, or another tab's
+// change arriving through the storage event below.
+$effect(() => {
+	document.documentElement.classList.toggle('dark', theme.dark)
+})
+
 const healthColor = $derived(
 	$health == null ? 'bg-amber-500' : $health.status === 'ok' ? 'bg-emerald-500' : 'bg-red-500',
 )
@@ -199,7 +208,7 @@ function wsLabel(status: ConnectionStatus, liveWord: string): string {
 }
 </script>
 
-<svelte:window onkeydown={handleWindowKeydown} />
+<svelte:window onkeydown={handleWindowKeydown} onstorage={(e) => theme.syncFromStorage(e)} />
 <svelte:document onclickcapture={handleDocumentClick} />
 
 {#if page.url.pathname === '/login'}
@@ -368,7 +377,7 @@ function wsLabel(status: ConnectionStatus, liveWord: string): string {
 			<main class="overflow-auto p-6">
 				{#if capabilities.error}
 					<div
-						class="mb-4 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-600"
+						class="mb-4 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-700 dark:text-amber-400"
 					>
 						<span>{capabilities.error}</span>
 						<button class="underline underline-offset-2" onclick={() => capabilities.reload()}>

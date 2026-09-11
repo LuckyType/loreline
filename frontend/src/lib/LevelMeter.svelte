@@ -17,12 +17,12 @@ interface Props {
 
 let { peak, class: className }: Props = $props()
 
-const color = $derived(peak > 0.9 ? '#ef4444' : peak > 0.6 ? '#f59e0b' : '#22c55e')
+const color = $derived(peak > 0.9 ? 'bg-red-500' : peak > 0.6 ? 'bg-amber-500' : 'bg-emerald-500')
 </script>
 
 <div class={cn('h-2.5 overflow-hidden rounded-full bg-foreground/15', className)}>
 	<div
-		class="h-full rounded-full transition-[width] duration-75"
-		style="width: {Math.min(100, Math.round(peak * 100))}%; background: {color};"
+		class={cn('h-full rounded-full transition-[width] duration-75', color)}
+		style="width: {Math.min(100, Math.round(peak * 100))}%"
 	></div>
 </div>

@@ -2,6 +2,28 @@
 <html lang="en" class="dark">
 	<head>
 		<meta charset="utf-8">
+		<!-- Which palette, before the first paint. The same key and fallback as
+		     src/lib/theme.svelte.ts, which takes over once the app is running and
+		     is where the rules are explained. Inline so it runs before the
+		     stylesheet applies: without it a light-theme user would see a dark
+		     frame for the first frame of every load. The class attribute above is
+		     the no-script default, which is also the default for a browser that
+		     has stored nothing. -->
+		<script>
+		;(function () {
+			var theme = null
+			try {
+				theme = localStorage.getItem('loreline.theme')
+			} catch (e) {}
+			var dark =
+				theme === 'light'
+					? false
+					: theme === 'system'
+						? matchMedia('(prefers-color-scheme: dark)').matches
+						: true
+			document.documentElement.classList.toggle('dark', dark)
+		})()
+		</script>
 		<link rel="icon" href="%sveltekit.assets%/favicon.png">
 		<meta name="viewport" content="width=device-width, initial-scale=1">
 		<title>Loreline</title>

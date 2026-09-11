@@ -331,6 +331,11 @@ Also worth knowing before you enable it:
 - **It applies an update only when you press the button.** There is no scheduler
   in it, which is the other half of the previous point. Unattended updates are
   the systemd timer's job.
+- **It only moves forward.** Roll back is greyed out on a Docker deployment:
+  the service pulls whatever the registry publishes and takes no argument that
+  could name anything else, and the container holds no git checkout to reset.
+  To run an older release, pin its tag (`ghcr.io/luckytype/loreline:<version>`)
+  in `docker-compose.yml` and recreate the app container.
 - **An update recreates the app container**, which ends a recording running at
   the time, and it needs the GHCR package to be pullable from this box - the same
   prerequisite `deploy/update-fast.sh` has above, reported the same way.
@@ -449,8 +454,14 @@ sudo systemctl start loreline
 
 Here the web UI's update button does work. It runs `deploy/update-source.sh` as
 the service user: `git pull --ff-only`, `uv sync`, a frontend rebuild, then a
-restart through the sudoers rule above. The same page rolls back to any earlier
-commit.
+restart through the sudoers rule above. Once the checkout has been updated at
+least once, a Roll back button appears beside it. It resets to the commit the
+checkout was on before it last moved, read from git's own reflog rather than
+from a record of the last update, then re-syncs and restarts the same way, so
+like an update it ends a recording running at the time. The confirm names the
+commit it is going back to. A Docker deployment cannot roll back; there the
+button is greyed out and the line beneath it says why, and the updater notes
+above give the way round it.
 
 On LXC, a container that captures audio itself needs the host's sound device
 passed through explicitly, through an `lxc.mount.entry` or a Proxmox `dev0:`

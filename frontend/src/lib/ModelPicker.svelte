@@ -110,6 +110,6 @@ function load() {
 		{onpick}
 	/>
 	{#if selectedSunset}
-		<span class="text-xs text-amber-500">{selectedSunset}</span>
+		<span class="text-xs text-amber-700 dark:text-amber-500">{selectedSunset}</span>
 	{/if}
 </div>
