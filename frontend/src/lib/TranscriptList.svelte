@@ -13,10 +13,18 @@
  * segment being played comes down the same way, by its start rather than by
  * its position, so a filtered list still lights the right line - or none,
  * when the search has hidden it.
+ *
+ * Rows are keyed by what they are, not by where they are. The list used to
+ * key its rows by index and track the speaker being renamed by index too, so
+ * a row arriving above the one being edited - a live turn landing, a search
+ * narrowing the list - slid the edit field onto whichever row now sat at that
+ * position. A row's identity is its turn key where it has a turn, else the
+ * coordinates a segment already carries (see `rowKey`), and the edit follows
+ * that identity wherever the row moves.
  */
 
 import { Input } from '$lib/components/ui/input'
-import { formatTime, GAP_SOURCE, sourceLabel, speakerColor } from '$lib/stores'
+import { formatTime, GAP_SOURCE, sourceLabel, speakerColor, turnKey } from '$lib/stores'
 import { highlight } from '$lib/transcriptSearch'
 import { cn } from '$lib/utils'
 import type { ProviderConfig, TranscriptEvent } from '$lib/wire'
@@ -82,13 +90,40 @@ $effect(() => {
 	element.querySelector('[data-active]')?.scrollIntoView({ block: 'nearest' })
 })
 
+/** What one row is, for the each block and for the edit below it.
+ *
+ * A streaming turn is revised in place under one `turn_id`, so its key is the
+ * one the feeds already use to do that revising. Every other row is written
+ * once and never revised, so the segment's own coordinates name it: the
+ * version it belongs to and the span it covers. Nothing on the wire is an id
+ * for those rows, and nothing needs to be, because two segments of one
+ * version cannot cover the same span. */
+function rowKey(ev: TranscriptEvent): string {
+	return turnKey(ev) ?? `${ev.source}:${ev.start_ts}:${ev.end_ts}`
+}
+
+// The rows with their keys made unique. A keyed each block throws on a
+// repeated key, and a blank transcript is too high a price for a duplicate
+// that should not exist; a repeat gets a suffix and is rendered anyway.
+const rows = $derived.by(() => {
+	const seen = new Map<string, number>()
+	return events.map((ev) => {
+		const base = rowKey(ev)
+		const n = seen.get(base) ?? 0
+		seen.set(base, n + 1)
+		return { ev, key: n === 0 ? base : `${base}#${n}` }
+	})
+})
+
 // Which row's speaker is being edited, and the name being typed into it. By
 // row rather than by label because one label appears on dozens of segments,
-// and only the one that was clicked should become a field.
-let editingRow = $state<number | null>(null)
+// and only the one that was clicked should become a field. By the row's key
+// rather than its position, so a row arriving above it leaves the field where
+// it was opened.
+let editingRow = $state<string | null>(null)
 let draft = $state('')
 
-function startEdit(row: number, label: string) {
+function startEdit(row: string, label: string) {
 	editingRow = row
 	draft = names[label] ?? ''
 }
@@ -137,7 +172,7 @@ function editKeydown(e: KeyboardEvent, label: string) {
 	{/if}
 {/snippet}
 
-{#snippet spoken(ev: TranscriptEvent, i: number)}
+{#snippet spoken(ev: TranscriptEvent, key: string)}
 	{@const speaker = ev.speaker}
 	{@const active = activeStart != null && ev.start_ts === activeStart}
 	<!-- The mark is padded inwards rather than bled outwards with a negative
@@ -153,7 +188,7 @@ function editKeydown(e: KeyboardEvent, label: string) {
 	>
 		{@render when(ev.start_ts)}
 		{#if speaker}
-			{#if onrename && editingRow === i}
+			{#if onrename && editingRow === key}
 				<Input
 					class="h-6 w-36 shrink-0 px-1.5 py-0 text-sm"
 					aria-label="Rename {speaker}"
@@ -169,7 +204,7 @@ function editKeydown(e: KeyboardEvent, label: string) {
 					class="shrink-0 cursor-pointer text-sm font-semibold hover:underline"
 					style="color: {speakerColor(speaker)}"
 					title="Rename this speaker everywhere in the transcript"
-					onclick={() => startEdit(i, speaker)}
+					onclick={() => startEdit(key, speaker)}
 				>
 					{@render marked(displaySpeaker(speaker))}
 				</button>
@@ -191,7 +226,7 @@ function editKeydown(e: KeyboardEvent, label: string) {
 {/snippet}
 
 <div bind:this={element} class={className}>
-	{#each events as ev, i (i)}
+	{#each rows as { ev, key } (key)}
 		{#if ev.source === GAP_SOURCE}
 			<!-- Not a segment: the app saying it lost this span of audio while a
 			     streaming connection was down. Rendered as a rule rather than as a
@@ -203,7 +238,7 @@ function editKeydown(e: KeyboardEvent, label: string) {
 				<span class="mt-2 h-px min-w-6 flex-1 border-t border-dashed border-current"></span>
 			</div>
 		{:else}
-			{@render spoken(ev, i)}
+			{@render spoken(ev, key)}
 		{/if}
 	{/each}
 	{#if events.length === 0}
