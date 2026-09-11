@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 import uuid
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, NamedTuple
@@ -10,7 +11,7 @@ from typing import TYPE_CHECKING, NamedTuple
 from fastapi import APIRouter, Depends, Request
 from fastapi.exceptions import HTTPException
 from fastapi.responses import FileResponse, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from starlette.status import (
     HTTP_400_BAD_REQUEST,
     HTTP_404_NOT_FOUND,
@@ -18,7 +19,6 @@ from starlette.status import (
     HTTP_502_BAD_GATEWAY,
 )
 
-from loreline.capabilities import supports
 from loreline.export import (
     EXPORTERS,
     canonical_transcript,
@@ -28,12 +28,15 @@ from loreline.export import (
     to_txt,
     variant_view,
 )
-from loreline.llm import LLMError, summarize_transcript
+from loreline.llm import LLMError, extract_entities, summarize_transcript
 from loreline.models import (
+    DOCUMENT_EXTRACTION,
+    DOCUMENT_RECAP,
     ORIGINAL_VERSION,
-    Interaction,
     JobStatus,
     Session,
+    SessionDocument,
+    SessionExtraction,
     SessionStatus,
     TranscriptEvent,
     rebase_transcript,
@@ -51,8 +54,11 @@ from loreline.session import (
 )
 from loreline.web.auth import require_auth
 from loreline.web.deps import get_manager, get_state, load_action_defaults
+from loreline.web.generation import llm_target, recap_prompt
 from loreline.web.routes.audio import INPUT_DEVICE_KEY, parse_device
 from loreline.web.schemas import (
+    CampaignAssignment,
+    GenerateRequest,
     OkResponse,
     SessionIds,
     SpeakerNamesUpdate,
@@ -151,10 +157,15 @@ async def _best_available_rows(state: AppState, session: Session) -> _BestRows:
 
 
 class SessionDetail(BaseModel):
-    """A session plus its persisted transcript."""
+    """A session plus its persisted transcript and its generated texts."""
 
     session: Session
     transcript: list[TranscriptEvent]
+    # The recap and the extraction, when they exist. Served with the session
+    # rather than behind a second call because the summary card draws all three
+    # together: a page that fetched them separately would render a session that
+    # has a recap as one that has none, for as long as the second request takes.
+    documents: list[SessionDocument] = Field(default_factory=list[SessionDocument])
     # Length of the stored WAV, seconds - None when there is none. Computed on
     # every read rather than carried on Session itself: the WAV keeps growing
     # throughout a live capture, so a stored value would go stale, and it is
@@ -210,7 +221,12 @@ async def get_session(request: Request, session_id: str) -> SessionDetail:
     if session.audio_path and state.audio_store.exists(session_id):
         # Blocking file I/O (reads the WAV header only) off the event loop.
         audio_duration_s = await asyncio.to_thread(state.audio_store.duration_s, session_id)
-    return SessionDetail(session=session, transcript=transcript, audio_duration_s=audio_duration_s)
+    return SessionDetail(
+        session=session,
+        transcript=transcript,
+        documents=await state.documents.for_session(session_id),
+        audio_duration_s=audio_duration_s,
+    )
 
 
 @router.get("/{session_id}/transcript")
@@ -310,25 +326,12 @@ async def summarize_session(
     three times still fed the LLM the broken half-transcript - and the GM paid
     for a summary of a session that mostly is not in it.
     """
-    state = get_state(request)
-    session = await state.sessions.get(session_id)
-    if session is None:
-        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="session not found")
     version = body.version or ORIGINAL_VERSION
-    provider = await state.providers.get(body.provider_id)
-    if provider is None:
-        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="provider not found")
-    # Asked of the yaml per request, so a capabilities.reload() is honoured.
-    if not supports(provider.kind, Interaction.SUMMARIZE):
-        raise HTTPException(
-            status_code=HTTP_400_BAD_REQUEST, detail="provider is not an LLM provider"
-        )
-    events = relabel_speakers(
-        await _version_rows(state, session_id, version), session.speaker_names
-    )
-    if not events:
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="session has no transcript")
-    api_key = state.secrets.get(provider.auth_ref) if provider.auth_ref else None
+    state, session, events = await _transcript_for_generation(request, session_id, version)
+    # Which provider row may run this, and the key it runs with: the same
+    # question the recap and the extraction ask, answered in one place (see
+    # loreline.web.generation) rather than three times over.
+    provider, api_key = await llm_target(state, body.provider_id)
     defaults = await load_action_defaults(state)
     try:
         summary = await summarize_transcript(
@@ -353,6 +356,146 @@ async def summarize_session(
         session_id, summary, provider_id=provider.id, model=body.model, version=version
     )
     return SummarizeResult(summary=summary)
+
+
+@router.put("/{session_id}/campaign")
+async def set_session_campaign(
+    request: Request, session_id: str, body: CampaignAssignment
+) -> Session:
+    """Put a session in a campaign, or take it out of one (null).
+
+    An id no campaign answers to is a 404 rather than a stored string: that is
+    exactly the state this feature exists to end - a ``campaign_id`` nothing
+    can resolve, rendering as a raw hex id in the History table and reaching a
+    glossary nobody can find.
+    """
+    state = get_state(request)
+    session = await state.sessions.get(session_id)
+    if session is None:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="session not found")
+    campaign_id = (body.campaign_id or "").strip() or None
+    if campaign_id is not None and await state.campaigns.get(campaign_id) is None:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="campaign not found")
+    await state.campaigns.assign(session_id, campaign_id)
+    return await state.sessions.get(session_id) or session
+
+
+@router.post("/{session_id}/recap")
+async def write_session_recap(
+    request: Request, session_id: str, body: GenerateRequest
+) -> SessionDocument:
+    """Write the player-facing recap of one transcript version.
+
+    The same call the summary makes, with different instructions and a
+    different place to put the answer. They are two texts about one session
+    because they are for two readers: a summary is the GM's index of what
+    happened, a recap is what the table is told a week later, and a prompt that
+    tries to be both produces a bulleted list of NPCs nobody reads aloud.
+
+    Which instructions run is the campaign's, else the stored default, else the
+    built-in text - see :func:`loreline.web.generation.recap_prompt`.
+    """
+    state, session, events = await _transcript_for_generation(request, session_id, body.version)
+    provider, api_key = await llm_target(state, body.provider_id)
+    defaults = await load_action_defaults(state)
+    try:
+        text = await summarize_transcript(
+            config=provider,
+            api_key=api_key,
+            model=body.model,
+            transcript=to_txt(session, events),
+            system_prompt=await recap_prompt(state, session.campaign_id),
+            instruction="Write the recap of this session, from its transcript:",
+            reasoning_effort=body.reasoning_effort or defaults.summarize_reasoning_effort or None,
+        )
+    except LLMError as exc:
+        raise HTTPException(status_code=HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+    return await _store_document(
+        state, session_id, DOCUMENT_RECAP, text, provider.id, body.model, body.version
+    )
+
+
+@router.post("/{session_id}/extract")
+async def extract_session_entities(
+    request: Request, session_id: str, body: GenerateRequest
+) -> SessionExtraction:
+    """Extract the names this session used, as structured data.
+
+    Stored as a document like the recap, and returned parsed rather than as the
+    stored JSON string: the campaign page merges these across sessions, and a
+    wire type the browser has to parse out of a string is a type the browser
+    does not really have.
+    """
+    state, session, events = await _transcript_for_generation(request, session_id, body.version)
+    provider, api_key = await llm_target(state, body.provider_id)
+    defaults = await load_action_defaults(state)
+    try:
+        extraction = await extract_entities(
+            config=provider,
+            api_key=api_key,
+            model=body.model,
+            transcript=to_txt(session, events),
+            reasoning_effort=body.reasoning_effort or defaults.summarize_reasoning_effort or None,
+        )
+    except LLMError as exc:
+        raise HTTPException(status_code=HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+    await _store_document(
+        state,
+        session_id,
+        DOCUMENT_EXTRACTION,
+        extraction.model_dump_json(),
+        provider.id,
+        body.model,
+        body.version,
+    )
+    return extraction
+
+
+async def _transcript_for_generation(
+    request: Request, session_id: str, version: str | None
+) -> tuple[AppState, Session, list[TranscriptEvent]]:
+    """The session and the rows a generation will read, or the HTTP error.
+
+    Shared by the recap and the extraction, and identical to what summarize
+    does with the same request: the named version's settled rows with the
+    session's speaker renames applied, 404 for a version this session does not
+    have, 400 for a session with nothing in it. The three used to be one copy
+    each, which is how summarize came to name its version and the others did
+    not."""
+    state = get_state(request)
+    session = await state.sessions.get(session_id)
+    if session is None:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="session not found")
+    events = relabel_speakers(
+        await _version_rows(state, session_id, version or ORIGINAL_VERSION),
+        session.speaker_names,
+    )
+    if not events:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="session has no transcript")
+    return state, session, events
+
+
+async def _store_document(
+    state: AppState,
+    session_id: str,
+    kind: str,
+    body: str,
+    provider_id: str,
+    model: str,
+    version: str | None,
+) -> SessionDocument:
+    """Persist one generated text, replacing the previous one of its kind."""
+    document = SessionDocument(
+        session_id=session_id,
+        kind=kind,
+        body=body,
+        provider_id=provider_id,
+        model=model,
+        version=version or ORIGINAL_VERSION,
+        created_at=time.time(),
+    )
+    await state.documents.put_session_document(document)
+    return document
 
 
 @router.get("/{session_id}/export")

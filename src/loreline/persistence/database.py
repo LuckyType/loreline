@@ -12,6 +12,55 @@ from loreline.logging import get_logger
 
 log = get_logger(__name__)
 
+# The search index, kept out of the list above so the two places that can
+# create it read one copy: the migration run, and the repair in
+# :meth:`Database._ensure_search_index` for a database first migrated on a
+# SQLite build with no FTS5 in it.
+#
+# An external content table: the index stores the terms and points at
+# ``transcript_segments.id`` for the text itself, so a transcript row stays the
+# single place a segment's words live and the index cannot drift into a second,
+# disagreeing copy of a four-hour session.
+#
+# Every row is indexed, interims and gap markers included, and the *reader*
+# filters them out (see ``SearchRepository``). Indexing selectively would mean
+# the delete trigger firing for rows that were never in the index, which is how
+# an external content index gets corrupted: a streaming turn arrives as an
+# interim and is upserted into a final, so the same row crosses that condition
+# mid-session.
+FTS5_MIGRATION = """
+CREATE VIRTUAL TABLE transcript_fts USING fts5(
+    text,
+    content='transcript_segments',
+    content_rowid='id',
+    tokenize='unicode61'
+);
+
+INSERT INTO transcript_fts (rowid, text) SELECT id, text FROM transcript_segments;
+
+CREATE TRIGGER transcript_fts_insert AFTER INSERT ON transcript_segments BEGIN
+    INSERT INTO transcript_fts (rowid, text) VALUES (new.id, new.text);
+END;
+
+CREATE TRIGGER transcript_fts_delete AFTER DELETE ON transcript_segments BEGIN
+    INSERT INTO transcript_fts (transcript_fts, rowid, text)
+        VALUES ('delete', old.id, old.text);
+END;
+
+CREATE TRIGGER transcript_fts_update AFTER UPDATE ON transcript_segments BEGIN
+    INSERT INTO transcript_fts (transcript_fts, rowid, text)
+        VALUES ('delete', old.id, old.text);
+    INSERT INTO transcript_fts (rowid, text) VALUES (new.id, new.text);
+END;
+"""
+
+# What marks a migration as needing FTS5, so a build without it can skip that
+# one entry rather than failing every startup. Matched in the script rather
+# than held as a version number, which would have to be renumbered every time
+# a migration lands in front of it.
+FTS5_MARKER = "USING fts5"
+
+
 # Ordered, append-only migration list. Each entry is a full SQL script applied
 # once; the applied version is tracked in ``schema_version``. Never edit a
 # migration that has shipped - add a new one.
@@ -348,6 +397,60 @@ MIGRATIONS: list[str] = [
           AND s.speaker IS NOT NULL AND s.speaker != ''
     );
     """,
+    # v22 - campaigns, and the generated texts that hang off a session or a
+    # campaign.
+    #
+    # `sessions.campaign_id` has existed since v1 and has always been a free
+    # string nothing owned: no table listed the campaigns, so the History
+    # page's Campaign column could only ever print a raw id, and a campaign's
+    # glossary was reachable only by typing its id into a URL. A campaign is a
+    # row now, with a name a person picked and the per-campaign recap prompt
+    # beside it.
+    #
+    # The column is deliberately *not* turned into a foreign key. Rows written
+    # before this migration carry whatever string was in them, a campaign is
+    # deleted by unassigning its sessions rather than by taking them with it
+    # (see CampaignRepository.delete), and a constraint here would turn both of
+    # those into errors on read.
+    #
+    # The documents tables are one shape for every text a model writes about a
+    # session or a campaign, keyed by kind: `recap` and `extraction` per
+    # session, `previously_on` per campaign. The summary columns on `sessions`
+    # stay exactly where they are in this pass - moving them is a migration of
+    # its own and buys nothing while nothing else reads them (see
+    # docs/adr/0009).
+    """
+    CREATE TABLE campaigns (
+        id            TEXT PRIMARY KEY,
+        name          TEXT NOT NULL UNIQUE,
+        created_at    REAL NOT NULL,
+        notes         TEXT NOT NULL DEFAULT '',
+        recap_prompt  TEXT NOT NULL DEFAULT ''
+    );
+
+    CREATE TABLE session_documents (
+        session_id   TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        kind         TEXT NOT NULL,
+        body         TEXT NOT NULL,
+        provider_id  TEXT,
+        model        TEXT,
+        version      TEXT,
+        created_at   REAL NOT NULL,
+        PRIMARY KEY (session_id, kind)
+    );
+
+    CREATE TABLE campaign_documents (
+        campaign_id  TEXT NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+        kind         TEXT NOT NULL,
+        body         TEXT NOT NULL,
+        provider_id  TEXT,
+        model        TEXT,
+        created_at   REAL NOT NULL,
+        PRIMARY KEY (campaign_id, kind)
+    );
+    """,
+    # v23 - full-text search over the transcript (see FTS5_MIGRATION below).
+    FTS5_MIGRATION,
 ]
 
 
@@ -357,12 +460,26 @@ class Database:
     def __init__(self, path: Path) -> None:
         self._path = path
         self._conn: aiosqlite.Connection | None = None
+        self._fts5 = False
 
     @property
     def connection(self) -> aiosqlite.Connection:
         if self._conn is None:  # pragma: no cover - misuse guard
             raise RuntimeError("Database not connected. Call connect() first.")
         return self._conn
+
+    @property
+    def fts5(self) -> bool:
+        """Whether this SQLite build can answer a full-text query.
+
+        False is a real deployment, not a broken one: the extension is a
+        compile-time option, and a distribution that left it out is still
+        perfectly able to record a session. Search falls back to ``LIKE``
+        there (see :class:`~loreline.persistence.repositories.SearchRepository`),
+        which is slower and cannot rank, and is the difference between a
+        feature that is worse and a page that is broken.
+        """
+        return self._fts5
 
     async def connect(self) -> None:
         """Open the connection, enable pragmas, and run migrations."""
@@ -371,7 +488,49 @@ class Database:
         self._conn.row_factory = aiosqlite.Row
         await self._conn.execute("PRAGMA journal_mode=WAL;")
         await self._conn.execute("PRAGMA foreign_keys=ON;")
+        self._fts5 = await self._probe_fts5()
         await self._migrate()
+        await self._ensure_search_index()
+
+    async def _probe_fts5(self) -> bool:
+        """Ask this build whether it has FTS5, by trying to use it.
+
+        A ``PRAGMA compile_options`` scan would answer the same question for
+        the common case and lie for the interesting one: FTS5 can also arrive
+        as a loadable extension, and a build can list the option while the
+        module fails to register. Creating a temp table and dropping it is the
+        question itself, and costs one statement at startup.
+        """
+        try:
+            await self.connection.execute(
+                "CREATE VIRTUAL TABLE temp.loreline_fts5_probe USING fts5(x);"
+            )
+        except aiosqlite.Error:
+            log.warning("db.fts5.unavailable")
+            return False
+        await self.connection.execute("DROP TABLE temp.loreline_fts5_probe;")
+        return True
+
+    async def _ensure_search_index(self) -> None:
+        """Build the search index for a database that was migrated without it.
+
+        The FTS5 migration is skipped, not failed, on a build that has no FTS5
+        - and it is marked applied either way, because the alternative is an
+        app that cannot start. Without this the index would then never be
+        built: upgrading SQLite would leave the schema version past the
+        migration that creates it, and search would stay degraded forever with
+        nothing saying why.
+        """
+        if not self._fts5:
+            return
+        async with self.connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'transcript_fts';"
+        ) as cur:
+            if await cur.fetchone() is not None:
+                return
+        log.info("db.fts5.rebuild")
+        await self.connection.executescript(FTS5_MIGRATION)
+        await self.connection.commit()
 
     async def close(self) -> None:
         if self._conn is not None:
@@ -386,8 +545,16 @@ class Database:
         current: int = row[0] if row is not None and row[0] is not None else 0
 
         for version in range(current + 1, len(MIGRATIONS) + 1):
-            log.info("db.migrate", version=version)
-            await conn.executescript(MIGRATIONS[version - 1])
+            script = MIGRATIONS[version - 1]
+            if FTS5_MARKER in script and not self._fts5:
+                # Recorded as applied rather than retried at every boot: the
+                # list is index-based, so a version left unapplied would block
+                # every migration after it forever. _ensure_search_index above
+                # picks it up if FTS5 ever turns up.
+                log.warning("db.migrate.skipped", version=version, reason="no fts5")
+            else:
+                log.info("db.migrate", version=version)
+                await conn.executescript(script)
             await conn.execute("INSERT INTO schema_version (version) VALUES (?);", (version,))
             await conn.commit()
 

@@ -173,6 +173,16 @@ class ActionDefaults(BaseModel):
     video_model: str = ""
     summarize_reasoning_effort: str = ""
     """Default reasoning effort for summaries; blank leaves it to the model."""
+    recap_prompt: str = ""
+    """Recap system prompt; blank means the built-in default (served filled in).
+
+    A campaign's own ``recap_prompt`` wins over this one: the global default is
+    how every table's recaps read, and a campaign that wants something else
+    (another language, a voice, a length) says so on itself."""
+    campaign_id: str = ""
+    """The campaign the capture card starts a session in. Remembered here
+    rather than in the browser, because it is the same answer at every screen
+    that starts a session and it survives a reinstalled tablet."""
     strict_model_filtering: bool = True
     """Hide models that don't look capable of the interaction being picked for.
 
@@ -266,6 +276,68 @@ class VersionLogs(BaseModel):
     session_id: str
     version: str
     logs: str
+
+
+class CampaignWrite(BaseModel):
+    """Create or rename a campaign.
+
+    The name is the campaign, so a blank one is refused rather than stored: a
+    row that renders as an empty cell in the picker is unpickable and
+    indistinguishable from "no campaign", which is the one thing the list must
+    be able to say.
+    """
+
+    name: str = Field(min_length=1)
+    notes: str = ""
+    recap_prompt: str = ""
+
+    @field_validator("name")
+    @classmethod
+    def _a_name_is_not_whitespace(cls, value: str) -> str:
+        name = value.strip()
+        if not name:
+            raise ValueError("a campaign needs a name")
+        return name
+
+
+class CampaignAssignment(BaseModel):
+    """Which campaign a session belongs to; null takes it out of one."""
+
+    campaign_id: str | None = None
+
+
+class GlossaryAdd(BaseModel):
+    """Names to append to a campaign's glossary, deduplicated on the way in."""
+
+    terms: list[str] = Field(default_factory=list[str])
+
+
+class GenerateRequest(BaseModel):
+    """Run one of the generated texts: a recap, an extraction, a previously-on.
+
+    Deliberately the same shape as :class:`SummarizeRequest`, minus the version
+    for the campaign-level one: the three session actions are one dialog in the
+    browser with a different verb on the button, and three request models that
+    drift apart would make that dialog three dialogs again.
+    """
+
+    provider_id: str
+    model: str = Field(min_length=1)
+    reasoning_effort: str | None = None
+    version: str | None = None
+    """Transcript version to read ("original" or a transcribe job id); None
+    means the original. Ignored by the campaign-level generation, which reads
+    recaps rather than a transcript."""
+
+
+class PreviouslyOnRequest(GenerateRequest):
+    """Write the campaign's "previously on" from its last few sessions."""
+
+    sessions: int = Field(default=3, ge=1, le=20)
+    """How many of the campaign's most recent sessions to read. Three is the
+    default because that is roughly what a table still remembers; the bound is
+    there because the whole campaign in one prompt is a different (and much
+    more expensive) request than the one this route answers."""
 
 
 class OkResponse(BaseModel):

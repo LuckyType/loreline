@@ -197,8 +197,8 @@ export interface paths {
          * Get Defaults
          * @description Return the per-action default models/mode used to pre-select the pickers.
          *
-         *     A blank stored summary prompt is served as the built-in default text, so
-         *     the settings UI always shows the concrete, editable instructions -
+         *     A blank stored summary or recap prompt is served as the built-in default
+         *     text, so the settings UI always shows the concrete, editable instructions -
          *     clearing the field and saving is the reset-to-default gesture.
          */
         get: operations["get_defaults_api_system_defaults_get"];
@@ -206,10 +206,10 @@ export interface paths {
          * Set Defaults
          * @description Persist the per-action defaults.
          *
-         *     A summary prompt equal to the built-in default (or blank) is stored blank,
-         *     so an untouched field keeps tracking future improvements to the built-in
-         *     text instead of pinning today's copy. The response mirrors GET: served
-         *     filled in.
+         *     A summary or recap prompt equal to the built-in default (or blank) is
+         *     stored blank, so an untouched field keeps tracking future improvements to
+         *     the built-in text instead of pinning today's copy. The response mirrors
+         *     GET: served filled in.
          */
         put: operations["set_defaults_api_system_defaults_put"];
         post?: never;
@@ -637,6 +637,220 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/campaigns": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Campaigns
+         * @description Every campaign, by name, with its session count and last session.
+         */
+        get: operations["list_campaigns_api_campaigns_get"];
+        put?: never;
+        /**
+         * Create Campaign
+         * @description Create a campaign.
+         *
+         *     A name already in use is a 409 rather than a second row: the picker shows
+         *     names, so two campaigns called "Curse of Strahd" are indistinguishable
+         *     everywhere a GM would have to choose between them, and the mistake that
+         *     produces them is pressing New twice.
+         */
+        post: operations["create_campaign_api_campaigns_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/campaigns/{campaign_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Campaign
+         * @description One campaign.
+         */
+        get: operations["get_campaign_api_campaigns__campaign_id__get"];
+        /**
+         * Update Campaign
+         * @description Rename a campaign, or change its notes or its recap prompt.
+         */
+        put: operations["update_campaign_api_campaigns__campaign_id__put"];
+        post?: never;
+        /**
+         * Delete Campaign
+         * @description Delete a campaign. Its sessions are kept, unassigned.
+         *
+         *     Said in the confirm dialog too, because it is the one thing about this
+         *     button anybody could be afraid of: a campaign is a label on recordings that
+         *     already exist, and deleting the label must not be able to delete four hours
+         *     of audio nobody can capture again.
+         */
+        delete: operations["delete_campaign_api_campaigns__campaign_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/campaigns/{campaign_id}/sessions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Campaign Sessions
+         * @description The campaign's sessions, oldest first - the order they were played in.
+         *
+         *     The opposite of the History page's order, deliberately: that page answers
+         *     "what did I record last", and a campaign answers "what happened, and then
+         *     what happened", which is a story and reads forwards.
+         */
+        get: operations["campaign_sessions_api_campaigns__campaign_id__sessions_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/campaigns/{campaign_id}/documents": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Campaign Session Documents
+         * @description Every generated text of the campaign's sessions, oldest session first.
+         */
+        get: operations["campaign_session_documents_api_campaigns__campaign_id__documents_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/campaigns/{campaign_id}/entities": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Campaign Entities
+         * @description Every session's extraction, merged by name.
+         *
+         *     Merged on a normalised name (trimmed and case-folded) rather than on the
+         *     exact string, because a transcript spells a name three ways across nine
+         *     sessions and three entries for one NPC is exactly the mess this page exists
+         *     to replace. The spelling kept is the first one seen, the notes are the
+         *     latest session's, and the session list says where the name came up - which
+         *     is what turns "who was Vallaki's burgomaster again" into a link.
+         */
+        get: operations["campaign_entities_api_campaigns__campaign_id__entities_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/campaigns/{campaign_id}/glossary/add": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Add To Campaign Glossary
+         * @description Append names to the campaign's glossary, trimmed and deduplicated.
+         *
+         *     Append rather than replace: this is reached from the extracted-names list,
+         *     where the gesture is "and these too", and a request that could silently
+         *     drop the terms a GM typed by hand would make that list dangerous to use.
+         *     Case-insensitive on the duplicate check, because "Strahd" and "strahd" bias
+         *     a recognizer identically and two of them only spend the glossary ceiling.
+         */
+        post: operations["add_to_campaign_glossary_api_campaigns__campaign_id__glossary_add_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/campaigns/{campaign_id}/previously-on": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Previously On
+         * @description The stored "previously on", or null when none has been written.
+         */
+        get: operations["get_previously_on_api_campaigns__campaign_id__previously_on_get"];
+        put?: never;
+        /**
+         * Write Previously On
+         * @description Write the campaign's "previously on" from its last few sessions.
+         *
+         *     Reads recaps, falling back per session to the stored summary, because a
+         *     campaign is rarely all one or all the other: the last three sessions have
+         *     recaps and the one before them was summarized months ago, and refusing to
+         *     read that one would silently drop a session out of the story. A session
+         *     with neither is skipped rather than represented by its raw transcript -
+         *     four hours of dialogue would swamp the two paragraphs either side of it.
+         */
+        post: operations["write_previously_on_api_campaigns__campaign_id__previously_on_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/search": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Search Transcripts
+         * @description Find transcript lines matching ``q``, optionally within one campaign.
+         *
+         *     An empty query is an empty result rather than an error: the box is emptied
+         *     by a backspace, and a page that answered that with a red banner would blame
+         *     the reader for clearing it.
+         */
+        get: operations["search_transcripts_api_search_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/session/start": {
         parameters: {
             query?: never;
@@ -816,6 +1030,85 @@ export interface paths {
          *     for a summary of a session that mostly is not in it.
          */
         post: operations["summarize_session_api_session__session_id__summarize_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/session/{session_id}/campaign": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Set Session Campaign
+         * @description Put a session in a campaign, or take it out of one (null).
+         *
+         *     An id no campaign answers to is a 404 rather than a stored string: that is
+         *     exactly the state this feature exists to end - a ``campaign_id`` nothing
+         *     can resolve, rendering as a raw hex id in the History table and reaching a
+         *     glossary nobody can find.
+         */
+        put: operations["set_session_campaign_api_session__session_id__campaign_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/session/{session_id}/recap": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Write Session Recap
+         * @description Write the player-facing recap of one transcript version.
+         *
+         *     The same call the summary makes, with different instructions and a
+         *     different place to put the answer. They are two texts about one session
+         *     because they are for two readers: a summary is the GM's index of what
+         *     happened, a recap is what the table is told a week later, and a prompt that
+         *     tries to be both produces a bulleted list of NPCs nobody reads aloud.
+         *
+         *     Which instructions run is the campaign's, else the stored default, else the
+         *     built-in text - see :func:`loreline.web.generation.recap_prompt`.
+         */
+        post: operations["write_session_recap_api_session__session_id__recap_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/session/{session_id}/extract": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Extract Session Entities
+         * @description Extract the names this session used, as structured data.
+         *
+         *     Stored as a document like the recap, and returned parsed rather than as the
+         *     stored JSON string: the campaign page merges these across sessions, and a
+         *     wire type the browser has to parse out of a string is a type the browser
+         *     does not really have.
+         */
+        post: operations["extract_session_entities_api_session__session_id__extract_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1180,6 +1473,16 @@ export interface components {
              */
             summarize_reasoning_effort?: string;
             /**
+             * Recap Prompt
+             * @default
+             */
+            recap_prompt?: string;
+            /**
+             * Campaign Id
+             * @default
+             */
+            campaign_id?: string;
+            /**
              * Strict Model Filtering
              * @default true
              */
@@ -1300,6 +1603,124 @@ export interface components {
             enabled: boolean;
         };
         /**
+         * Campaign
+         * @description A campaign: the thing a session belongs to, and what collects its memory.
+         *
+         *     Sessions have carried a ``campaign_id`` since the first schema, but nothing
+         *     listed the campaigns, so the id was a string a GM could only set by hand
+         *     and the app could only print back. A campaign is a row now: it has a name
+         *     somebody chose, it owns a glossary (the ``glossaries`` table is keyed by
+         *     the same id), and it is where a recap, an extraction and a "previously on"
+         *     accumulate into something worth reading a year later.
+         *
+         *     ``recap_prompt`` overrides the built-in recap instructions for this
+         *     campaign only - a table that plays in German, or one that wants its recaps
+         *     in character, says so once here rather than in every dialog.
+         */
+        Campaign: {
+            /** Id */
+            id: string;
+            /** Name */
+            name: string;
+            /** Created At */
+            created_at: number;
+            /**
+             * Notes
+             * @default
+             */
+            notes?: string;
+            /**
+             * Recap Prompt
+             * @default
+             */
+            recap_prompt?: string;
+        };
+        /**
+         * CampaignAssignment
+         * @description Which campaign a session belongs to; null takes it out of one.
+         */
+        CampaignAssignment: {
+            /** Campaign Id */
+            campaign_id?: string | null;
+        };
+        /**
+         * CampaignDocument
+         * @description One generated text about a whole campaign (currently ``previously_on``).
+         */
+        CampaignDocument: {
+            /** Campaign Id */
+            campaign_id: string;
+            /** Kind */
+            kind: string;
+            /** Body */
+            body: string;
+            /** Provider Id */
+            provider_id?: string | null;
+            /** Model */
+            model?: string | null;
+            /** Created At */
+            created_at: number;
+        };
+        /**
+         * CampaignEntities
+         * @description Every session's extraction in a campaign, merged by name.
+         */
+        CampaignEntities: {
+            /** Characters */
+            characters?: components["schemas"]["MergedEntity"][];
+            /** Places */
+            places?: components["schemas"]["MergedEntity"][];
+            /** Items */
+            items?: components["schemas"]["MergedEntity"][];
+            /** Factions */
+            factions?: components["schemas"]["MergedEntity"][];
+            /** Quests */
+            quests?: components["schemas"]["MergedEntity"][];
+            /** Decisions */
+            decisions?: components["schemas"]["MergedEntity"][];
+        };
+        /**
+         * CampaignSummary
+         * @description A campaign as the list page needs it: the row, plus what it holds.
+         *
+         *     The two counts are the whole reason the list is not just the rows: "which
+         *     of these am I actually playing" is answered by how many sessions it has and
+         *     when the last one was, and neither is on the campaign itself.
+         */
+        CampaignSummary: {
+            campaign: components["schemas"]["Campaign"];
+            /**
+             * Sessions
+             * @default 0
+             */
+            sessions?: number;
+            /** Last Session At */
+            last_session_at?: number | null;
+        };
+        /**
+         * CampaignWrite
+         * @description Create or rename a campaign.
+         *
+         *     The name is the campaign, so a blank one is refused rather than stored: a
+         *     row that renders as an empty cell in the picker is unpickable and
+         *     indistinguishable from "no campaign", which is the one thing the list must
+         *     be able to say.
+         */
+        CampaignWrite: {
+            /** Name */
+            name: string;
+            /**
+             * Notes
+             * @default
+             */
+            notes?: string;
+            /**
+             * Recap Prompt
+             * @default
+             */
+            recap_prompt?: string;
+        };
+        /**
          * CapabilityConfig
          * @description The whole file.
          */
@@ -1366,12 +1787,89 @@ export interface components {
             detail?: string | null;
         };
         /**
+         * ExtractedCharacter
+         * @description A person the session named: a player character or one of the GM's.
+         */
+        ExtractedCharacter: {
+            /** Name */
+            name: string;
+            /**
+             * Kind
+             * @default npc
+             * @enum {string}
+             */
+            kind?: "pc" | "npc";
+            /**
+             * Notes
+             * @default
+             */
+            notes?: string;
+        };
+        /**
+         * ExtractedEntity
+         * @description A place, an item or a faction the session named.
+         */
+        ExtractedEntity: {
+            /** Name */
+            name: string;
+            /**
+             * Notes
+             * @default
+             */
+            notes?: string;
+        };
+        /**
+         * ExtractedQuest
+         * @description A thread the session opened, advanced or closed.
+         */
+        ExtractedQuest: {
+            /** Title */
+            title: string;
+            /**
+             * Status
+             * @default
+             */
+            status?: string;
+            /**
+             * Notes
+             * @default
+             */
+            notes?: string;
+        };
+        /**
+         * GenerateRequest
+         * @description Run one of the generated texts: a recap, an extraction, a previously-on.
+         *
+         *     Deliberately the same shape as :class:`SummarizeRequest`, minus the version
+         *     for the campaign-level one: the three session actions are one dialog in the
+         *     browser with a different verb on the button, and three request models that
+         *     drift apart would make that dialog three dialogs again.
+         */
+        GenerateRequest: {
+            /** Provider Id */
+            provider_id: string;
+            /** Model */
+            model: string;
+            /** Reasoning Effort */
+            reasoning_effort?: string | null;
+            /** Version */
+            version?: string | null;
+        };
+        /**
          * Glossary
          * @description Per-campaign custom vocabulary (spell / character / place names).
          */
         Glossary: {
             /** Campaign Id */
             campaign_id: string;
+            /** Terms */
+            terms?: string[];
+        };
+        /**
+         * GlossaryAdd
+         * @description Names to append to a campaign's glossary, deduplicated on the way in.
+         */
+        GlossaryAdd: {
             /** Terms */
             terms?: string[];
         };
@@ -1605,6 +2103,31 @@ export interface components {
             password: string;
         };
         /**
+         * MergedEntity
+         * @description One name across every session of a campaign that mentioned it.
+         *
+         *     ``kind`` carries whatever secondary word the group has: "pc" or "npc" for a
+         *     character, a quest's status for a quest, blank for a place, an item or a
+         *     faction. One shape for all six groups, so the campaign page renders one
+         *     list six times rather than six lists that drift apart.
+         */
+        MergedEntity: {
+            /** Name */
+            name: string;
+            /**
+             * Kind
+             * @default
+             */
+            kind?: string;
+            /**
+             * Notes
+             * @default
+             */
+            notes?: string;
+            /** Session Ids */
+            session_ids?: string[];
+        };
+        /**
          * ModelInfo
          * @description One entry in a provider's model list.
          *
@@ -1748,6 +2271,25 @@ export interface components {
              * @default false
              */
             zdr?: boolean;
+        };
+        /**
+         * PreviouslyOnRequest
+         * @description Write the campaign's "previously on" from its last few sessions.
+         */
+        PreviouslyOnRequest: {
+            /** Provider Id */
+            provider_id: string;
+            /** Model */
+            model: string;
+            /** Reasoning Effort */
+            reasoning_effort?: string | null;
+            /** Version */
+            version?: string | null;
+            /**
+             * Sessions
+             * @default 3
+             */
+            sessions?: number;
         };
         /**
          * ProviderCreate
@@ -2015,6 +2557,55 @@ export interface components {
             commit: string;
         };
         /**
+         * SearchHit
+         * @description One transcript line a search matched, with enough context to open it.
+         *
+         *     ``snippet`` is the matched text with the hits wrapped in ``[`` and ``]`` -
+         *     produced by FTS5's own ``snippet()`` where there is an index, and assembled
+         *     around the match where the fallback ran, so a reader cannot tell which path
+         *     answered them. ``version`` is what the session page's ``?v=`` takes and
+         *     ``start_ts`` what its ``?t=`` takes, so a hit is a link to the line.
+         */
+        SearchHit: {
+            /** Session Id */
+            session_id: string;
+            /** Started At */
+            started_at: number;
+            /** Campaign Id */
+            campaign_id?: string | null;
+            /**
+             * Version
+             * @default original
+             */
+            version?: string;
+            /** Speaker */
+            speaker?: string | null;
+            /** Start Ts */
+            start_ts: number;
+            /** Snippet */
+            snippet: string;
+        };
+        /**
+         * SearchResults
+         * @description What a search found, and whether it was a real search.
+         *
+         *     ``indexed`` is false on a SQLite build with no FTS5 in it, where the query
+         *     ran as a ``LIKE`` scan: the hits are real, the ranking is not (they come
+         *     back newest first, because there is nothing to rank by). The page says so
+         *     in a line under the box rather than silently presenting an unranked list as
+         *     a ranked one - on a library of one campaign the difference is invisible,
+         *     and on ten it is the difference between the answer and the tenth answer.
+         */
+        SearchResults: {
+            /** Hits */
+            hits?: components["schemas"]["SearchHit"][];
+            /**
+             * Indexed
+             * @default true
+             */
+            indexed?: boolean;
+        };
+        /**
          * SecretWrite
          * @description Write-only secret value for a provider's API key.
          */
@@ -2102,14 +2693,64 @@ export interface components {
         };
         /**
          * SessionDetail
-         * @description A session plus its persisted transcript.
+         * @description A session plus its persisted transcript and its generated texts.
          */
         SessionDetail: {
             session: components["schemas"]["Session"];
             /** Transcript */
             transcript: components["schemas"]["TranscriptEvent"][];
+            /** Documents */
+            documents?: components["schemas"]["SessionDocument"][];
             /** Audio Duration S */
             audio_duration_s?: number | null;
+        };
+        /**
+         * SessionDocument
+         * @description One generated text about one session, and what produced it.
+         *
+         *     ``version`` is the transcript version it was read from, for the same reason
+         *     ``Session.summary_version`` exists: a session holds the live capture plus
+         *     one version per re-transcription, and a recap that cannot name the
+         *     transcript behind it cannot be judged against it.
+         */
+        SessionDocument: {
+            /** Session Id */
+            session_id: string;
+            /** Kind */
+            kind: string;
+            /** Body */
+            body: string;
+            /** Provider Id */
+            provider_id?: string | null;
+            /** Model */
+            model?: string | null;
+            /** Version */
+            version?: string | null;
+            /** Created At */
+            created_at: number;
+        };
+        /**
+         * SessionExtraction
+         * @description The structured names one session's transcript yielded.
+         *
+         *     Every list defaults to empty, on purpose: a model that answers with four of
+         *     the six keys has still said something useful about the session, and the
+         *     missing ones mean "none of these came up", which is a true statement about
+         *     plenty of sessions.
+         */
+        SessionExtraction: {
+            /** Characters */
+            characters?: components["schemas"]["ExtractedCharacter"][];
+            /** Places */
+            places?: components["schemas"]["ExtractedEntity"][];
+            /** Items */
+            items?: components["schemas"]["ExtractedEntity"][];
+            /** Factions */
+            factions?: components["schemas"]["ExtractedEntity"][];
+            /** Quests */
+            quests?: components["schemas"]["ExtractedQuest"][];
+            /** Decisions */
+            decisions?: string[];
         };
         /**
          * SessionIds
@@ -3568,6 +4209,385 @@ export interface operations {
             };
         };
     };
+    list_campaigns_api_campaigns_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CampaignSummary"][];
+                };
+            };
+        };
+    };
+    create_campaign_api_campaigns_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CampaignWrite"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Campaign"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_campaign_api_campaigns__campaign_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                campaign_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Campaign"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_campaign_api_campaigns__campaign_id__put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                campaign_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CampaignWrite"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Campaign"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_campaign_api_campaigns__campaign_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                campaign_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OkResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    campaign_sessions_api_campaigns__campaign_id__sessions_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                campaign_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Session"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    campaign_session_documents_api_campaigns__campaign_id__documents_get: {
+        parameters: {
+            query?: {
+                kind?: string | null;
+            };
+            header?: never;
+            path: {
+                campaign_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SessionDocument"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    campaign_entities_api_campaigns__campaign_id__entities_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                campaign_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CampaignEntities"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    add_to_campaign_glossary_api_campaigns__campaign_id__glossary_add_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                campaign_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["GlossaryAdd"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Glossary"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_previously_on_api_campaigns__campaign_id__previously_on_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                campaign_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CampaignDocument"] | null;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    write_previously_on_api_campaigns__campaign_id__previously_on_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                campaign_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PreviouslyOnRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CampaignDocument"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    search_transcripts_api_search_get: {
+        parameters: {
+            query?: {
+                q?: string;
+                campaign_id?: string | null;
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SearchResults"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     start_session_api_session_start_post: {
         parameters: {
             query?: never;
@@ -3828,6 +4848,111 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SummarizeResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    set_session_campaign_api_session__session_id__campaign_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CampaignAssignment"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Session"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    write_session_recap_api_session__session_id__recap_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["GenerateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SessionDocument"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    extract_session_entities_api_session__session_id__extract_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["GenerateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SessionExtraction"];
                 };
             };
             /** @description Validation Error */

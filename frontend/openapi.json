@@ -282,7 +282,7 @@
           "system"
         ],
         "summary": "Get Defaults",
-        "description": "Return the per-action default models/mode used to pre-select the pickers.\n\nA blank stored summary prompt is served as the built-in default text, so\nthe settings UI always shows the concrete, editable instructions -\nclearing the field and saving is the reset-to-default gesture.",
+        "description": "Return the per-action default models/mode used to pre-select the pickers.\n\nA blank stored summary or recap prompt is served as the built-in default\ntext, so the settings UI always shows the concrete, editable instructions -\nclearing the field and saving is the reset-to-default gesture.",
         "operationId": "get_defaults_api_system_defaults_get",
         "responses": {
           "200": {
@@ -307,7 +307,7 @@
           "system"
         ],
         "summary": "Set Defaults",
-        "description": "Persist the per-action defaults.\n\nA summary prompt equal to the built-in default (or blank) is stored blank,\nso an untouched field keeps tracking future improvements to the built-in\ntext instead of pinning today's copy. The response mirrors GET: served\nfilled in.",
+        "description": "Persist the per-action defaults.\n\nA summary or recap prompt equal to the built-in default (or blank) is\nstored blank, so an untouched field keeps tracking future improvements to\nthe built-in text instead of pinning today's copy. The response mirrors\nGET: served filled in.",
         "operationId": "set_defaults_api_system_defaults_put",
         "requestBody": {
           "content": {
@@ -1425,6 +1425,647 @@
         }
       }
     },
+    "/api/campaigns": {
+      "get": {
+        "tags": [
+          "campaigns"
+        ],
+        "summary": "List Campaigns",
+        "description": "Every campaign, by name, with its session count and last session.",
+        "operationId": "list_campaigns_api_campaigns_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/CampaignSummary"
+                  },
+                  "type": "array",
+                  "title": "Response List Campaigns Api Campaigns Get"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "campaigns"
+        ],
+        "summary": "Create Campaign",
+        "description": "Create a campaign.\n\nA name already in use is a 409 rather than a second row: the picker shows\nnames, so two campaigns called \"Curse of Strahd\" are indistinguishable\neverywhere a GM would have to choose between them, and the mistake that\nproduces them is pressing New twice.",
+        "operationId": "create_campaign_api_campaigns_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CampaignWrite"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Campaign"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
+      }
+    },
+    "/api/campaigns/{campaign_id}": {
+      "get": {
+        "tags": [
+          "campaigns"
+        ],
+        "summary": "Get Campaign",
+        "description": "One campaign.",
+        "operationId": "get_campaign_api_campaigns__campaign_id__get",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "campaign_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Campaign Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Campaign"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "campaigns"
+        ],
+        "summary": "Update Campaign",
+        "description": "Rename a campaign, or change its notes or its recap prompt.",
+        "operationId": "update_campaign_api_campaigns__campaign_id__put",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "campaign_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Campaign Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CampaignWrite"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Campaign"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "campaigns"
+        ],
+        "summary": "Delete Campaign",
+        "description": "Delete a campaign. Its sessions are kept, unassigned.\n\nSaid in the confirm dialog too, because it is the one thing about this\nbutton anybody could be afraid of: a campaign is a label on recordings that\nalready exist, and deleting the label must not be able to delete four hours\nof audio nobody can capture again.",
+        "operationId": "delete_campaign_api_campaigns__campaign_id__delete",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "campaign_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Campaign Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/campaigns/{campaign_id}/sessions": {
+      "get": {
+        "tags": [
+          "campaigns"
+        ],
+        "summary": "Campaign Sessions",
+        "description": "The campaign's sessions, oldest first - the order they were played in.\n\nThe opposite of the History page's order, deliberately: that page answers\n\"what did I record last\", and a campaign answers \"what happened, and then\nwhat happened\", which is a story and reads forwards.",
+        "operationId": "campaign_sessions_api_campaigns__campaign_id__sessions_get",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "campaign_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Campaign Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Session"
+                  },
+                  "title": "Response Campaign Sessions Api Campaigns  Campaign Id  Sessions Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/campaigns/{campaign_id}/documents": {
+      "get": {
+        "tags": [
+          "campaigns"
+        ],
+        "summary": "Campaign Session Documents",
+        "description": "Every generated text of the campaign's sessions, oldest session first.",
+        "operationId": "campaign_session_documents_api_campaigns__campaign_id__documents_get",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "campaign_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Campaign Id"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Kind"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SessionDocument"
+                  },
+                  "title": "Response Campaign Session Documents Api Campaigns  Campaign Id  Documents Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/campaigns/{campaign_id}/entities": {
+      "get": {
+        "tags": [
+          "campaigns"
+        ],
+        "summary": "Campaign Entities",
+        "description": "Every session's extraction, merged by name.\n\nMerged on a normalised name (trimmed and case-folded) rather than on the\nexact string, because a transcript spells a name three ways across nine\nsessions and three entries for one NPC is exactly the mess this page exists\nto replace. The spelling kept is the first one seen, the notes are the\nlatest session's, and the session list says where the name came up - which\nis what turns \"who was Vallaki's burgomaster again\" into a link.",
+        "operationId": "campaign_entities_api_campaigns__campaign_id__entities_get",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "campaign_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Campaign Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CampaignEntities"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/campaigns/{campaign_id}/glossary/add": {
+      "post": {
+        "tags": [
+          "campaigns"
+        ],
+        "summary": "Add To Campaign Glossary",
+        "description": "Append names to the campaign's glossary, trimmed and deduplicated.\n\nAppend rather than replace: this is reached from the extracted-names list,\nwhere the gesture is \"and these too\", and a request that could silently\ndrop the terms a GM typed by hand would make that list dangerous to use.\nCase-insensitive on the duplicate check, because \"Strahd\" and \"strahd\" bias\na recognizer identically and two of them only spend the glossary ceiling.",
+        "operationId": "add_to_campaign_glossary_api_campaigns__campaign_id__glossary_add_post",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "campaign_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Campaign Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GlossaryAdd"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Glossary"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/campaigns/{campaign_id}/previously-on": {
+      "get": {
+        "tags": [
+          "campaigns"
+        ],
+        "summary": "Get Previously On",
+        "description": "The stored \"previously on\", or null when none has been written.",
+        "operationId": "get_previously_on_api_campaigns__campaign_id__previously_on_get",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "campaign_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Campaign Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/CampaignDocument"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "title": "Response Get Previously On Api Campaigns  Campaign Id  Previously On Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "campaigns"
+        ],
+        "summary": "Write Previously On",
+        "description": "Write the campaign's \"previously on\" from its last few sessions.\n\nReads recaps, falling back per session to the stored summary, because a\ncampaign is rarely all one or all the other: the last three sessions have\nrecaps and the one before them was summarized months ago, and refusing to\nread that one would silently drop a session out of the story. A session\nwith neither is skipped rather than represented by its raw transcript -\nfour hours of dialogue would swamp the two paragraphs either side of it.",
+        "operationId": "write_previously_on_api_campaigns__campaign_id__previously_on_post",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "campaign_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Campaign Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PreviouslyOnRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CampaignDocument"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/search": {
+      "get": {
+        "tags": [
+          "search"
+        ],
+        "summary": "Search Transcripts",
+        "description": "Find transcript lines matching ``q``, optionally within one campaign.\n\nAn empty query is an empty result rather than an error: the box is emptied\nby a backspace, and a page that answered that with a red banner would blame\nthe reader for clearing it.",
+        "operationId": "search_transcripts_api_search_get",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Q"
+            }
+          },
+          {
+            "name": "campaign_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Campaign Id"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 200,
+              "minimum": 1,
+              "default": 50,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SearchResults"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/session/start": {
       "post": {
         "tags": [
@@ -1852,6 +2493,180 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/SummarizeResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/session/{session_id}/campaign": {
+      "put": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "Set Session Campaign",
+        "description": "Put a session in a campaign, or take it out of one (null).\n\nAn id no campaign answers to is a 404 rather than a stored string: that is\nexactly the state this feature exists to end - a ``campaign_id`` nothing\ncan resolve, rendering as a raw hex id in the History table and reaching a\nglossary nobody can find.",
+        "operationId": "set_session_campaign_api_session__session_id__campaign_put",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CampaignAssignment"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Session"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/session/{session_id}/recap": {
+      "post": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "Write Session Recap",
+        "description": "Write the player-facing recap of one transcript version.\n\nThe same call the summary makes, with different instructions and a\ndifferent place to put the answer. They are two texts about one session\nbecause they are for two readers: a summary is the GM's index of what\nhappened, a recap is what the table is told a week later, and a prompt that\ntries to be both produces a bulleted list of NPCs nobody reads aloud.\n\nWhich instructions run is the campaign's, else the stored default, else the\nbuilt-in text - see :func:`loreline.web.generation.recap_prompt`.",
+        "operationId": "write_session_recap_api_session__session_id__recap_post",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GenerateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionDocument"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/session/{session_id}/extract": {
+      "post": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "Extract Session Entities",
+        "description": "Extract the names this session used, as structured data.\n\nStored as a document like the recap, and returned parsed rather than as the\nstored JSON string: the campaign page merges these across sessions, and a\nwire type the browser has to parse out of a string is a type the browser\ndoes not really have.",
+        "operationId": "extract_session_entities_api_session__session_id__extract_post",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GenerateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionExtraction"
                 }
               }
             }
@@ -2612,6 +3427,16 @@
             "title": "Summarize Reasoning Effort",
             "default": ""
           },
+          "recap_prompt": {
+            "type": "string",
+            "title": "Recap Prompt",
+            "default": ""
+          },
+          "campaign_id": {
+            "type": "string",
+            "title": "Campaign Id",
+            "default": ""
+          },
           "strict_model_filtering": {
             "type": "boolean",
             "title": "Strict Model Filtering",
@@ -2855,6 +3680,212 @@
         "title": "AutostartUpdate",
         "description": "Toggle systemd autostart."
       },
+      "Campaign": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "created_at": {
+            "type": "number",
+            "title": "Created At"
+          },
+          "notes": {
+            "type": "string",
+            "title": "Notes",
+            "default": ""
+          },
+          "recap_prompt": {
+            "type": "string",
+            "title": "Recap Prompt",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "created_at"
+        ],
+        "title": "Campaign",
+        "description": "A campaign: the thing a session belongs to, and what collects its memory.\n\nSessions have carried a ``campaign_id`` since the first schema, but nothing\nlisted the campaigns, so the id was a string a GM could only set by hand\nand the app could only print back. A campaign is a row now: it has a name\nsomebody chose, it owns a glossary (the ``glossaries`` table is keyed by\nthe same id), and it is where a recap, an extraction and a \"previously on\"\naccumulate into something worth reading a year later.\n\n``recap_prompt`` overrides the built-in recap instructions for this\ncampaign only - a table that plays in German, or one that wants its recaps\nin character, says so once here rather than in every dialog."
+      },
+      "CampaignAssignment": {
+        "properties": {
+          "campaign_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Campaign Id"
+          }
+        },
+        "type": "object",
+        "title": "CampaignAssignment",
+        "description": "Which campaign a session belongs to; null takes it out of one."
+      },
+      "CampaignDocument": {
+        "properties": {
+          "campaign_id": {
+            "type": "string",
+            "title": "Campaign Id"
+          },
+          "kind": {
+            "type": "string",
+            "title": "Kind"
+          },
+          "body": {
+            "type": "string",
+            "title": "Body"
+          },
+          "provider_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Provider Id"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          },
+          "created_at": {
+            "type": "number",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "campaign_id",
+          "kind",
+          "body",
+          "created_at"
+        ],
+        "title": "CampaignDocument",
+        "description": "One generated text about a whole campaign (currently ``previously_on``)."
+      },
+      "CampaignEntities": {
+        "properties": {
+          "characters": {
+            "items": {
+              "$ref": "#/components/schemas/MergedEntity"
+            },
+            "type": "array",
+            "title": "Characters"
+          },
+          "places": {
+            "items": {
+              "$ref": "#/components/schemas/MergedEntity"
+            },
+            "type": "array",
+            "title": "Places"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/MergedEntity"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "factions": {
+            "items": {
+              "$ref": "#/components/schemas/MergedEntity"
+            },
+            "type": "array",
+            "title": "Factions"
+          },
+          "quests": {
+            "items": {
+              "$ref": "#/components/schemas/MergedEntity"
+            },
+            "type": "array",
+            "title": "Quests"
+          },
+          "decisions": {
+            "items": {
+              "$ref": "#/components/schemas/MergedEntity"
+            },
+            "type": "array",
+            "title": "Decisions"
+          }
+        },
+        "type": "object",
+        "title": "CampaignEntities",
+        "description": "Every session's extraction in a campaign, merged by name."
+      },
+      "CampaignSummary": {
+        "properties": {
+          "campaign": {
+            "$ref": "#/components/schemas/Campaign"
+          },
+          "sessions": {
+            "type": "integer",
+            "title": "Sessions",
+            "default": 0
+          },
+          "last_session_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Session At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "campaign"
+        ],
+        "title": "CampaignSummary",
+        "description": "A campaign as the list page needs it: the row, plus what it holds.\n\nThe two counts are the whole reason the list is not just the rows: \"which\nof these am I actually playing\" is answered by how many sessions it has and\nwhen the last one was, and neither is on the campaign itself."
+      },
+      "CampaignWrite": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Name"
+          },
+          "notes": {
+            "type": "string",
+            "title": "Notes",
+            "default": ""
+          },
+          "recap_prompt": {
+            "type": "string",
+            "title": "Recap Prompt",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "title": "CampaignWrite",
+        "description": "Create or rename a campaign.\n\nThe name is the campaign, so a blank one is refused rather than stored: a\nrow that renders as an empty cell in the picker is unpickable and\nindistinguishable from \"no campaign\", which is the one thing the list must\nbe able to say."
+      },
       "CapabilityConfig": {
         "properties": {
           "version": {
@@ -3010,6 +4041,119 @@
         "title": "DiarizerProbeResponse",
         "description": "The graded probe of one diarization endpoint, checked on demand.\n\nThe same verdict shape ``HealthResponse`` already carries for the stored\ndefault, but for whatever endpoint the caller names. The capture panel\nuses this to check the value currently typed into its endpoint field,\nwhich ``/healthz`` cannot: that call only ever probes\n``defaults.diar_endpoint``, the last *saved* value, never a value someone\nis only trying out."
       },
+      "ExtractedCharacter": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "pc",
+              "npc"
+            ],
+            "title": "Kind",
+            "default": "npc"
+          },
+          "notes": {
+            "type": "string",
+            "title": "Notes",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "title": "ExtractedCharacter",
+        "description": "A person the session named: a player character or one of the GM's."
+      },
+      "ExtractedEntity": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "notes": {
+            "type": "string",
+            "title": "Notes",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "title": "ExtractedEntity",
+        "description": "A place, an item or a faction the session named."
+      },
+      "ExtractedQuest": {
+        "properties": {
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "default": ""
+          },
+          "notes": {
+            "type": "string",
+            "title": "Notes",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "title"
+        ],
+        "title": "ExtractedQuest",
+        "description": "A thread the session opened, advanced or closed."
+      },
+      "GenerateRequest": {
+        "properties": {
+          "provider_id": {
+            "type": "string",
+            "title": "Provider Id"
+          },
+          "model": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Model"
+          },
+          "reasoning_effort": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reasoning Effort"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version"
+          }
+        },
+        "type": "object",
+        "required": [
+          "provider_id",
+          "model"
+        ],
+        "title": "GenerateRequest",
+        "description": "Run one of the generated texts: a recap, an extraction, a previously-on.\n\nDeliberately the same shape as :class:`SummarizeRequest`, minus the version\nfor the campaign-level one: the three session actions are one dialog in the\nbrowser with a different verb on the button, and three request models that\ndrift apart would make that dialog three dialogs again."
+      },
       "Glossary": {
         "properties": {
           "campaign_id": {
@@ -3030,6 +4174,20 @@
         ],
         "title": "Glossary",
         "description": "Per-campaign custom vocabulary (spell / character / place names)."
+      },
+      "GlossaryAdd": {
+        "properties": {
+          "terms": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Terms"
+          }
+        },
+        "type": "object",
+        "title": "GlossaryAdd",
+        "description": "Names to append to a campaign's glossary, deduplicated on the way in."
       },
       "GlossarySupport": {
         "properties": {
@@ -3442,6 +4600,37 @@
         "title": "LoginRequest",
         "description": "Password login payload."
       },
+      "MergedEntity": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "kind": {
+            "type": "string",
+            "title": "Kind",
+            "default": ""
+          },
+          "notes": {
+            "type": "string",
+            "title": "Notes",
+            "default": ""
+          },
+          "session_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Session Ids"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "title": "MergedEntity",
+        "description": "One name across every session of a campaign that mentioned it.\n\n``kind`` carries whatever secondary word the group has: \"pc\" or \"npc\" for a\ncharacter, a quest's status for a quest, blank for a place, an item or a\nfaction. One shape for all six groups, so the campaign page renders one\nlist six times rather than six lists that drift apart."
+      },
       "ModelInfo": {
         "properties": {
           "id": {
@@ -3730,6 +4919,55 @@
         "type": "object",
         "title": "OpenRouterRouting",
         "description": "OpenRouter provider-routing preferences. Ignored for every other kind.\n\nOpenRouter fans one model id out across several upstream providers that\ndiffer in price, speed and data policy, and picks between them itself.\nThese narrow or reorder that pool; they are sent verbatim as the\n``provider`` object of the chat-completions body - see\nhttps://openrouter.ai/docs/features/provider-routing.\n\nEvery field defaults to OpenRouter's own default, and\n:func:`loreline.llm.routing_payload` omits any field still sitting at it,\nso a provider nobody has configured routing for keeps behaving exactly as\nbefore - and a default OpenRouter later changes stays theirs to change.\n\nNote the two privacy switches are not the same thing: ``data_collection``\nexcludes providers that may *store or train on* the prompt, while ``zdr``\nadditionally requires an endpoint under a Zero Data Retention agreement.\nEither can leave a given model with no eligible provider at all, in which\ncase OpenRouter rejects the request rather than quietly falling back - the\nsettings UI says so next to the switches."
+      },
+      "PreviouslyOnRequest": {
+        "properties": {
+          "provider_id": {
+            "type": "string",
+            "title": "Provider Id"
+          },
+          "model": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Model"
+          },
+          "reasoning_effort": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reasoning Effort"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version"
+          },
+          "sessions": {
+            "type": "integer",
+            "maximum": 20.0,
+            "minimum": 1.0,
+            "title": "Sessions",
+            "default": 3
+          }
+        },
+        "type": "object",
+        "required": [
+          "provider_id",
+          "model"
+        ],
+        "title": "PreviouslyOnRequest",
+        "description": "Write the campaign's \"previously on\" from its last few sessions."
       },
       "ProviderCreate": {
         "properties": {
@@ -4304,6 +5542,81 @@
         "title": "RollbackRequest",
         "description": "Roll the deployment back to a prior commit."
       },
+      "SearchHit": {
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "title": "Session Id"
+          },
+          "started_at": {
+            "type": "number",
+            "title": "Started At"
+          },
+          "campaign_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Campaign Id"
+          },
+          "version": {
+            "type": "string",
+            "title": "Version",
+            "default": "original"
+          },
+          "speaker": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Speaker"
+          },
+          "start_ts": {
+            "type": "number",
+            "title": "Start Ts"
+          },
+          "snippet": {
+            "type": "string",
+            "title": "Snippet"
+          }
+        },
+        "type": "object",
+        "required": [
+          "session_id",
+          "started_at",
+          "start_ts",
+          "snippet"
+        ],
+        "title": "SearchHit",
+        "description": "One transcript line a search matched, with enough context to open it.\n\n``snippet`` is the matched text with the hits wrapped in ``[`` and ``]`` -\nproduced by FTS5's own ``snippet()`` where there is an index, and assembled\naround the match where the fallback ran, so a reader cannot tell which path\nanswered them. ``version`` is what the session page's ``?v=`` takes and\n``start_ts`` what its ``?t=`` takes, so a hit is a link to the line."
+      },
+      "SearchResults": {
+        "properties": {
+          "hits": {
+            "items": {
+              "$ref": "#/components/schemas/SearchHit"
+            },
+            "type": "array",
+            "title": "Hits"
+          },
+          "indexed": {
+            "type": "boolean",
+            "title": "Indexed",
+            "default": true
+          }
+        },
+        "type": "object",
+        "title": "SearchResults",
+        "description": "What a search found, and whether it was a real search.\n\n``indexed`` is false on a SQLite build with no FTS5 in it, where the query\nran as a ``LIKE`` scan: the hits are real, the ranking is not (they come\nback newest first, because there is nothing to rank by). The page says so\nin a line under the box rather than silently presenting an unranked list as\na ranked one - on a library of one campaign the difference is invisible,\nand on ten it is the difference between the answer and the tenth answer."
+      },
       "SecretWrite": {
         "properties": {
           "value": {
@@ -4546,6 +5859,13 @@
             "type": "array",
             "title": "Transcript"
           },
+          "documents": {
+            "items": {
+              "$ref": "#/components/schemas/SessionDocument"
+            },
+            "type": "array",
+            "title": "Documents"
+          },
           "audio_duration_s": {
             "anyOf": [
               {
@@ -4564,7 +5884,118 @@
           "transcript"
         ],
         "title": "SessionDetail",
-        "description": "A session plus its persisted transcript."
+        "description": "A session plus its persisted transcript and its generated texts."
+      },
+      "SessionDocument": {
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "title": "Session Id"
+          },
+          "kind": {
+            "type": "string",
+            "title": "Kind"
+          },
+          "body": {
+            "type": "string",
+            "title": "Body"
+          },
+          "provider_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Provider Id"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version"
+          },
+          "created_at": {
+            "type": "number",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "session_id",
+          "kind",
+          "body",
+          "created_at"
+        ],
+        "title": "SessionDocument",
+        "description": "One generated text about one session, and what produced it.\n\n``version`` is the transcript version it was read from, for the same reason\n``Session.summary_version`` exists: a session holds the live capture plus\none version per re-transcription, and a recap that cannot name the\ntranscript behind it cannot be judged against it."
+      },
+      "SessionExtraction": {
+        "properties": {
+          "characters": {
+            "items": {
+              "$ref": "#/components/schemas/ExtractedCharacter"
+            },
+            "type": "array",
+            "title": "Characters"
+          },
+          "places": {
+            "items": {
+              "$ref": "#/components/schemas/ExtractedEntity"
+            },
+            "type": "array",
+            "title": "Places"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ExtractedEntity"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "factions": {
+            "items": {
+              "$ref": "#/components/schemas/ExtractedEntity"
+            },
+            "type": "array",
+            "title": "Factions"
+          },
+          "quests": {
+            "items": {
+              "$ref": "#/components/schemas/ExtractedQuest"
+            },
+            "type": "array",
+            "title": "Quests"
+          },
+          "decisions": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Decisions"
+          }
+        },
+        "type": "object",
+        "title": "SessionExtraction",
+        "description": "The structured names one session's transcript yielded.\n\nEvery list defaults to empty, on purpose: a model that answers with four of\nthe six keys has still said something useful about the session, and the\nmissing ones mean \"none of these came up\", which is a true statement about\nplenty of sessions."
       },
       "SessionIds": {
         "properties": {

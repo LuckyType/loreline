@@ -9,6 +9,7 @@ comes from the request (see :func:`summarize_transcript`).
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from http import HTTPStatus
 from typing import cast
@@ -16,11 +17,18 @@ from typing import cast
 import httpx
 from openrouter.components.chatrequest import ChatRequestReasoning
 from openrouter.components.providerpreferences import ProviderPreferences
+from pydantic import ValidationError
 
 from loreline.capabilities import Endpoint, surface_for
 from loreline.health import error_body, error_detail
 from loreline.logging import get_logger
-from loreline.models import Interaction, OpenRouterRouting, ProviderConfig, ProviderKind
+from loreline.models import (
+    Interaction,
+    OpenRouterRouting,
+    ProviderConfig,
+    ProviderKind,
+    SessionExtraction,
+)
 
 log = get_logger(__name__)
 
@@ -34,6 +42,49 @@ DEFAULT_SYSTEM_PROMPT = (
     "tabletop RPG session transcripts. Capture the key events, decisions, NPCs, "
     "locations and unresolved threads. Preserve speaker/character names where the "
     "transcript labels them. Write the summary in the same language as the transcript."
+)
+
+# What a player wants to be told a week later, which is not what a GM wants in
+# a summary: no meta commentary about the recording, no headings listing "NPCs"
+# and "Locations", just what the party did and what is still open, in the
+# language they played in. Overridable globally (kv `action_defaults.recap_prompt`)
+# and per campaign (`campaigns.recap_prompt`), with the same blank-means-default
+# rule the summary prompt has.
+DEFAULT_RECAP_PROMPT = (
+    "You write the recap of a tabletop RPG session for the players who were "
+    "there. Write in the past tense, in the same language as the transcript, "
+    "as flowing prose rather than a list. Cover what the party did, what they "
+    "learned, who they met and what is still unresolved. Use the names the "
+    "transcript uses. Do not mention the transcript, the recording or yourself, "
+    "and do not add advice or speculation. Aim for 200 to 400 words."
+)
+
+# The extraction prompt asks for JSON and nothing else. Models answer it with a
+# code fence anyway, which is why the parser strips one (see
+# :func:`parse_extraction`) instead of the prompt insisting harder.
+EXTRACTION_PROMPT = (
+    "You extract the named things from a tabletop RPG session transcript. "
+    "Answer with a single JSON object and nothing else: no prose, no code "
+    "fence, no explanation. The object has exactly these keys:\n"
+    '{"characters": [{"name": str, "kind": "pc" | "npc", "notes": str}], '
+    '"places": [{"name": str, "notes": str}], '
+    '"items": [{"name": str, "notes": str}], '
+    '"factions": [{"name": str, "notes": str}], '
+    '"quests": [{"title": str, "status": str, "notes": str}], '
+    '"decisions": [str]}\n'
+    "Use the spelling the transcript uses. Keep each note to one sentence, in "
+    "the transcript's language. A key with nothing to report is an empty list."
+)
+
+# The one for the start of the next session: shorter than a recap, and about
+# the campaign rather than about one evening.
+DEFAULT_PREVIOUSLY_ON_PROMPT = (
+    'You write the "previously on" that opens the next session of a tabletop '
+    "RPG campaign, from the recaps of the sessions before it. Write in the past "
+    "tense, in the same language as the recaps, as a single short paragraph of "
+    "at most 150 words that a GM can read aloud at the table. Carry only what "
+    "the players need to pick the story back up: where they are, what they were "
+    "doing and what is still open. Do not mention the recaps or yourself."
 )
 
 # Reasoning-effort levels, in the order the pickers show them. Not hand-written:
@@ -145,6 +196,7 @@ async def summarize_transcript(
     model: str,
     transcript: str,
     system_prompt: str | None = None,
+    instruction: str = "Summarize this session transcript:",
     reasoning_effort: str | None = None,
     client_factory: ClientFactory | None = None,
 ) -> str:
@@ -158,6 +210,12 @@ async def summarize_transcript(
 
     ``system_prompt`` overrides the built-in summary instructions; blank or
     None falls back to :data:`DEFAULT_SYSTEM_PROMPT`.
+
+    ``instruction`` is the line the transcript is handed over with. It exists
+    because this function is no longer only the summarizer: a recap and an
+    extraction are the same call with different instructions, and a body that
+    opens "Summarize this session transcript" while the system prompt asks for
+    JSON is a contradiction the model has to resolve on its own.
 
     ``reasoning_effort`` is sent only for a model that advertises support (the
     caller checks; see ModelInfo.supports_reasoning) and is dropped on retry if
@@ -173,7 +231,7 @@ async def summarize_transcript(
         "model": model,
         "messages": [
             {"role": "system", "content": instructions},
-            {"role": "user", "content": f"Summarize this session transcript:\n\n{transcript}"},
+            {"role": "user", "content": f"{instruction}\n\n{transcript}"},
         ],
         "temperature": 0.3,
     }
@@ -244,3 +302,98 @@ def _parse_completion(payload: object) -> str:
                         return content.strip()
     log.warning("llm.summary.unexpected_payload")
     return ""
+
+
+_EXTRACTION_INSTRUCTION = "Extract the named things from this session transcript:"
+
+
+def parse_extraction(answer: str) -> SessionExtraction:
+    """Read a model's answer as a :class:`SessionExtraction`, leniently.
+
+    "JSON only" is an instruction, not a guarantee. The same prompt comes back
+    bare from one model, inside a ```json fence from the next, and with a
+    sentence of throat-clearing in front of the object from a third, and all
+    three of those are answers that contain everything asked for. So the fence
+    is stripped and the outermost braces are what is parsed, before pydantic
+    gets an opinion.
+
+    Raises ``ValueError`` for an answer no object could be found in, or one
+    whose object does not fit the schema. The caller retries once with the
+    message appended (see :func:`extract_entities`) - a model told what it got
+    wrong usually fixes it, and a second failure is worth reporting rather than
+    grinding on.
+    """
+    text = answer.strip()
+    if text.startswith("```"):
+        # ```json ... ``` - drop the first line and whatever closing fence is
+        # left, rather than regexing for the language tag.
+        text = text.split("\n", 1)[-1] if "\n" in text else ""
+        if text.rstrip().endswith("```"):
+            text = text.rstrip()[: -len("```")]
+    start = text.find("{")
+    end = text.rfind("}")
+    if start < 0 or end <= start:
+        raise ValueError("the answer contained no JSON object")
+    try:
+        payload = json.loads(text[start : end + 1])
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"the answer was not valid JSON: {exc}") from exc
+    try:
+        return SessionExtraction.model_validate(payload)
+    except ValidationError as exc:
+        raise ValueError(f"the JSON did not match the schema: {exc}") from exc
+
+
+async def extract_entities(
+    *,
+    config: ProviderConfig,
+    api_key: str | None,
+    model: str,
+    transcript: str,
+    reasoning_effort: str | None = None,
+    client_factory: ClientFactory | None = None,
+) -> SessionExtraction:
+    """Extract the session's named things as structured data, retrying once.
+
+    The retry is the whole design. A model that answers with prose around the
+    object, a trailing comma or ``"kind": "Player"`` has understood the task
+    and failed the format, and telling it exactly what was wrong fixes it far
+    more often than not - while failing outright would charge the GM for a run
+    that produced nothing readable. Two attempts and no more: a model that
+    cannot produce the schema twice is not going to on the third try, and the
+    error names what it did instead.
+    """
+    attempt = await summarize_transcript(
+        config=config,
+        api_key=api_key,
+        model=model,
+        transcript=transcript,
+        system_prompt=EXTRACTION_PROMPT,
+        instruction=_EXTRACTION_INSTRUCTION,
+        reasoning_effort=reasoning_effort,
+        client_factory=client_factory,
+    )
+    try:
+        return parse_extraction(attempt)
+    except ValueError as exc:
+        # Bound outside the handler: Python clears the name at the end of the
+        # except block, and the retry below is what needs the sentence.
+        complaint = str(exc)
+    log.info("llm.extract.retry", reason=complaint)
+    retry = await summarize_transcript(
+        config=config,
+        api_key=api_key,
+        model=model,
+        transcript=transcript,
+        system_prompt=EXTRACTION_PROMPT,
+        instruction=(
+            f"{_EXTRACTION_INSTRUCTION}\n\nYour previous answer could not be read: "
+            f"{complaint}\nAnswer again with the JSON object alone."
+        ),
+        reasoning_effort=reasoning_effort,
+        client_factory=client_factory,
+    )
+    try:
+        return parse_extraction(retry)
+    except ValueError as second:
+        raise LLMError(f"the model did not answer with usable JSON: {second}") from second

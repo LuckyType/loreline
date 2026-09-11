@@ -10,6 +10,13 @@ import aiosqlite
 
 from loreline.models import (
     DEFAULT_GLOSSARY_CAMPAIGN,
+    DIARIZE_SOURCE_PREFIX,
+    GAP_SOURCE,
+    ORIGINAL_VERSION,
+    REPROCESS_SOURCE_PREFIX,
+    Campaign,
+    CampaignDocument,
+    CampaignSummary,
     DiarizationConfig,
     Glossary,
     JobStatus,
@@ -17,7 +24,9 @@ from loreline.models import (
     ProviderConfig,
     ProviderKind,
     ReprocessJob,
+    SearchHit,
     Session,
+    SessionDocument,
     SessionStatus,
     TranscriptEvent,
     VideoJob,
@@ -638,4 +647,438 @@ def _row_to_video_job(row: aiosqlite.Row) -> VideoJob:
         started_at=row["started_at"],
         finished_at=row["finished_at"],
         error=row["error"],
+    )
+
+
+class CampaignRepository:
+    """CRUD for campaigns, the thing a session belongs to.
+
+    Deleting one is the only operation with anything to decide, and it decides
+    in favour of the recordings: a campaign row, its glossary and its documents
+    go, and its sessions are unassigned rather than deleted. A campaign is a
+    label on work that already happened; removing the label must not be able to
+    destroy four hours of audio nobody can record again.
+    """
+
+    def __init__(self, db: Database) -> None:
+        self._db = db
+
+    async def create(self, campaign: Campaign) -> None:
+        await self._db.connection.execute(
+            """
+            INSERT INTO campaigns (id, name, created_at, notes, recap_prompt)
+            VALUES (?, ?, ?, ?, ?);
+            """,
+            (
+                campaign.id,
+                campaign.name,
+                campaign.created_at,
+                campaign.notes,
+                campaign.recap_prompt,
+            ),
+        )
+        await self._db.connection.commit()
+
+    async def get(self, campaign_id: str) -> Campaign | None:
+        async with self._db.connection.execute(
+            "SELECT * FROM campaigns WHERE id = ?;", (campaign_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        return _row_to_campaign(row) if row is not None else None
+
+    async def by_name(self, name: str) -> Campaign | None:
+        """The campaign with this exact name, or None.
+
+        The name is unique in the table, so this is what turns "create it if it
+        is not there" into one question rather than a caught constraint error.
+        """
+        async with self._db.connection.execute(
+            "SELECT * FROM campaigns WHERE name = ?;", (name,)
+        ) as cur:
+            row = await cur.fetchone()
+        return _row_to_campaign(row) if row is not None else None
+
+    async def list(self) -> list[CampaignSummary]:
+        """Every campaign with its session count and its most recent session.
+
+        Counted in the query rather than by listing the sessions and grouping
+        them in Python: the list page asks this on every visit, and a table
+        with a few hundred sessions is not worth loading to answer "how many".
+        A campaign with no sessions yet comes back with a zero and a null,
+        which is what the LEFT JOIN is for - it is a campaign somebody just
+        made, and it has to appear in the list they made it from.
+        """
+        async with self._db.connection.execute(
+            """
+            SELECT c.*, COUNT(s.id) AS sessions, MAX(s.started_at) AS last_session_at
+            FROM campaigns c
+            LEFT JOIN sessions s ON s.campaign_id = c.id
+            GROUP BY c.id
+            ORDER BY c.name COLLATE NOCASE;
+            """
+        ) as cur:
+            rows = await cur.fetchall()
+        return [
+            CampaignSummary(
+                campaign=_row_to_campaign(r),
+                sessions=r["sessions"],
+                last_session_at=r["last_session_at"],
+            )
+            for r in rows
+        ]
+
+    async def update(self, campaign: Campaign) -> None:
+        await self._db.connection.execute(
+            "UPDATE campaigns SET name = ?, notes = ?, recap_prompt = ? WHERE id = ?;",
+            (campaign.name, campaign.notes, campaign.recap_prompt, campaign.id),
+        )
+        await self._db.connection.commit()
+
+    async def delete(self, campaign_id: str) -> None:
+        """Remove a campaign, unassigning its sessions and dropping its glossary.
+
+        The sessions survive with ``campaign_id`` NULL, which is a state the
+        table has always allowed and the History page has always rendered.
+        The glossary goes because it is the campaign's - the always-on
+        ``_default`` list is a different row and is never touched here - and
+        the campaign's documents go with the row through the foreign key.
+        """
+        conn = self._db.connection
+        await conn.execute(
+            "UPDATE sessions SET campaign_id = NULL WHERE campaign_id = ?;", (campaign_id,)
+        )
+        await conn.execute("DELETE FROM glossaries WHERE campaign_id = ?;", (campaign_id,))
+        await conn.execute("DELETE FROM campaigns WHERE id = ?;", (campaign_id,))
+        await conn.commit()
+
+    async def assign(self, session_id: str, campaign_id: str | None) -> None:
+        """Put a session in a campaign, or take it out of one (None)."""
+        await self._db.connection.execute(
+            "UPDATE sessions SET campaign_id = ? WHERE id = ?;", (campaign_id, session_id)
+        )
+        await self._db.connection.commit()
+
+
+class DocumentRepository:
+    """Generated texts about a session or a campaign, one row per kind.
+
+    A recap, an extraction and a "previously on" are the same thing three
+    times: a body a model wrote, the provider and model that wrote it, and
+    when. They share a table (see migration v22) so the fourth kind is a new
+    string rather than a new table, a new repository and a new route.
+
+    One document per (subject, kind): writing a recap replaces the recap. That
+    is the same rule the summary column has always had, and it is what the UI
+    shows - a session has *a* recap, not a pile of them, and the one worth
+    keeping is the one written last.
+    """
+
+    def __init__(self, db: Database) -> None:
+        self._db = db
+
+    async def put_session_document(self, document: SessionDocument) -> None:
+        await self._db.connection.execute(
+            """
+            INSERT INTO session_documents
+                (session_id, kind, body, provider_id, model, version, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(session_id, kind) DO UPDATE SET
+                body=excluded.body, provider_id=excluded.provider_id,
+                model=excluded.model, version=excluded.version,
+                created_at=excluded.created_at;
+            """,
+            (
+                document.session_id,
+                document.kind,
+                document.body,
+                document.provider_id,
+                document.model,
+                document.version,
+                document.created_at,
+            ),
+        )
+        await self._db.connection.commit()
+
+    async def get_session_document(self, session_id: str, kind: str) -> SessionDocument | None:
+        async with self._db.connection.execute(
+            "SELECT * FROM session_documents WHERE session_id = ? AND kind = ?;",
+            (session_id, kind),
+        ) as cur:
+            row = await cur.fetchone()
+        return _row_to_session_document(row) if row is not None else None
+
+    async def for_session(self, session_id: str) -> list[SessionDocument]:
+        async with self._db.connection.execute(
+            "SELECT * FROM session_documents WHERE session_id = ? ORDER BY kind;",
+            (session_id,),
+        ) as cur:
+            rows = await cur.fetchall()
+        return [_row_to_session_document(r) for r in rows]
+
+    async def for_campaign(
+        self, campaign_id: str, kind: str | None = None
+    ) -> list[SessionDocument]:
+        """Every document of the campaign's sessions, oldest session first.
+
+        Ordered by the session's start rather than by when the document was
+        written, because that is the order a campaign is read in: the recaps of
+        sessions one through nine are a story, and the order they happened to
+        be generated in is not.
+        """
+        sql = """
+            SELECT d.* FROM session_documents d
+            JOIN sessions s ON s.id = d.session_id
+            WHERE s.campaign_id = ?
+        """
+        params: list[object] = [campaign_id]
+        if kind is not None:
+            sql += " AND d.kind = ?"
+            params.append(kind)
+        sql += " ORDER BY s.started_at;"
+        async with self._db.connection.execute(sql, tuple(params)) as cur:
+            rows = await cur.fetchall()
+        return [_row_to_session_document(r) for r in rows]
+
+    async def put_campaign_document(self, document: CampaignDocument) -> None:
+        await self._db.connection.execute(
+            """
+            INSERT INTO campaign_documents
+                (campaign_id, kind, body, provider_id, model, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(campaign_id, kind) DO UPDATE SET
+                body=excluded.body, provider_id=excluded.provider_id,
+                model=excluded.model, created_at=excluded.created_at;
+            """,
+            (
+                document.campaign_id,
+                document.kind,
+                document.body,
+                document.provider_id,
+                document.model,
+                document.created_at,
+            ),
+        )
+        await self._db.connection.commit()
+
+    async def get_campaign_document(self, campaign_id: str, kind: str) -> CampaignDocument | None:
+        async with self._db.connection.execute(
+            "SELECT * FROM campaign_documents WHERE campaign_id = ? AND kind = ?;",
+            (campaign_id, kind),
+        ) as cur:
+            row = await cur.fetchone()
+        return _row_to_campaign_document(row) if row is not None else None
+
+
+# How many characters of context the snippet carries around a hit, per side,
+# in the LIKE fallback. FTS5's own snippet() is told in tokens instead, below.
+_SNIPPET_CONTEXT_CHARS = 60
+_SNIPPET_TOKENS = 12
+
+
+class SearchRepository:
+    """Find a line somebody said, across one campaign or across all of them.
+
+    Two implementations of one question, chosen by whether this SQLite build
+    has FTS5: the index, which ranks by ``bm25`` and marks the hits with
+    ``snippet()``, and a ``LIKE`` scan, which cannot rank and returns the
+    newest sessions first instead. The caller cannot tell them apart from the
+    rows: both come back as :class:`~loreline.models.SearchHit` with the
+    matched words wrapped in brackets. What differs is speed on a large
+    library and the quality of the ordering, which is a worse search rather
+    than a broken page - see :attr:`Database.fts5`.
+
+    Both read only settled, non-gap rows. An interim is a guess the vendor was
+    still revising and a gap marker is the app saying it lost the audio, and
+    searching a transcript should never land a reader on either.
+    """
+
+    def __init__(self, db: Database) -> None:
+        self._db = db
+
+    async def search(
+        self, query: str, campaign_id: str | None = None, limit: int = 50
+    ) -> list[SearchHit]:
+        terms = _search_terms(query)
+        if not terms:
+            return []
+        if self._db.fts5:
+            return await self._search_fts(terms, campaign_id, limit)
+        return await self._search_like(terms, campaign_id, limit)
+
+    async def _search_fts(
+        self, terms: list[str], campaign_id: str | None, limit: int
+    ) -> list[SearchHit]:
+        # Every term quoted and ANDed. The box takes what a person types, and
+        # FTS5's query language reads "AND", "OR", "NOT", ":", "*", "(" and "-"
+        # as syntax: an unbalanced bracket in a search for a spell name would
+        # come back as a 500 rather than as no results.
+        match = " ".join(terms)
+        sql = f"""
+            SELECT
+                seg.session_id AS session_id,
+                seg.source AS source,
+                seg.speaker AS speaker,
+                seg.start_ts AS start_ts,
+                s.started_at AS started_at,
+                s.campaign_id AS campaign_id,
+                snippet(transcript_fts, 0, '[', ']', '…', {_SNIPPET_TOKENS}) AS snippet
+            FROM transcript_fts
+            JOIN transcript_segments seg ON seg.id = transcript_fts.rowid
+            JOIN sessions s ON s.id = seg.session_id
+            WHERE transcript_fts MATCH ?
+              AND seg.is_final = 1
+              AND seg.source != ?
+              {"AND s.campaign_id = ?" if campaign_id else ""}
+            ORDER BY bm25(transcript_fts)
+            LIMIT ?;
+        """
+        params: list[object] = [match, GAP_SOURCE]
+        if campaign_id:
+            params.append(campaign_id)
+        params.append(limit)
+        async with self._db.connection.execute(sql, tuple(params)) as cur:
+            rows = await cur.fetchall()
+        return [_row_to_hit(r, r["snippet"]) for r in rows]
+
+    async def _search_like(
+        self, terms: list[str], campaign_id: str | None, limit: int
+    ) -> list[SearchHit]:
+        # One LIKE per term, ANDed, so a two-word search means both words
+        # somewhere in the line - the same thing the indexed path means by it.
+        # Newest first, because there is no relevance to sort by and the
+        # session you are looking for is usually the last one you played.
+        needles = [t.strip('"').replace('""', '"') for t in terms]
+        conditions = " AND ".join("seg.text LIKE ? ESCAPE '\\'" for _ in needles)
+        sql = f"""
+            SELECT
+                seg.session_id AS session_id,
+                seg.source AS source,
+                seg.speaker AS speaker,
+                seg.start_ts AS start_ts,
+                seg.text AS text,
+                s.started_at AS started_at,
+                s.campaign_id AS campaign_id
+            FROM transcript_segments seg
+            JOIN sessions s ON s.id = seg.session_id
+            WHERE {conditions}
+              AND seg.is_final = 1
+              AND seg.source != ?
+              {"AND s.campaign_id = ?" if campaign_id else ""}
+            ORDER BY s.started_at DESC, seg.start_ts
+            LIMIT ?;
+        """
+        params: list[object] = [f"%{_like_escape(n)}%" for n in needles]
+        params.append(GAP_SOURCE)
+        if campaign_id:
+            params.append(campaign_id)
+        params.append(limit)
+        async with self._db.connection.execute(sql, tuple(params)) as cur:
+            rows = await cur.fetchall()
+        return [_row_to_hit(r, _snippet(r["text"], needles)) for r in rows]
+
+
+def _search_terms(query: str) -> list[str]:
+    """The query as FTS5 string literals: one quoted token per word.
+
+    Quoting is what keeps a search box a search box. Unquoted, ``NOT`` is an
+    operator, ``d&d`` is a syntax error and ``(the`` is an unbalanced bracket,
+    and each of those is a 500 on a page where the user only mistyped.
+    """
+    return [f'"{word.replace(chr(34), chr(34) * 2)}"' for word in query.split() if word.strip()]
+
+
+def _like_escape(value: str) -> str:
+    """Escape the wildcards, so a search for "50%" is not a search for anything."""
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _snippet(text: str, needles: list[str]) -> str:
+    """The matched text with the hits bracketed, trimmed around the first one.
+
+    The fallback's answer to FTS5's ``snippet()``. It has to agree with it on
+    the shape - brackets around the hit, an ellipsis where the line was cut -
+    because the browser renders one thing and cannot be told which path
+    produced it.
+    """
+    marked = text
+    for needle in needles:
+        lowered = marked.lower()
+        target = needle.lower()
+        start = 0
+        rebuilt: list[str] = []
+        while True:
+            found = lowered.find(target, start)
+            if found < 0:
+                rebuilt.append(marked[start:])
+                break
+            rebuilt.append(marked[start:found])
+            rebuilt.append(f"[{marked[found : found + len(needle)]}]")
+            start = found + len(needle)
+        marked = "".join(rebuilt)
+        lowered = marked.lower()
+    first = marked.find("[")
+    if first < 0:
+        return marked
+    begin = max(0, first - _SNIPPET_CONTEXT_CHARS)
+    end = min(len(marked), first + _SNIPPET_CONTEXT_CHARS * 2)
+    return ("…" if begin else "") + marked[begin:end] + ("…" if end < len(marked) else "")
+
+
+def _hit_version(source: str) -> str:
+    """Which transcript version a matched row belongs to, as ``?v=`` spells it.
+
+    A row is tagged with the job that produced it, and the session page takes
+    the bare version id. The diarized copy of a version answers to the version
+    it relabelled, which is what makes a hit in a diarized transcript open the
+    same selection the reader would have made by hand.
+    """
+    if source.startswith(REPROCESS_SOURCE_PREFIX):
+        return source[len(REPROCESS_SOURCE_PREFIX) :]
+    if source.startswith(DIARIZE_SOURCE_PREFIX):
+        return source[len(DIARIZE_SOURCE_PREFIX) :]
+    return ORIGINAL_VERSION
+
+
+def _row_to_hit(row: aiosqlite.Row, snippet: str) -> SearchHit:
+    return SearchHit(
+        session_id=row["session_id"],
+        started_at=row["started_at"],
+        campaign_id=row["campaign_id"],
+        version=_hit_version(row["source"]),
+        speaker=row["speaker"],
+        start_ts=row["start_ts"],
+        snippet=snippet,
+    )
+
+
+def _row_to_campaign(row: aiosqlite.Row) -> Campaign:
+    return Campaign(
+        id=row["id"],
+        name=row["name"],
+        created_at=row["created_at"],
+        notes=row["notes"],
+        recap_prompt=row["recap_prompt"],
+    )
+
+
+def _row_to_session_document(row: aiosqlite.Row) -> SessionDocument:
+    return SessionDocument(
+        session_id=row["session_id"],
+        kind=row["kind"],
+        body=row["body"],
+        provider_id=row["provider_id"],
+        model=row["model"],
+        version=row["version"],
+        created_at=row["created_at"],
+    )
+
+
+def _row_to_campaign_document(row: aiosqlite.Row) -> CampaignDocument:
+    return CampaignDocument(
+        campaign_id=row["campaign_id"],
+        kind=row["kind"],
+        body=row["body"],
+        provider_id=row["provider_id"],
+        model=row["model"],
+        created_at=row["created_at"],
     )

@@ -18,7 +18,7 @@ from starlette.status import HTTP_404_NOT_FOUND, HTTP_409_CONFLICT, HTTP_503_SER
 from loreline import __version__
 from loreline.diarization.remote import probe_diarizer
 from loreline.health import HealthReport, HealthStatus
-from loreline.llm import DEFAULT_SYSTEM_PROMPT
+from loreline.llm import DEFAULT_RECAP_PROMPT, DEFAULT_SYSTEM_PROMPT
 from loreline.models import SessionStatus
 from loreline.monitoring import (
     AlertChannel,
@@ -286,13 +286,15 @@ async def set_autostart(request: Request, body: AutostartUpdate) -> AutostartSta
 async def get_defaults(request: Request) -> ActionDefaults:
     """Return the per-action default models/mode used to pre-select the pickers.
 
-    A blank stored summary prompt is served as the built-in default text, so
-    the settings UI always shows the concrete, editable instructions -
+    A blank stored summary or recap prompt is served as the built-in default
+    text, so the settings UI always shows the concrete, editable instructions -
     clearing the field and saving is the reset-to-default gesture.
     """
     defaults = await load_action_defaults(get_state(request))
     if not defaults.summarize_prompt.strip():
         defaults.summarize_prompt = DEFAULT_SYSTEM_PROMPT
+    if not defaults.recap_prompt.strip():
+        defaults.recap_prompt = DEFAULT_RECAP_PROMPT
     return defaults
 
 
@@ -300,17 +302,21 @@ async def get_defaults(request: Request) -> ActionDefaults:
 async def set_defaults(request: Request, body: ActionDefaults) -> ActionDefaults:
     """Persist the per-action defaults.
 
-    A summary prompt equal to the built-in default (or blank) is stored blank,
-    so an untouched field keeps tracking future improvements to the built-in
-    text instead of pinning today's copy. The response mirrors GET: served
-    filled in.
+    A summary or recap prompt equal to the built-in default (or blank) is
+    stored blank, so an untouched field keeps tracking future improvements to
+    the built-in text instead of pinning today's copy. The response mirrors
+    GET: served filled in.
     """
     stored = body
     if stored.summarize_prompt.strip() in ("", DEFAULT_SYSTEM_PROMPT):
         stored = stored.model_copy(update={"summarize_prompt": ""})
+    if stored.recap_prompt.strip() in ("", DEFAULT_RECAP_PROMPT):
+        stored = stored.model_copy(update={"recap_prompt": ""})
     await get_state(request).settings_repo.set(ACTION_DEFAULTS_KEY, stored.model_dump_json())
     if not stored.summarize_prompt:
         stored = stored.model_copy(update={"summarize_prompt": DEFAULT_SYSTEM_PROMPT})
+    if not stored.recap_prompt:
+        stored = stored.model_copy(update={"recap_prompt": DEFAULT_RECAP_PROMPT})
     return stored
 
 

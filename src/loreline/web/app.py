@@ -23,11 +23,14 @@ from loreline.monitoring import AlertManager
 from loreline.monitoring.alerts import ClientFactory
 from loreline.persistence import (
     AudioStore,
+    CampaignRepository,
     Database,
+    DocumentRepository,
     GlossaryRepository,
     LogStore,
     ProviderRepository,
     ReprocessRepository,
+    SearchRepository,
     SessionRepository,
     SettingsRepository,
     TranscriptRepository,
@@ -50,11 +53,13 @@ from loreline.web.deps import read_action_defaults
 from loreline.web.routes import (
     audio,
     auth,
+    campaigns,
     capabilities,
     glossary,
     logs_ws,
     providers,
     reprocess,
+    search,
     sessions,
     system,
     transcript_ws,
@@ -96,6 +101,9 @@ class AppState:
     db: Database
     providers: ProviderRepository
     glossaries: GlossaryRepository
+    campaigns: CampaignRepository
+    documents: DocumentRepository
+    search: SearchRepository
     sessions: SessionRepository
     transcripts: TranscriptRepository
     reprocess_jobs: ReprocessRepository
@@ -135,6 +143,9 @@ def _build_state(
     ensure_jwt_secret(settings, secrets)
     provider_repo = ProviderRepository(db)
     glossary_repo = GlossaryRepository(db)
+    campaign_repo = CampaignRepository(db)
+    document_repo = DocumentRepository(db)
+    search_repo = SearchRepository(db)
     session_repo = SessionRepository(db)
     transcript_repo = TranscriptRepository(db)
     reprocess_repo = ReprocessRepository(db)
@@ -208,6 +219,9 @@ def _build_state(
         db=db,
         providers=provider_repo,
         glossaries=glossary_repo,
+        campaigns=campaign_repo,
+        documents=document_repo,
+        search=search_repo,
         sessions=session_repo,
         transcripts=transcript_repo,
         reprocess_jobs=reprocess_repo,
@@ -367,17 +381,25 @@ def create_app(
         swagger_ui_parameters={"withCredentials": True},
     )
 
-    app.include_router(system.router)
-    app.include_router(capabilities.router)
-    app.include_router(auth.router)
-    app.include_router(audio.router)
-    app.include_router(providers.router)
-    app.include_router(glossary.router)
-    app.include_router(sessions.router)
-    app.include_router(reprocess.router)
-    app.include_router(video.router)
-    app.include_router(transcript_ws.router)
-    app.include_router(logs_ws.router)
+    # One list rather than one statement per router: the order is the order the
+    # OpenAPI document lists them in and nothing else depends on it, so adding
+    # a router is adding a name here.
+    for module in (
+        system,
+        capabilities,
+        auth,
+        audio,
+        providers,
+        glossary,
+        campaigns,
+        search,
+        sessions,
+        reprocess,
+        video,
+        transcript_ws,
+        logs_ws,
+    ):
+        app.include_router(module.router)
 
     spa = spa_directory()
     if spa is not None:

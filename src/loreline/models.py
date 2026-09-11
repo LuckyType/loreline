@@ -5,7 +5,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class ProviderKind(StrEnum):
@@ -306,6 +306,181 @@ class Glossary(BaseModel):
 
 # Reserved campaign id for the always-on default word list (merged into every session).
 DEFAULT_GLOSSARY_CAMPAIGN = "_default"
+
+
+class Campaign(BaseModel):
+    """A campaign: the thing a session belongs to, and what collects its memory.
+
+    Sessions have carried a ``campaign_id`` since the first schema, but nothing
+    listed the campaigns, so the id was a string a GM could only set by hand
+    and the app could only print back. A campaign is a row now: it has a name
+    somebody chose, it owns a glossary (the ``glossaries`` table is keyed by
+    the same id), and it is where a recap, an extraction and a "previously on"
+    accumulate into something worth reading a year later.
+
+    ``recap_prompt`` overrides the built-in recap instructions for this
+    campaign only - a table that plays in German, or one that wants its recaps
+    in character, says so once here rather than in every dialog.
+    """
+
+    id: str
+    name: str
+    created_at: float
+    notes: str = ""
+    recap_prompt: str = ""
+
+
+class CampaignSummary(BaseModel):
+    """A campaign as the list page needs it: the row, plus what it holds.
+
+    The two counts are the whole reason the list is not just the rows: "which
+    of these am I actually playing" is answered by how many sessions it has and
+    when the last one was, and neither is on the campaign itself.
+    """
+
+    campaign: Campaign
+    sessions: int = 0
+    last_session_at: float | None = None
+
+
+# What a generated text is *about*, per session. One table holds them all (see
+# migration v22), because every one of these is the same shape - a body, the
+# model that wrote it, when - and the next one should be a new value here
+# rather than a new table with its own repository and its own routes.
+DOCUMENT_RECAP = "recap"
+DOCUMENT_EXTRACTION = "extraction"
+# The campaign-level one: what to read at the table before the next session.
+DOCUMENT_PREVIOUSLY_ON = "previously_on"
+
+
+class SessionDocument(BaseModel):
+    """One generated text about one session, and what produced it.
+
+    ``version`` is the transcript version it was read from, for the same reason
+    ``Session.summary_version`` exists: a session holds the live capture plus
+    one version per re-transcription, and a recap that cannot name the
+    transcript behind it cannot be judged against it.
+    """
+
+    session_id: str
+    kind: str
+    body: str
+    provider_id: str | None = None
+    model: str | None = None
+    version: str | None = None
+    created_at: float
+
+
+class CampaignDocument(BaseModel):
+    """One generated text about a whole campaign (currently ``previously_on``)."""
+
+    campaign_id: str
+    kind: str
+    body: str
+    provider_id: str | None = None
+    model: str | None = None
+    created_at: float
+
+
+class SearchHit(BaseModel):
+    """One transcript line a search matched, with enough context to open it.
+
+    ``snippet`` is the matched text with the hits wrapped in ``[`` and ``]`` -
+    produced by FTS5's own ``snippet()`` where there is an index, and assembled
+    around the match where the fallback ran, so a reader cannot tell which path
+    answered them. ``version`` is what the session page's ``?v=`` takes and
+    ``start_ts`` what its ``?t=`` takes, so a hit is a link to the line.
+    """
+
+    session_id: str
+    started_at: float
+    campaign_id: str | None = None
+    version: str = ORIGINAL_VERSION
+    speaker: str | None = None
+    start_ts: float
+    snippet: str
+
+
+class ExtractedCharacter(BaseModel):
+    """A person the session named: a player character or one of the GM's."""
+
+    name: str
+    kind: Literal["pc", "npc"] = "npc"
+    notes: str = ""
+
+    @field_validator("kind", mode="before")
+    @classmethod
+    def _unknown_kind_is_an_npc(cls, value: object) -> object:
+        """Anything that is not literally "pc" is an NPC.
+
+        A model asked for an enum answers with "PC", "player", "player
+        character" and "Player Character" across four runs of the same prompt.
+        Failing the whole extraction over the casing of one character's kind
+        would throw away the other fifty names in it, and the distinction that
+        matters - is this one of ours - survives the coercion.
+        """
+        if isinstance(value, str):
+            text = value.strip().lower()
+            return "pc" if text in ("pc", "player", "player character", "pcs") else "npc"
+        return value
+
+
+class ExtractedEntity(BaseModel):
+    """A place, an item or a faction the session named."""
+
+    name: str
+    notes: str = ""
+
+
+class ExtractedQuest(BaseModel):
+    """A thread the session opened, advanced or closed."""
+
+    title: str
+    status: str = ""
+    notes: str = ""
+
+
+class SessionExtraction(BaseModel):
+    """The structured names one session's transcript yielded.
+
+    Every list defaults to empty, on purpose: a model that answers with four of
+    the six keys has still said something useful about the session, and the
+    missing ones mean "none of these came up", which is a true statement about
+    plenty of sessions.
+    """
+
+    characters: list[ExtractedCharacter] = Field(default_factory=list[ExtractedCharacter])
+    places: list[ExtractedEntity] = Field(default_factory=list[ExtractedEntity])
+    items: list[ExtractedEntity] = Field(default_factory=list[ExtractedEntity])
+    factions: list[ExtractedEntity] = Field(default_factory=list[ExtractedEntity])
+    quests: list[ExtractedQuest] = Field(default_factory=list[ExtractedQuest])
+    decisions: list[str] = Field(default_factory=list[str])
+
+
+class MergedEntity(BaseModel):
+    """One name across every session of a campaign that mentioned it.
+
+    ``kind`` carries whatever secondary word the group has: "pc" or "npc" for a
+    character, a quest's status for a quest, blank for a place, an item or a
+    faction. One shape for all six groups, so the campaign page renders one
+    list six times rather than six lists that drift apart.
+    """
+
+    name: str
+    kind: str = ""
+    notes: str = ""
+    session_ids: list[str] = Field(default_factory=list[str])
+
+
+class CampaignEntities(BaseModel):
+    """Every session's extraction in a campaign, merged by name."""
+
+    characters: list[MergedEntity] = Field(default_factory=list[MergedEntity])
+    places: list[MergedEntity] = Field(default_factory=list[MergedEntity])
+    items: list[MergedEntity] = Field(default_factory=list[MergedEntity])
+    factions: list[MergedEntity] = Field(default_factory=list[MergedEntity])
+    quests: list[MergedEntity] = Field(default_factory=list[MergedEntity])
+    decisions: list[MergedEntity] = Field(default_factory=list[MergedEntity])
 
 
 class Session(BaseModel):

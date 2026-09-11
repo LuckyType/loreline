@@ -6,9 +6,12 @@ from loreline.persistence.audio_store import AudioStore, SessionAudioWriter
 from loreline.persistence.database import Database
 from loreline.persistence.log_store import LogStore
 from loreline.persistence.repositories import (
+    CampaignRepository,
+    DocumentRepository,
     GlossaryRepository,
     ProviderRepository,
     ReprocessRepository,
+    SearchRepository,
     SessionRepository,
     SettingsRepository,
     TranscriptRepository,
@@ -17,11 +20,14 @@ from loreline.persistence.repositories import (
 
 __all__ = [
     "AudioStore",
+    "CampaignRepository",
     "Database",
+    "DocumentRepository",
     "GlossaryRepository",
     "LogStore",
     "ProviderRepository",
     "ReprocessRepository",
+    "SearchRepository",
     "SessionAudioWriter",
     "SessionRepository",
     "SettingsRepository",
