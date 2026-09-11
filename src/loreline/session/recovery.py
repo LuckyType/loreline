@@ -14,6 +14,7 @@ import asyncio
 import contextlib
 from typing import TYPE_CHECKING
 
+from loreline.audio.vad import default_detector as _default_detector
 from loreline.logging import get_logger
 from loreline.monitoring.alerts import AlertLevel
 
@@ -26,13 +27,6 @@ if TYPE_CHECKING:
     from loreline.persistence import AudioStore, SessionRepository
 
 log = get_logger(__name__)
-
-
-def _default_detector(sample_rate: int) -> SpeechDetector:
-    """The same silero VAD live capture uses (optional ``audio`` extra)."""
-    from loreline.audio.vad import SileroVad  # noqa: PLC0415 - optional native dep
-
-    return SileroVad(sample_rate=sample_rate).is_speech
 
 
 async def recover_orphaned_indexes(

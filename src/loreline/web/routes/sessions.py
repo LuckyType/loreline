@@ -5,20 +5,24 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
-from collections.abc import Sequence
-from typing import TYPE_CHECKING, NamedTuple
+from collections.abc import AsyncIterator, Sequence
+from typing import TYPE_CHECKING, Annotated, NamedTuple
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 from fastapi.exceptions import HTTPException
 from fastapi.responses import FileResponse, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from starlette.status import (
     HTTP_400_BAD_REQUEST,
     HTTP_404_NOT_FOUND,
     HTTP_409_CONFLICT,
+    HTTP_413_CONTENT_TOO_LARGE,
+    HTTP_422_UNPROCESSABLE_CONTENT,
     HTTP_502_BAD_GATEWAY,
+    HTTP_503_SERVICE_UNAVAILABLE,
 )
 
+from loreline.audio.decode import IMPORTABLE_SUFFIXES, DecodeError
 from loreline.export import (
     EXPORTERS,
     canonical_transcript,
@@ -42,6 +46,7 @@ from loreline.models import (
     rebase_transcript,
 )
 from loreline.reprocess import (
+    DiarizerUnreachableError,
     OriginalVersionError,
     VersionBusyError,
     VersionNotFoundError,
@@ -52,6 +57,11 @@ from loreline.session import (
     SessionActiveError,
     SessionConfigError,
 )
+from loreline.session.importing import (
+    IndexingUnavailableError,
+    UploadTooLargeError,
+    import_recording,
+)
 from loreline.web.auth import require_auth
 from loreline.web.deps import get_manager, get_state, load_action_defaults
 from loreline.web.generation import llm_target, recap_prompt
@@ -59,7 +69,10 @@ from loreline.web.routes.audio import INPUT_DEVICE_KEY, parse_device
 from loreline.web.schemas import (
     CampaignAssignment,
     GenerateRequest,
+    ImportedSession,
+    ImportTranscribeOptions,
     OkResponse,
+    ReprocessRequest,
     SessionIds,
     SpeakerNamesUpdate,
     StartSessionRequest,
@@ -74,6 +87,11 @@ if TYPE_CHECKING:
 router = APIRouter(prefix="/api/session", tags=["sessions"], dependencies=[Depends(require_auth)])
 
 _MERGE_MIN_SESSIONS = 2
+
+# How much of an upload is read per iteration. Big enough that a 500 MB
+# recording is not 500,000 awaits, small enough that nothing here ever holds a
+# meaningful slice of the file in memory.
+_UPLOAD_CHUNK = 1 << 20
 
 
 async def _require_version(
@@ -201,6 +219,154 @@ async def stop_session(request: Request) -> Session:
     if session is None:
         raise HTTPException(status_code=HTTP_409_CONFLICT, detail="no active session")
     return session
+
+
+def _import_options(raw: str | None) -> ImportTranscribeOptions | None:
+    """Parse the request's optional "transcribe now" block.
+
+    It arrives as a JSON object in a form field because the rest of the request
+    is a file: multipart carries flat values, and the block holds a
+    ``diarization`` object, so there is no flat spelling of it that the dialog
+    and this could both agree on. Absent and blank both mean "just store it".
+    """
+    text = (raw or "").strip()
+    if not text:
+        return None
+    try:
+        return ImportTranscribeOptions.model_validate_json(text)
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=(
+                "transcribe must be a JSON object naming a provider and a model: "
+                f"{exc.errors(include_url=False)}"
+            ),
+        ) from exc
+
+
+def _refuse_an_upload_that_cannot_fit(request: Request, limit: int) -> None:
+    """Answer 413 before a single byte is read, when the client says how big it is.
+
+    The body is still counted while it is written (see ``receive_upload``),
+    which is what actually enforces the ceiling; this only spares both ends the
+    minutes a doomed 3 GB upload would otherwise spend. The declared length
+    covers the multipart framing as well as the file, which makes this a few
+    hundred bytes stricter than the real check and never looser.
+    """
+    declared = request.headers.get("content-length", "")
+    if declared.isdigit() and int(declared) > limit:
+        raise HTTPException(
+            status_code=HTTP_413_CONTENT_TOO_LARGE,
+            detail=f"this recording is larger than the {limit // (1024 * 1024)} MB import limit",
+        )
+
+
+async def _upload_chunks(file: UploadFile) -> AsyncIterator[bytes]:
+    """The uploaded file, a chunk at a time."""
+    while chunk := await file.read(_UPLOAD_CHUNK):
+        yield chunk
+
+
+async def _transcribe_the_import(
+    state: AppState, session_id: str, options: ImportTranscribeOptions
+) -> str:
+    """Queue the import's first transcription, or undo the import.
+
+    An ordinary re-processing job, which is the whole of ADR 0008: the session
+    exists and has stored audio, so this is the same call the New transcription
+    dialog makes on a captured session, and the version it produces is the
+    import's transcript.
+
+    A refusal here rolls the session back rather than leaving it behind with
+    the error. The GM asked for one thing - a transcribed recording - and a
+    half-done answer would have them upload the file a second time and be left
+    with two sessions, one of which is silent. The provider is checked before
+    the upload is read at all, so what reaches here is the rare late failure (a
+    diarizer that went away between the two), not a typo.
+    """
+    try:
+        job = await state.reprocess.enqueue(
+            ReprocessRequest(
+                session_id=session_id,
+                provider_id=options.provider_id,
+                model=options.model,
+                use_glossary=options.use_glossary,
+                diarization=options.diarization,
+            )
+        )
+    except DiarizerUnreachableError as exc:
+        await _erase_session(state, session_id)
+        raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+    except ValueError as exc:  # every other refusal enqueue makes
+        await _erase_session(state, session_id)
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return job.id
+
+
+@router.post("/import", status_code=201)
+async def import_session_recording(
+    request: Request,
+    file: Annotated[
+        UploadFile,
+        File(
+            description=(
+                "The recording to import. Decoded from "
+                f"{', '.join(IMPORTABLE_SUFFIXES)} and anything else ffmpeg reads."
+            )
+        ),
+    ],
+    started_at: Annotated[float | None, Form()] = None,
+    campaign_id: Annotated[str | None, Form()] = None,
+    transcribe: Annotated[str | None, Form()] = None,
+) -> ImportedSession:
+    """Import a recording made elsewhere as a session (multipart upload).
+
+    This is the feature that lets a GM use Loreline with no box and no
+    microphone: whatever they recorded on their phone becomes a session that
+    every other feature works on unchanged, because it is stored as exactly
+    what a capture stores (see ``docs/adr/0008``).
+
+    ``started_at`` is epoch seconds and defaults to now - the dialog seeds it
+    from the file's own modification time, which is the closest thing a
+    recording carries to when the evening was. ``campaign_id`` is a plain
+    string. ``transcribe`` is a JSON object (``provider_id``, ``model``,
+    ``use_glossary``, ``diarization``) that starts the first transcription in
+    the same request; leave it out to store the recording and decide later.
+
+    The refusals, and why each is the code it is: 413 for a file past
+    ``LORELINE_IMPORT_MAX_MB``, 422 for audio this server cannot decode - which
+    includes the one failure that is about the box rather than the file, a
+    format that needs ffmpeg where ffmpeg is not installed - and 503 when the
+    speech detector that cuts a recording into utterances is unavailable, since
+    that is the one a retry can win after somebody fixes the deployment.
+    """
+    state = get_state(request)
+    options = _import_options(transcribe)
+    if options is not None and await state.providers.get(options.provider_id) is None:
+        # Before the upload rather than after it: a typo in the provider must
+        # not cost the GM a ten minute upload to discover.
+        raise HTTPException(
+            status_code=HTTP_404_NOT_FOUND, detail=f"unknown provider {options.provider_id!r}"
+        )
+    _refuse_an_upload_that_cannot_fit(request, state.settings.import_max_bytes)
+    try:
+        session = await import_recording(
+            _upload_chunks(file),
+            name=file.filename or "recording",
+            started_at=started_at,
+            campaign_id=(campaign_id or "").strip() or None,
+            sessions=state.sessions,
+            audio_store=state.audio_store,
+            settings=state.settings,
+        )
+    except UploadTooLargeError as exc:
+        raise HTTPException(status_code=HTTP_413_CONTENT_TOO_LARGE, detail=str(exc)) from exc
+    except DecodeError as exc:
+        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+    except IndexingUnavailableError as exc:
+        raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+    job_id = await _transcribe_the_import(state, session.id, options) if options else None
+    return ImportedSession(session=session, job_id=job_id)
 
 
 @router.get("")
@@ -552,6 +718,26 @@ async def download_session_audio(request: Request, session_id: str) -> FileRespo
     )
 
 
+async def _erase_session(state: AppState, session_id: str) -> None:
+    """Remove one session and everything stored under its name.
+
+    One function rather than a loop body, because two callers have to agree on
+    what "gone" means: the delete endpoint, and the rollback an import does
+    when the transcription it was asked for could not be started (see
+    :func:`_transcribe_the_import`). A rollback that forgot the WAV would leave
+    the largest artifact of all orphaned, with no row left to name it.
+    """
+    await state.transcripts.delete_session(session_id)
+    state.audio_store.delete(session_id)
+    state.log_store.delete_session(session_id)  # every version's log file
+    # The video job rows would go with the session row anyway (the table
+    # cascades), and that was the problem: a cascade takes no file with it, so
+    # every generated .mp4 of a deleted session stayed on disk with nothing
+    # left that named it.
+    await state.video.delete_session(session_id)
+    await state.sessions.delete(session_id)
+
+
 @router.post("/delete")
 async def delete_sessions(request: Request, body: SessionIds) -> OkResponse:
     """Delete the given sessions: transcript, stored audio, logs and generated videos."""
@@ -560,15 +746,7 @@ async def delete_sessions(request: Request, body: SessionIds) -> OkResponse:
     for session_id in body.ids:
         if session_id == active:
             continue  # never delete the running session
-        await state.transcripts.delete_session(session_id)
-        state.audio_store.delete(session_id)
-        state.log_store.delete_session(session_id)  # every version's log file
-        # The video job rows would go with the session row anyway (the table
-        # cascades), and that was the problem: a cascade takes no file with
-        # it, so every generated .mp4 of a deleted session stayed on disk with
-        # nothing left that named it.
-        await state.video.delete_session(session_id)
-        await state.sessions.delete(session_id)
+        await _erase_session(state, session_id)
     return OkResponse()
 
 

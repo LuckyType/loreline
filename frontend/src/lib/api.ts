@@ -1,7 +1,7 @@
 import { goto } from '$app/navigation'
 import { loginUrlWithNext } from './loginRedirect'
 import { authed } from './stores'
-import type { ExportFormat } from './types'
+import type { ExportFormat, ImportTranscribeOptions } from './types'
 import type {
 	ActionDefaults,
 	AlertChannel,
@@ -19,6 +19,7 @@ import type {
 	GenerateRequest,
 	Glossary,
 	Health,
+	ImportedSession,
 	InputDevice,
 	ModelInfo,
 	OkResponse,
@@ -90,6 +91,61 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 	}
 	if (res.status === 204) return undefined as T
 	return (await res.json()) as T
+}
+
+/** What one upload reports while it is in flight. */
+export interface UploadProgress {
+	sent: number
+	total: number
+}
+
+/** POST a multipart body, reporting how much of it has gone out.
+ *
+ * XMLHttpRequest rather than fetch, for one reason: an upload progress bar.
+ * `fetch` exposes no equivalent of `xhr.upload.onprogress`, and a recording is
+ * large enough that a button which merely says "Importing…" for four minutes
+ * reads as a hang. Everything else matches `request` above - the same
+ * same-origin cookie, the same 401 bounce to the login form, the same
+ * `ApiError` carrying the server's own sentence.
+ */
+function upload<T>(
+	path: string,
+	body: FormData,
+	options: { onProgress?: (progress: UploadProgress) => void; signal?: AbortSignal } = {},
+): Promise<T> {
+	return new Promise<T>((resolve, reject) => {
+		const xhr = new XMLHttpRequest()
+		xhr.open('POST', path)
+		xhr.upload.onprogress = (event) => {
+			if (event.lengthComputable) options.onProgress?.({ sent: event.loaded, total: event.total })
+		}
+		xhr.onload = () => {
+			if (xhr.status === 401) {
+				authed.set(false)
+				if (location.pathname !== '/login') {
+					void goto(loginUrlWithNext(location.pathname + location.search))
+				}
+			}
+			if (xhr.status >= 200 && xhr.status < 300) {
+				resolve(JSON.parse(xhr.responseText) as T)
+				return
+			}
+			let detail = xhr.statusText
+			try {
+				const parsed = JSON.parse(xhr.responseText) as { detail?: string }
+				if (parsed.detail) detail = parsed.detail
+			} catch {
+				/* non-JSON error body */
+			}
+			reject(new ApiError(xhr.status, detail))
+		}
+		// Status 0 is what the browser reports for a dropped connection and for
+		// an abort alike; neither has a server sentence to quote.
+		xhr.onerror = () => reject(new ApiError(0, 'the upload could not reach the server'))
+		xhr.onabort = () => reject(new ApiError(0, 'the upload was cancelled'))
+		options.signal?.addEventListener('abort', () => xhr.abort())
+		xhr.send(body)
+	})
 }
 
 export const api = {
@@ -319,10 +375,30 @@ export const api = {
 			body: JSON.stringify({ ids }),
 		}),
 	mergeSessions: (ids: string[]) =>
-		request<Session>('/api/session/merge', {
-			method: 'POST',
-			body: JSON.stringify({ ids }),
-		}),
+		request<Session>('/api/session/merge', { method: 'POST', body: JSON.stringify({ ids }) }),
+	/** Import a recording made elsewhere as a session.
+	 *
+	 *  `startedAt` is epoch seconds (the server defaults to now). `transcribe`
+	 *  starts the first transcription in the same request and travels as a JSON
+	 *  string, because the body is multipart and the block holds an object -
+	 *  see ImportTranscribeOptions. */
+	importRecording: (
+		file: File,
+		options: {
+			startedAt?: number
+			campaignId?: string | null
+			transcribe?: ImportTranscribeOptions | null
+			onProgress?: (progress: UploadProgress) => void
+			signal?: AbortSignal
+		} = {},
+	) => {
+		const body = new FormData()
+		body.append('file', file, file.name)
+		if (options.startedAt !== undefined) body.append('started_at', String(options.startedAt))
+		if (options.campaignId) body.append('campaign_id', options.campaignId)
+		if (options.transcribe) body.append('transcribe', JSON.stringify(options.transcribe))
+		return upload<ImportedSession>('/api/session/import', body, options)
+	},
 
 	// --- video generation ---
 	// Generation is asynchronous upstream (minutes), so enqueue returns a

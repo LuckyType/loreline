@@ -397,7 +397,27 @@ MIGRATIONS: list[str] = [
           AND s.speaker IS NOT NULL AND s.speaker != ''
     );
     """,
-    # v22 - campaigns, and the generated texts that hang off a session or a
+    # v22 - where a session's audio came from. An imported recording produces
+    # the same two artifacts a capture does (the continuous WAV and its
+    # utterance index) and is re-transcribed, diarized, exported and deleted
+    # through exactly the same code, so it is a session row like any other -
+    # see docs/adr/0008. Two things about it are still worth recording.
+    #
+    # `origin` is what lets a reader tell the two apart at all: an import has
+    # no live transcript and never will, so its "original" version is empty by
+    # construction, and without this column that emptiness is
+    # indistinguishable from a capture whose STT died on the first utterance.
+    # Every existing row is a capture, which is what the default says.
+    #
+    # `import_name` is the file the GM chose, kept because it is the only name
+    # the recording ever had: a session id says nothing about which of the
+    # evening's four phone recordings this one is. NULL for a capture, which
+    # has no such name rather than an unknown one.
+    """
+    ALTER TABLE sessions ADD COLUMN origin TEXT NOT NULL DEFAULT 'capture';
+    ALTER TABLE sessions ADD COLUMN import_name TEXT;
+    """,
+    # v23 - campaigns, and the generated texts that hang off a session or a
     # campaign.
     #
     # `sessions.campaign_id` has existed since v1 and has always been a free
@@ -449,7 +469,7 @@ MIGRATIONS: list[str] = [
         PRIMARY KEY (campaign_id, kind)
     );
     """,
-    # v23 - full-text search over the transcript (see FTS5_MIGRATION below).
+    # v24 - full-text search over the transcript (see FTS5_MIGRATION below).
     FTS5_MIGRATION,
 ]
 

@@ -12,6 +12,7 @@ from loreline.models import (
     DiarizationConfig,
     OpenRouterRouting,
     ProviderKind,
+    Session,
 )
 from loreline.monitoring.alerts import AlertChannelType, AlertLevel
 
@@ -244,6 +245,42 @@ class ReprocessRequest(BaseModel):
         if self.operation == "transcribe" and not (self.model or "").strip():
             raise ValueError('model is required for a "transcribe" job')
         return self
+
+
+class ImportTranscribeOptions(BaseModel):
+    """The optional "transcribe now" half of an import request.
+
+    The same four choices ``ReprocessRequest`` carries for a transcribe job,
+    and deliberately not a second set: an import is transcribed by an ordinary
+    re-processing job (see ``docs/adr/0008``), so anything this accepted that
+    that one did not would be a knob with nothing behind it.
+
+    It travels as a JSON object in the ``transcribe`` form field rather than as
+    a nested part of the body. A multipart request carries flat fields and a
+    file, and ``diarization`` is an object, so there is no flat spelling of it
+    that both this and the dialog could agree on.
+    """
+
+    provider_id: str
+    model: str = Field(min_length=1)
+    """Required, for the same reason a re-process names one: the provider row
+    carries no model, so there is nothing to fall back to."""
+    use_glossary: bool = True
+    diarization: DiarizationConfig = Field(default_factory=DiarizationConfig)
+
+
+class ImportedSession(BaseModel):
+    """What an import answers with: the new session, and the run it started.
+
+    ``job_id`` is the transcription queued by the request's ``transcribe``
+    block, and None when it carried none. It is here rather than left for the
+    caller to find by listing the session's jobs, because an import that was
+    asked to transcribe has exactly one version worth looking at and the
+    browser goes straight to it.
+    """
+
+    session: Session
+    job_id: str | None = None
 
 
 class VideoGenerateRequest(BaseModel):

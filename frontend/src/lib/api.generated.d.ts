@@ -891,6 +891,45 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/session/import": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Import Session Recording
+         * @description Import a recording made elsewhere as a session (multipart upload).
+         *
+         *     This is the feature that lets a GM use Loreline with no box and no
+         *     microphone: whatever they recorded on their phone becomes a session that
+         *     every other feature works on unchanged, because it is stored as exactly
+         *     what a capture stores (see ``docs/adr/0008``).
+         *
+         *     ``started_at`` is epoch seconds and defaults to now - the dialog seeds it
+         *     from the file's own modification time, which is the closest thing a
+         *     recording carries to when the evening was. ``campaign_id`` is a plain
+         *     string. ``transcribe`` is a JSON object (``provider_id``, ``model``,
+         *     ``use_glossary``, ``diarization``) that starts the first transcription in
+         *     the same request; leave it out to store the recording and decide later.
+         *
+         *     The refusals, and why each is the code it is: 413 for a file past
+         *     ``LORELINE_IMPORT_MAX_MB``, 422 for audio this server cannot decode - which
+         *     includes the one failure that is about the box rather than the file, a
+         *     format that needs ffmpeg where ffmpeg is not installed - and 503 when the
+         *     speech detector that cuts a recording into utterances is unavailable, since
+         *     that is the one a retry can win after somebody fixes the deployment.
+         */
+        post: operations["import_session_recording_api_session_import_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/session": {
         parameters: {
             query?: never;
@@ -1602,6 +1641,20 @@ export interface components {
             /** Enabled */
             enabled: boolean;
         };
+        /** Body_import_session_recording_api_session_import_post */
+        Body_import_session_recording_api_session_import_post: {
+            /**
+             * File
+             * @description The recording to import. Decoded from .wav, .m4a, .mp3, .ogg, .opus, .webm, .flac, .aac, .mp4 and anything else ffmpeg reads.
+             */
+            file: string;
+            /** Started At */
+            started_at?: number | null;
+            /** Campaign Id */
+            campaign_id?: string | null;
+            /** Transcribe */
+            transcribe?: string | null;
+        };
         /**
          * Campaign
          * @description A campaign: the thing a session belongs to, and what collects its memory.
@@ -2000,6 +2053,21 @@ export interface components {
          * @enum {string}
          */
         HealthStatus: "healthy" | "degraded" | "unauthorized" | "unreachable" | "unknown";
+        /**
+         * ImportedSession
+         * @description What an import answers with: the new session, and the run it started.
+         *
+         *     ``job_id`` is the transcription queued by the request's ``transcribe``
+         *     block, and None when it carried none. It is here rather than left for the
+         *     caller to find by listing the session's jobs, because an import that was
+         *     asked to transcribe has exactly one version worth looking at and the
+         *     browser goes straight to it.
+         */
+        ImportedSession: {
+            session: components["schemas"]["Session"];
+            /** Job Id */
+            job_id?: string | null;
+        };
         /** InputDevice */
         InputDevice: {
             /** Index */
@@ -2690,6 +2758,10 @@ export interface components {
             summary_version?: string | null;
             /** Merged From */
             merged_from?: string[];
+            /** @default capture */
+            origin?: components["schemas"]["SessionOrigin"];
+            /** Import Name */
+            import_name?: string | null;
         };
         /**
          * SessionDetail
@@ -2760,6 +2832,20 @@ export interface components {
             /** Ids */
             ids?: string[];
         };
+        /**
+         * SessionOrigin
+         * @description Where a session's audio came from.
+         *
+         *     An import is not a second kind of session: it produces the same continuous
+         *     WAV and the same utterance index a capture does, and every feature reads
+         *     them the same way (see ``docs/adr/0008``). What this records is the one
+         *     thing that differs, that nobody ever listened to an import live, so its
+         *     "original" transcript version is empty by construction and no re-run can
+         *     ever fill it. Readers that would otherwise present that emptiness as a
+         *     failed capture check this instead.
+         * @enum {string}
+         */
+        SessionOrigin: "capture" | "import";
         /**
          * SessionStatus
          * @description Lifecycle state of a capture session.
@@ -4637,6 +4723,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Session"];
+                };
+            };
+        };
+    };
+    import_session_recording_api_session_import_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "multipart/form-data": components["schemas"]["Body_import_session_recording_api_session_import_post"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ImportedSession"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

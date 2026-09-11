@@ -2140,6 +2140,53 @@
         ]
       }
     },
+    "/api/session/import": {
+      "post": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "Import Session Recording",
+        "description": "Import a recording made elsewhere as a session (multipart upload).\n\nThis is the feature that lets a GM use Loreline with no box and no\nmicrophone: whatever they recorded on their phone becomes a session that\nevery other feature works on unchanged, because it is stored as exactly\nwhat a capture stores (see ``docs/adr/0008``).\n\n``started_at`` is epoch seconds and defaults to now - the dialog seeds it\nfrom the file's own modification time, which is the closest thing a\nrecording carries to when the evening was. ``campaign_id`` is a plain\nstring. ``transcribe`` is a JSON object (``provider_id``, ``model``,\n``use_glossary``, ``diarization``) that starts the first transcription in\nthe same request; leave it out to store the recording and decide later.\n\nThe refusals, and why each is the code it is: 413 for a file past\n``LORELINE_IMPORT_MAX_MB``, 422 for audio this server cannot decode - which\nincludes the one failure that is about the box rather than the file, a\nformat that needs ffmpeg where ffmpeg is not installed - and 503 when the\nspeech detector that cuts a recording into utterances is unavailable, since\nthat is the one a retry can win after somebody fixes the deployment.",
+        "operationId": "import_session_recording_api_session_import_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_import_session_recording_api_session_import_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImportedSession"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
+      }
+    },
     "/api/session": {
       "get": {
         "tags": [
@@ -3680,6 +3727,54 @@
         "title": "AutostartUpdate",
         "description": "Toggle systemd autostart."
       },
+      "Body_import_session_recording_api_session_import_post": {
+        "properties": {
+          "file": {
+            "type": "string",
+            "contentMediaType": "application/octet-stream",
+            "title": "File",
+            "description": "The recording to import. Decoded from .wav, .m4a, .mp3, .ogg, .opus, .webm, .flac, .aac, .mp4 and anything else ffmpeg reads."
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "campaign_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Campaign Id"
+          },
+          "transcribe": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Transcribe"
+          }
+        },
+        "type": "object",
+        "required": [
+          "file"
+        ],
+        "title": "Body_import_session_recording_api_session_import_post"
+      },
       "Campaign": {
         "properties": {
           "id": {
@@ -4474,6 +4569,30 @@
         ],
         "title": "HealthStatus",
         "description": "How far a provider got when we asked it a cheap question.\n\nOrdered from best to worst as the settings page renders them. The value\nstrings are the wire format of ``POST /providers/{id}/test`` and the\nfrontend switches on them directly, so they are API, not labels."
+      },
+      "ImportedSession": {
+        "properties": {
+          "session": {
+            "$ref": "#/components/schemas/Session"
+          },
+          "job_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Job Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "session"
+        ],
+        "title": "ImportedSession",
+        "description": "What an import answers with: the new session, and the run it started.\n\n``job_id`` is the transcription queued by the request's ``transcribe``\nblock, and None when it carried none. It is here rather than left for the\ncaller to find by listing the session's jobs, because an import that was\nasked to transcribe has exactly one version worth looking at and the\nbrowser goes straight to it."
       },
       "InputDevice": {
         "properties": {
@@ -5837,6 +5956,21 @@
             },
             "type": "array",
             "title": "Merged From"
+          },
+          "origin": {
+            "$ref": "#/components/schemas/SessionOrigin",
+            "default": "capture"
+          },
+          "import_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Import Name"
           }
         },
         "type": "object",
@@ -6010,6 +6144,15 @@
         "type": "object",
         "title": "SessionIds",
         "description": "A set of session ids for bulk operations (delete / merge)."
+      },
+      "SessionOrigin": {
+        "type": "string",
+        "enum": [
+          "capture",
+          "import"
+        ],
+        "title": "SessionOrigin",
+        "description": "Where a session's audio came from.\n\nAn import is not a second kind of session: it produces the same continuous\nWAV and the same utterance index a capture does, and every feature reads\nthem the same way (see ``docs/adr/0008``). What this records is the one\nthing that differs, that nobody ever listened to an import live, so its\n\"original\" transcript version is empty by construction and no re-run can\never fill it. Readers that would otherwise present that emptiness as a\nfailed capture check this instead."
       },
       "SessionStatus": {
         "type": "string",

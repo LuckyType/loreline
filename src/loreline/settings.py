@@ -37,6 +37,27 @@ class Settings(BaseSettings):
         description="Base dir for SQLite DB, audio files and the managed secret store.",
     )
 
+    # --- Importing a recording ---
+    # A GM's own recording of a session, uploaded rather than captured here
+    # (see docs/adr/0008). Both ceilings exist to keep one request from
+    # filling the disk or occupying the box for an hour, and both are
+    # generous on purpose: a four hour session is an ordinary evening, and at
+    # 16 kHz mono it decodes to roughly 460 MB.
+    import_max_mb: int = Field(
+        default=1024,
+        description=(
+            "Largest recording accepted by POST /api/session/import, in MB. "
+            "A larger upload is refused with 413 rather than decoded."
+        ),
+    )
+    import_max_hours: float = Field(
+        default=8.0,
+        description=(
+            "Longest recording accepted by POST /api/session/import, in hours, "
+            "measured after decoding. A longer one is refused with 422."
+        ),
+    )
+
     # --- Web server ---
     host: str = Field(default="127.0.0.1", description="Bind host (LAN-only by default).")
     port: int = Field(default=8000)
@@ -153,6 +174,17 @@ class Settings(BaseSettings):
         return self.data_dir / "audio"
 
     @property
+    def imports_dir(self) -> Path:
+        """Scratch space for an upload being received and decoded.
+
+        Under the data dir rather than the system temp dir so the bytes land
+        on the filesystem the recording will live on: a decode writes the WAV
+        beside its source and the finished file is then renamed into the audio
+        store, which is only a rename while both are on one filesystem.
+        """
+        return self.data_dir / "imports"
+
+    @property
     def video_dir(self) -> Path:
         return self.data_dir / "video"
 
@@ -164,6 +196,16 @@ class Settings(BaseSettings):
     @property
     def secrets_path(self) -> Path:
         return self.data_dir / "secrets.json"
+
+    @property
+    def import_max_bytes(self) -> int:
+        """The upload ceiling in bytes."""
+        return self.import_max_mb * 1024 * 1024
+
+    @property
+    def import_max_seconds(self) -> float:
+        """The decoded-recording ceiling in seconds."""
+        return self.import_max_hours * 3600.0
 
     @property
     def disk_alert_threshold_bytes(self) -> int:

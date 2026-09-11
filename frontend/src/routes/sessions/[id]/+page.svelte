@@ -60,6 +60,10 @@ import type { ReprocessJob, SessionDetail, TranscriptEvent, VideoJob } from '$li
 
 let detail = $state<SessionDetail | null>(null)
 let jobs = $state<ReprocessJob[]>([])
+// The New transcription dialog's state, owned here because two cards open it:
+// the Transcriptions header's button, and the empty state the transcript card
+// shows a session that has nothing to read yet.
+let reprocessOpen = $state(false)
 let videoJobs = $state<VideoJob[]>([])
 let error = $state('')
 // The last background refresh that failed, or ''. Its own slot rather than
@@ -156,6 +160,17 @@ const shownEvents = $derived(
 	selectedVersion === 'original' ? (detail?.transcript ?? []) : versionFeed.items,
 )
 
+/** Whether this session has nothing to read and a recording it could read
+ *  from: an import before its first transcription, and a capture whose STT
+ *  never produced a line. The transcript card turns that into the one button
+ *  that changes it rather than an empty list with no way out. */
+const nothingTranscribed = $derived(
+	!!detail &&
+		!!detail.session.audio_path &&
+		detail.transcript.length === 0 &&
+		!jobs.some((j) => j.operation === 'transcribe'),
+)
+
 // distinct speaker labels in the shown version (drives the rename button)
 const speakers = $derived([
 	...new Set(shownEvents.map((e) => e.speaker).filter((s): s is string => !!s)),
@@ -227,10 +242,31 @@ async function refresh(what: string, work: () => Promise<void>) {
 	}
 }
 
+/** Which version the page should be showing.
+ *
+ * The live capture, except on an import, which has none: its "original" holds
+ * no rows and no run will ever fill it (see docs/adr/0008), so the newest
+ * transcription that has something to show - or is filling up right now - is
+ * what the page is about. */
+function defaultVersion(current: SessionDetail, list: ReprocessJob[]): string {
+	if (current.session.origin !== 'import') return 'original'
+	const shown = list
+		.filter((j) => j.operation === 'transcribe' && (inFlight(j) || j.segments_added > 0))
+		.sort((a, b) => b.created_at - a.created_at)
+	return shown[0]?.id ?? 'original'
+}
+
 async function refreshJobs() {
 	await refresh('could not refresh the job list', async () => {
 		jobs = await api.listReprocess(id)
 	})
+	// Only while nothing else is selected: a reader who chose a version is left
+	// on it, and an import's first transcription takes the page the moment it
+	// has a line in it.
+	if (detail && selectedVersion === 'original') {
+		const next = defaultVersion(detail, jobs)
+		if (next !== 'original') await selectVersion(next)
+	}
 }
 
 async function reloadDetail() {
@@ -376,6 +412,7 @@ async function openDeepLink() {
 				{jobs}
 				selected={selectedVersion}
 				bind:open={sections.table}
+				bind:reprocessOpen
 				onselect={selectVersion}
 				onchanged={refreshJobs}
 				onerror={setError}
@@ -399,6 +436,7 @@ async function openDeepLink() {
 				onrenamed={reloadDetail}
 				onerror={setError}
 				onseek={audioEl ? seekAudio : undefined}
+				ontranscribe={nothingTranscribed ? () => (reprocessOpen = true) : undefined}
 			/>
 
 			<div class="shrink-0 border-t"></div>

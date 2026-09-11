@@ -24,7 +24,7 @@ sudo usermod -aG audio "${SERVICE_USER}" || true
 # nodejs/npm build the SvelteKit UI below; the app serves nothing at "/"
 # without a built `frontend/build` (see loreline.web.spa.spa_directory).
 sudo apt-get update -qq
-sudo apt-get install -y --no-install-recommends libportaudio2 libgomp1 nodejs npm
+sudo apt-get install -y --no-install-recommends libportaudio2 libgomp1 ffmpeg nodejs npm
 
 sudo mkdir -p "${APP_DIR}"
 sudo chown -R "${SERVICE_USER}:${SERVICE_USER}" "${APP_DIR}"

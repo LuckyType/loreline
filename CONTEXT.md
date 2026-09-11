@@ -115,6 +115,14 @@ word that carries one, else none. That is the one speaker rule for every connect
 **Transcript version**: One full pass over a session's audio, the live capture
 ("original") or one re-processing job. Diarization relabels one into a copy.
 
+**Import**: A recording made elsewhere, stored as a session rather than as a second
+kind of thing: the same continuous WAV and utterance index a capture leaves behind, a
+`completed` row, and `started_mono` of zero, so the recording's own clock is the session
+clock. Nobody heard it live, so its "original" version is empty and no run will ever fill
+it, and transcribing it is an ordinary re-processing job. `Session.origin` is the only
+thing that says so, and only the browser reads it. See `docs/adr/0008`.
+_Avoid_: upload (the request, not the session it makes)
+
 **Glossary**: A campaign's list of names and terms, in priority order, sent to a model to
 bias recognition. Trimmed to the model's ceiling, head first.
 _Avoid_: prompt, vocabulary, keyterms (each is one vendor's wire name for it)

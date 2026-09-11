@@ -27,6 +27,7 @@ from loreline.models import (
     SearchHit,
     Session,
     SessionDocument,
+    SessionOrigin,
     SessionStatus,
     TranscriptEvent,
     VideoJob,
@@ -140,8 +141,8 @@ class SessionRepository:
             INSERT INTO sessions
                 (id, status, started_at, started_mono, ended_at, campaign_id,
                  primary_provider, fallback_provider, diarization, audio_path,
-                 merged_from)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                 merged_from, origin, import_name)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
             """,
             (
                 session.id,
@@ -158,6 +159,11 @@ class SessionRepository:
                 # speaker map and the summary: what a row was merged from is
                 # true the instant it exists and never changes afterwards.
                 json.dumps(session.merged_from),
+                # Same reason again: where the audio came from and what the
+                # file was called are true when the row is written and never
+                # change afterwards, so neither gets a setter.
+                session.origin.value,
+                session.import_name,
             ),
         )
         await self._db.connection.commit()
@@ -489,6 +495,8 @@ def _row_to_session(row: aiosqlite.Row) -> Session:
         summary_model=row["summary_model"],
         summary_version=row["summary_version"],
         merged_from=json.loads(row["merged_from"]),
+        origin=SessionOrigin(row["origin"]),
+        import_name=row["import_name"],
     )
 
 

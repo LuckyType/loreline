@@ -17,6 +17,7 @@ from loreline.models import (
     ProviderKind,
     ReprocessJob,
     Session,
+    SessionOrigin,
     SessionStatus,
     TranscriptEvent,
     Word,
@@ -93,6 +94,32 @@ async def test_session_speaker_names_roundtrip(db: Database) -> None:
     loaded = await repo.get("s1")
     assert loaded is not None
     assert loaded.speaker_names == {"Speaker A": "GM", "Speaker B": "Player"}
+
+
+async def test_session_origin_roundtrip(db: Database) -> None:
+    """A capture says nothing about its origin; an import says both things."""
+    repo = SessionRepository(db)
+    await repo.create(Session(id="captured", started_at=1.0))
+    captured = await repo.get("captured")
+    assert captured is not None
+    assert captured.origin is SessionOrigin.CAPTURE  # the v22 default
+    assert captured.import_name is None  # a capture has no file name at all
+
+    await repo.create(
+        Session(
+            id="imported",
+            started_at=2.0,
+            origin=SessionOrigin.IMPORT,
+            import_name="session 12 - the vault.m4a",
+        )
+    )
+    loaded = await repo.get("imported")
+    assert loaded is not None
+    assert loaded.origin is SessionOrigin.IMPORT
+    assert loaded.import_name == "session 12 - the vault.m4a"
+    # And through the list, which is what the history page reads.
+    listed = {s.id: s.origin for s in await repo.list()}
+    assert listed == {"captured": SessionOrigin.CAPTURE, "imported": SessionOrigin.IMPORT}
 
 
 async def test_session_summary_roundtrip(db: Database) -> None:
