@@ -411,7 +411,7 @@ async def download_session_audio(request: Request, session_id: str) -> FileRespo
 
 @router.post("/delete")
 async def delete_sessions(request: Request, body: SessionIds) -> OkResponse:
-    """Delete the given sessions, including their transcript and stored audio."""
+    """Delete the given sessions: transcript, stored audio, logs and generated videos."""
     state = get_state(request)
     active = state.manager.current_session_id()
     for session_id in body.ids:
@@ -420,6 +420,11 @@ async def delete_sessions(request: Request, body: SessionIds) -> OkResponse:
         await state.transcripts.delete_session(session_id)
         state.audio_store.delete(session_id)
         state.log_store.delete_session(session_id)  # every version's log file
+        # The video job rows would go with the session row anyway (the table
+        # cascades), and that was the problem: a cascade takes no file with
+        # it, so every generated .mp4 of a deleted session stayed on disk with
+        # nothing left that named it.
+        await state.video.delete_session(session_id)
         await state.sessions.delete(session_id)
     return OkResponse()
 

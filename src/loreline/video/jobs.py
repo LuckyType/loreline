@@ -172,9 +172,31 @@ class VideoManager:
                 await task
 
     async def delete(self, job_id: str) -> None:
-        """Remove a job row and its stored video."""
+        """Remove a job row and its stored video, stopping the generation if it is still running.
+
+        Stopped first, and waited for, because a generation left running would
+        finish by downloading and writing a file for a row that no longer
+        exists: an ``.mp4`` nothing names, which is the orphan this whole
+        method exists to prevent.
+        """
+        task = self._tasks.get(job_id)
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
         self._store.delete(job_id)
         await self._videos.delete(job_id)
+
+    async def delete_session(self, session_id: str) -> None:
+        """Remove every video a session has: the files and the job rows.
+
+        Called when the session itself is deleted. The rows would go with it
+        regardless (``video_jobs.session_id`` cascades), and that was the
+        defect: a cascade takes no file with it, so each generated ``.mp4``
+        of a deleted session stayed on disk with nothing left that named it.
+        """
+        for job in await self._videos.for_session(session_id):
+            await self.delete(job.id)
 
     async def _run(self, job: VideoJob, provider: ProviderConfig) -> None:
         job.status = JobStatus.RUNNING

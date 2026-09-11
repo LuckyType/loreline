@@ -880,7 +880,7 @@ export interface paths {
         put?: never;
         /**
          * Delete Sessions
-         * @description Delete the given sessions, including their transcript and stored audio.
+         * @description Delete the given sessions: transcript, stored audio, logs and generated videos.
          */
         post: operations["delete_sessions_api_session_delete_post"];
         delete?: never;
