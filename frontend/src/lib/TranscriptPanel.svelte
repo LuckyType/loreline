@@ -83,6 +83,7 @@ let {
 	onerror,
 	onrenamed,
 	onseek,
+	ontranscribe,
 }: {
 	sessionId: string
 	detail: SessionDetail
@@ -116,6 +117,11 @@ let {
 	/** Play the session audio from a segment's start. Set only when the page
 	 *  has a player to seek, so timestamps stay plain text otherwise. */
 	onseek?: (seconds: number) => void
+	/** Open the New transcription dialog. Set only while the session has no
+	 *  transcript at all and a recording it could have one from - an import
+	 *  before its first run, or a capture whose STT never produced a line. The
+	 *  page decides that, because it is the one that can see both. */
+	ontranscribe?: () => void
 } = $props()
 
 const hasAudio = $derived(!!detail.session.audio_path)
@@ -320,6 +326,16 @@ const ownRun = $derived(version === 'original' ? detail.session : selectedJob)
 		{/if}
 		{#if loading}
 			<p class="text-muted-foreground">Loading transcript…</p>
+		{:else if ontranscribe && events.length === 0}
+			<!-- An empty list under a search box reads as "nothing matched"; this
+			     is the other emptiness, the one with a way out of it. The button
+			     opens the same dialog the Transcriptions header does. -->
+			<div class="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 text-center">
+				<p class="m-0 text-muted-foreground">
+					Nothing has been transcribed from this recording yet.
+				</p>
+				<Button variant="outline" size="sm" onclick={ontranscribe}>Transcribe</Button>
+			</div>
 		{:else}
 			<TranscriptList
 				class="min-h-0 flex-1 overflow-auto"

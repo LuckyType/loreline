@@ -58,6 +58,7 @@ let {
 	jobs,
 	selected,
 	open = $bindable(true),
+	reprocessOpen = $bindable(false),
 	onselect,
 	onchanged,
 	onerror,
@@ -69,6 +70,10 @@ let {
 	selected: string
 	/** Fold state, kept by the page across visits. */
 	open?: boolean
+	/** Whether the New transcription dialog is up. Bindable so the transcript
+	 *  card's empty state can open the same dialog this section's header does,
+	 *  rather than mounting a second copy of it that could disagree. */
+	reprocessOpen?: boolean
 	/** A row was clicked, or a deleted version had to be swapped out. */
 	onselect?: (version: string) => Promise<void> | void
 	/** The job rows changed under us: the caller refetches them. */
@@ -79,13 +84,18 @@ let {
 
 const hasAudio = $derived(!!detail.session.audio_path)
 
+// An imported recording has no live capture, so its "original" holds no rows
+// and no run will ever fill it (see docs/adr/0008). Left alone, the table
+// offered it as a selectable version and called it "complete", which claims a
+// capture that never happened and sends the reader to an empty transcript.
+const noLiveTranscript = $derived(detail.session.origin === 'import')
+
 // Said in two places for one reason: it is the header button's disabled
 // reason, and a tooltip is not a thing a phone can show, so the body says it
 // too on the one kind of session where it applies.
 const NO_AUDIO_NOTE =
 	'No stored audio for this session - re-processing and diarization are unavailable.'
 
-let reprocessOpen = $state(false)
 let logsOpen = $state(false)
 let logsVersion = $state('original')
 // Which "Show logs" button opened the dialog. One dialog serves the whole
@@ -338,14 +348,18 @@ const originalStatus = $derived.by(() => {
 		return { label: 'live', variant: 'outline' } as const
 	}
 	if (status === 'error') return { label: 'error', variant: 'destructive' } as const
+	// An import never captured anything, so "complete" would be a claim about a
+	// recording session that did not happen.
+	if (noLiveTranscript) return { label: 'none', variant: 'outline' } as const
 	return { label: 'complete', variant: 'secondary' } as const
 })
 </script>
 
 <CardContent class={cn('flex flex-col gap-3', open ? 'min-h-0 flex-1' : 'shrink-0')}>
+	{@const versionCount = transcribeJobs.length + (noLiveTranscript ? 0 : 1)}
 	<Foldable
 		title="Transcriptions"
-		meta="{transcribeJobs.length + 1} version{transcribeJobs.length === 0 ? '' : 's'}"
+		meta="{versionCount} version{versionCount === 1 ? '' : 's'}"
 		bind:open
 		bodyClass="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto"
 	>
@@ -376,13 +390,26 @@ const originalStatus = $derived.by(() => {
 			</TableHeader>
 			<TableBody>
 				<TableRow
-					class="cursor-pointer hover:bg-accent/30 {selected === 'original'
-              ? 'bg-accent/50 [box-shadow:inset_2px_0_0_var(--color-primary)]'
-              : ''}"
-					onclick={() => onselect?.('original')}
+					class={noLiveTranscript
+						? ''
+						: `cursor-pointer hover:bg-accent/30 ${
+								selected === 'original'
+									? 'bg-accent/50 [box-shadow:inset_2px_0_0_var(--color-primary)]'
+									: ''
+							}`}
+					title={noLiveTranscript
+						? 'This recording was imported, so there is no live capture to read.'
+						: undefined}
+					onclick={() => !noLiveTranscript && onselect?.('original')}
 				>
 					{@const diar = diarizeInfo('original', originalRun)}
-					<TableCell><code>original</code></TableCell>
+					<TableCell>
+						{#if noLiveTranscript}
+							<span class="text-muted-foreground">no live transcript (imported)</span>
+						{:else}
+							<code>original</code>
+						{/if}
+					</TableCell>
 					<TableCell
 						>{providerName(detail.session.primary_provider, actionSetup.providers)}</TableCell
 					>
@@ -397,19 +424,23 @@ const originalStatus = $derived.by(() => {
 					</TableCell>
 					<!-- No delete for the original: it is the live capture, and unlike
 					     every re-transcription there is no way to produce it again. Its
-					     log is the one worth keeping most, for the same reason. -->
+					     log is the one worth keeping most, for the same reason. An
+					     import has no such log at all - nothing was ever captured - so
+					     the button is not offered rather than offered and empty. -->
 					<TableCell>
-						<Button
-							variant="ghost"
-							size="sm"
-							title="The log lines this capture was recorded and transcribed by"
-							onclick={(e: MouseEvent) => {
-								e.stopPropagation() // the row click selects the version
-								showLogs('original', e.currentTarget)
-							}}
-						>
-							Show logs
-						</Button>
+						{#if !noLiveTranscript}
+							<Button
+								variant="ghost"
+								size="sm"
+								title="The log lines this capture was recorded and transcribed by"
+								onclick={(e: MouseEvent) => {
+									e.stopPropagation() // the row click selects the version
+									showLogs('original', e.currentTarget)
+								}}
+							>
+								Show logs
+							</Button>
+						{/if}
 					</TableCell>
 				</TableRow>
 				{#each transcribeJobs as j (j.id)}

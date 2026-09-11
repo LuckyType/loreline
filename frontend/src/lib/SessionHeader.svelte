@@ -145,6 +145,16 @@ const durationText = $derived(fmtDuration(session.started_at, session.ended_at))
 	<span class="text-muted-foreground max-sm:order-1 max-sm:basis-full">
 		{fmtWhen(session.started_at)}{durationText ? ` · ${durationText}` : ''}
 	</span>
+	<!-- Nobody sat at the table for this one, and the file name is the only
+	     name the recording ever had - so it belongs in the one band that says
+	     what this session is, next to when it was. Truncated rather than
+	     wrapped: a phone recording's name can be very long, and the date beside
+	     it is what the band is for. -->
+	{#if session.origin === 'import'}
+		<span class="max-w-[16rem] truncate text-muted-foreground" title={session.import_name ?? ''}>
+			Imported from {session.import_name ?? 'a file'}
+		</span>
+	{/if}
 	<DropdownMenu>
 		<DropdownMenuTrigger>
 			{#snippet child({ props })}
