@@ -5,8 +5,13 @@
  * This is the dialog for a GM with no box and no microphone at the table -
  * they recorded the evening on a phone, and what comes out the other end is a
  * session indistinguishable from a captured one (see docs/adr/0008). So the
- * form asks for exactly three things and no more: which file, when the session
- * was, and whether to start transcribing it now.
+ * form asks for four things and no more: which file, when the session was,
+ * which campaign it belongs to, and whether to start transcribing it now.
+ *
+ * The campaign is asked here rather than fixed afterwards because it decides
+ * which glossary the transcription below it runs with - and "Transcribe now"
+ * means that job starts in the same request, before anyone could move the
+ * session. Left blank it is the same as a capture started with no campaign.
  *
  * The date is seeded from the file's own modification time rather than from
  * now, because that is the closest thing a recording carries to when the
@@ -31,6 +36,7 @@
 import { TriangleAlert } from '@lucide/svelte'
 import { actionSetup } from '$lib/actionSetup.svelte'
 import { ApiError, api } from '$lib/api'
+import { campaigns } from '$lib/campaigns.svelte'
 import { featureBlockedReason, glossaryDropsWarning } from '$lib/capabilities.svelte'
 import { Button } from '$lib/components/ui/button'
 import { Checkbox } from '$lib/components/ui/checkbox'
@@ -55,13 +61,24 @@ let {
 	onimported,
 }: {
 	open?: boolean
-	/** The campaign the new session belongs to, sent verbatim. No picker here:
-	 *  the field exists so one can be added above this without touching the
-	 *  request. */
+	/** The campaign to start the picker on. A caller that already knows which
+	 *  one this belongs to (a campaign's own page, were it to offer an import)
+	 *  says so; the History page does not, and passes nothing. */
 	campaignId?: string | null
 	/** The import succeeded: the caller decides where to go next. */
 	onimported?: (result: ImportedSession) => Promise<void> | void
 } = $props()
+
+// Seeded from the caller, else from the campaign the capture card last started
+// a session in, which is nearly always the campaign this recording is of. A
+// stored default naming a campaign that has since been deleted seeds nothing
+// rather than a dead id.
+let campaign = $derived(
+	campaignId ??
+		(campaigns.rows.some((row) => row.campaign.id === actionSetup.defaults.campaign_id)
+			? actionSetup.defaults.campaign_id
+			: ''),
+)
 
 // What the file types an upload may offer. Deliberately wider than the
 // extensions: a phone names its recordings in its own way, and the server
@@ -148,7 +165,7 @@ async function submit() {
 	try {
 		const result = await api.importRecording(file, {
 			startedAt: startedAt(when),
-			campaignId,
+			campaignId: campaign || null,
 			transcribe: transcribeNow
 				? { provider_id: provider, model, use_glossary: useGlossary }
 				: null,
@@ -202,6 +219,22 @@ async function submit() {
 				<p class="m-0 text-xs text-muted-foreground">
 					Taken from the file, which is usually when it was recorded. Left blank, the session is
 					dated now.
+				</p>
+			</div>
+
+			<div class="flex flex-col gap-2">
+				<Label for="import-campaign">Campaign</Label>
+				<Dropdown
+					id="import-campaign"
+					bind:value={campaign}
+					defaultValue={actionSetup.defaults.campaign_id}
+					options={campaigns.options()}
+					placeholder={campaigns.ready ? 'No campaign' : 'Loading campaigns…'}
+					loading={!campaigns.ready}
+					disabled={busy}
+				/>
+				<p class="m-0 text-xs text-muted-foreground">
+					Its glossary biases the transcription, and its recaps collect the session.
 				</p>
 			</div>
 
