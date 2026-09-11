@@ -342,6 +342,9 @@ async def test_a_query_of_syntax_is_a_search_not_a_crash(db: Database) -> None:
     repo = SearchRepository(db)
     assert await repo.search("(amulet AND") == []  # quoted: no such phrase, no error
     assert await repo.search("   ") == []
+    # Nothing but quote marks is dropped rather than quoted into an empty
+    # phrase, which FTS5 refuses and which LIKE would read as "everything".
+    assert await repo.search('"') == []
 
 
 async def test_search_falls_back_to_like_without_fts5(

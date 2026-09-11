@@ -983,8 +983,14 @@ def _search_terms(query: str) -> list[str]:
     Quoting is what keeps a search box a search box. Unquoted, ``NOT`` is an
     operator, ``d&d`` is a syntax error and ``(the`` is an unbalanced bracket,
     and each of those is a 500 on a page where the user only mistyped.
+
+    A token that is nothing but quote characters is dropped rather than quoted
+    into an empty phrase: FTS5 refuses one, and the fallback would turn it into
+    ``LIKE '%%'``, which matches the whole library.
     """
-    return [f'"{word.replace(chr(34), chr(34) * 2)}"' for word in query.split() if word.strip()]
+    quote = chr(34)
+    words = [word for word in query.split() if word.strip(quote)]
+    return [f"{quote}{word.replace(quote, quote * 2)}{quote}" for word in words]
 
 
 def _like_escape(value: str) -> str:
@@ -1015,7 +1021,6 @@ def _snippet(text: str, needles: list[str]) -> str:
             rebuilt.append(f"[{marked[found : found + len(needle)]}]")
             start = found + len(needle)
         marked = "".join(rebuilt)
-        lowered = marked.lower()
     first = marked.find("[")
     if first < 0:
         return marked
