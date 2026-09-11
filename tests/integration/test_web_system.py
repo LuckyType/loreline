@@ -18,7 +18,7 @@ from httpx import ASGITransport, AsyncClient
 import loreline.updater.updater as updater_module
 import loreline.web.routes.system as system_route
 from loreline.health import HealthReport, HealthStatus
-from loreline.llm import DEFAULT_SYSTEM_PROMPT
+from loreline.llm import DEFAULT_RECAP_PROMPT, DEFAULT_SYSTEM_PROMPT
 from loreline.settings import Settings
 from loreline.updater.process import CommandResult
 from loreline.web.app import create_app
@@ -322,9 +322,13 @@ async def test_action_defaults_roundtrip(client: AsyncClient) -> None:
         # Never-saved prompt is served as the concrete built-in text, so the
         # settings UI always shows editable instructions.
         "summarize_prompt": DEFAULT_SYSTEM_PROMPT,
+        # Same rule for the recap instructions, which are a different text for
+        # a different reader (see docs/adr/0009).
+        "recap_prompt": DEFAULT_RECAP_PROMPT,
         "video_provider": "",
         "video_model": "",
         "summarize_reasoning_effort": "",
+        "campaign_id": "",
         "strict_model_filtering": True,
     }
 

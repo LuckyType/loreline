@@ -57,9 +57,7 @@ const fieldId = `${uid}-terms`
 async function load() {
 	loadError = ''
 	try {
-		const glossary = campaignId
-			? await api.getGlossary(campaignId)
-			: await api.getDefaultGlossary()
+		const glossary = campaignId ? await api.getGlossary(campaignId) : await api.getDefaultGlossary()
 		storedTerms = glossary.terms
 		text = storedTerms.join('\n')
 		loaded = true
