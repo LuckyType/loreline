@@ -16,8 +16,19 @@
  * The component stays mounted while the dialog is shut, deliberately: an
  * endpoint typed once is still there on the next open, and a session whose
  * first run needed a hand-typed address usually needs it again.
+ *
+ * A blank endpoint is a real choice, and the dialog says what it means. The
+ * chain is the one the server walks: what is typed here, else the session's
+ * own endpoint (sent as the request's), else the default saved under
+ * Settings (filled in by the server when the request names none). The hint
+ * under the field names the link that will actually be used, so nobody has to
+ * open Settings to find out where a run went. With nothing at any link the
+ * run could only fail, so the button says so and refuses instead of queuing
+ * it: the server would answer 400 either way, but a disabled button with the
+ * reason on it is a better place to learn that than a banner after the press.
  */
 
+import { actionSetup } from '$lib/actionSetup.svelte'
 import { ApiError, api } from '$lib/api'
 import { Button } from '$lib/components/ui/button'
 import {
@@ -65,7 +76,24 @@ let minSpeakers = $state('')
 let maxSpeakers = $state('')
 let busy = $state(false)
 
+/** Where a blank field sends the run, and which link of the chain that is.
+ *  Null when there is nothing at either link. */
+const fallback = $derived.by(() => {
+	if (sessionEndpoint) return { endpoint: sessionEndpoint, from: "the session's own endpoint" }
+	const stored = actionSetup.defaults.diar_endpoint
+	if (stored) return { endpoint: stored, from: 'the default saved under Settings' }
+	return null
+})
+const NO_ENDPOINT = 'No diarization endpoint: type one here, or save a default under Settings.'
+// Only the remote diarizer needs an address; the OpenAI mode has the
+// provider row's.
+const noEndpoint = $derived(kind === 'remote' && !endpoint.trim() && !fallback)
+
 async function diarizeSession() {
+	if (noEndpoint) {
+		onerror?.(NO_ENDPOINT)
+		return
+	}
 	busy = true
 	onerror?.('')
 	try {
@@ -76,8 +104,9 @@ async function diarizeSession() {
 			diarization: {
 				mode: kind,
 				// Only the remote diarizer has an address to send: the OpenAI mode
-				// talks to the provider row's own endpoint.
-				endpoint: kind === 'remote' ? endpoint || sessionEndpoint || null : null,
+				// talks to the provider row's own endpoint. Null is the server's
+				// cue to use the stored default (see `fallback`).
+				endpoint: kind === 'remote' ? endpoint.trim() || sessionEndpoint || null : null,
 				// Blank means "no opinion", which is not the same as zero: the
 				// server picks the count itself when neither bound is given.
 				min_speakers: minSpeakers ? Number(minSpeakers) : null,
@@ -126,9 +155,26 @@ async function diarizeSession() {
 			{#if kind === 'remote'}
 				<div class="flex flex-col gap-2">
 					<Label for="diarize-endpoint">Endpoint</Label>
-					<Input id="diarize-endpoint" placeholder="http://…:8001" bind:value={endpoint} />
-					<span class="text-xs text-muted-foreground">
-						Blank uses the session's own endpoint, then the server's configured one.
+					<Input
+						id="diarize-endpoint"
+						placeholder="http://…:8001"
+						aria-describedby="diarize-endpoint-hint"
+						bind:value={endpoint}
+					/>
+					<!-- Which endpoint a blank field means, by name: the promise the
+					     field makes is only worth something if it says what it will
+					     do. -->
+					<span
+						id="diarize-endpoint-hint"
+						class={['text-xs', noEndpoint ? 'text-destructive' : 'text-muted-foreground']}
+					>
+						{#if endpoint.trim()}
+							Runs at the endpoint typed above.
+						{:else if fallback}
+							Blank uses {fallback.from}: <code>{fallback.endpoint}</code>
+						{:else}
+							{NO_ENDPOINT}
+						{/if}
 					</span>
 				</div>
 			{/if}
@@ -162,7 +208,9 @@ async function diarizeSession() {
 
 		<DialogFooter>
 			<Button variant="outline" onclick={() => (open = false)}>Cancel</Button>
-			<Button onclick={diarizeSession} disabled={busy}>
+			<!-- Disabled with nothing to run against; the hint under the field is
+			     where the reason is, since a disabled button shows no tooltip. -->
+			<Button onclick={diarizeSession} disabled={busy || noEndpoint}>
 				{busy ? 'Queuing…' : 'Diarize'}
 			</Button>
 		</DialogFooter>

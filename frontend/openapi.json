@@ -2081,7 +2081,7 @@
           "reprocess"
         ],
         "summary": "Enqueue Reprocess",
-        "description": "Enqueue a post-session re-processing job.\n\n503 for a diarizer that is not answering, because that is what it means:\nthe request is fine and the machine it needs is not there. It is also the\none refusal here that clears up by itself, so the message names the\nendpoint and invites another press rather than describing a bad request.",
+        "description": "Enqueue a post-session re-processing job.\n\n503 for a diarizer that is not answering, because that is what it means:\nthe request is fine and the machine it needs is not there. It is also the\none refusal here that clears up by itself, so the message names the\nendpoint and invites another press rather than describing a bad request.\n\n400 for a remote diarization that names no endpoint when none is stored\nas the default either: a blank field means \"the default\", and with no\ndefault there is nothing the job could run against, so the request is what\nhas to change. The dialog refuses that press itself; this is the answer for\na client that did not.",
         "operationId": "enqueue_reprocess_api_reprocess_post",
         "security": [
           {

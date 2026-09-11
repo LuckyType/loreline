@@ -5,6 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Request
 from fastapi.exceptions import HTTPException
 from starlette.status import (
+    HTTP_400_BAD_REQUEST,
     HTTP_404_NOT_FOUND,
     HTTP_409_CONFLICT,
     HTTP_503_SERVICE_UNAVAILABLE,
@@ -13,6 +14,7 @@ from starlette.status import (
 from loreline.models import ReprocessJob
 from loreline.reprocess import (
     AudioMissingError,
+    DiarizerEndpointMissingError,
     DiarizerUnreachableError,
     JobNotCancellableError,
     JobNotFoundError,
@@ -37,6 +39,12 @@ async def enqueue_reprocess(request: Request, body: ReprocessRequest) -> Reproce
     the request is fine and the machine it needs is not there. It is also the
     one refusal here that clears up by itself, so the message names the
     endpoint and invites another press rather than describing a bad request.
+
+    400 for a remote diarization that names no endpoint when none is stored
+    as the default either: a blank field means "the default", and with no
+    default there is nothing the job could run against, so the request is what
+    has to change. The dialog refuses that press itself; this is the answer for
+    a client that did not.
     """
     manager = get_reprocess(request)
     try:
@@ -45,6 +53,8 @@ async def enqueue_reprocess(request: Request, body: ReprocessRequest) -> Reproce
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except AudioMissingError as exc:
         raise HTTPException(status_code=HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except DiarizerEndpointMissingError as exc:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     except DiarizerUnreachableError as exc:
         raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
 
