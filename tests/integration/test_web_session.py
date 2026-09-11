@@ -360,6 +360,50 @@ async def test_start_applies_the_glossary_unless_switched_off(session_settings: 
             assert all(g is None for g in seen)
 
 
+async def test_a_campaign_session_is_transcribed_with_its_terms(
+    session_settings: Settings,
+) -> None:
+    """The default list plus the session's own campaign's, in that order.
+
+    The merge itself is ``GlossaryRepository.get_effective``'s; what this covers
+    is that the campaign a session was *started in* is the one whose terms are
+    asked for, which is the whole point of picking one on the capture card. A
+    second campaign's terms are seeded too, so a merge that read every campaign
+    rather than this session's would fail here rather than pass by accident.
+    """
+    seen: list[object] = []
+
+    def factory(
+        config: ProviderConfig, secrets: SecretStore, model: str | None
+    ) -> GlossaryRecordingBackend:
+        return GlossaryRecordingBackend(config, secrets, model, seen)
+
+    app = create_app(
+        session_settings,
+        capture_factory=capture_factory,  # type: ignore[arg-type]
+        backend_factory=factory,  # type: ignore[arg-type]
+        diarizer_factory=fake_diarizers,
+    )
+    async with LifespanManager(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            pid = await _create_provider(ac)
+            await ac.put("/api/glossary", json={"terms": ["Aurora"]})
+            ours = (await ac.post("/api/campaigns", json={"name": "Barovia"})).json()["id"]
+            theirs = (await ac.post("/api/campaigns", json={"name": "Sigil"})).json()["id"]
+            await ac.put(f"/api/glossary/{ours}", json={"terms": ["Strahd"]})
+            await ac.put(f"/api/glossary/{theirs}", json={"terms": ["Lady of Pain"]})
+
+            await ac.post(
+                "/api/session/start",
+                json={"primary_provider": pid, "model": _MODEL, "campaign_id": ours},
+            )
+            await ac.post("/api/session/stop")
+
+            assert seen, "the backend was never asked to transcribe"
+            assert [getattr(g, "terms", None) for g in seen] == [["Aurora", "Strahd"]] * len(seen)
+
+
 async def test_stop_without_session(session_client: AsyncClient) -> None:
     resp = await session_client.post("/api/session/stop")
     assert resp.status_code == 409
