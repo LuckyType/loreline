@@ -5,7 +5,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class ProviderKind(StrEnum):
@@ -324,6 +324,36 @@ class Glossary(BaseModel):
 DEFAULT_GLOSSARY_CAMPAIGN = "_default"
 
 
+class CampaignPlayer(BaseModel):
+    """One seat at the table: the person, and the character they play.
+
+    Both sides are optional and at least one has to be filled, because a GM
+    knows them at different moments: the character before the player has a
+    name for their fighter, the player when somebody is rolling for an absent
+    friend. What is refused is a row with neither, which is a blank line the
+    list would carry forever without ever biasing a recognizer or telling a
+    model anything.
+
+    The order of the rows is priority order, the same as a glossary's: the cast
+    goes into :meth:`GlossaryRepository.get_effective` ahead of every other
+    term, and a model's ceiling is spent from the head.
+    """
+
+    player: str = ""
+    character: str = ""
+
+    @field_validator("player", "character")
+    @classmethod
+    def _trimmed(cls, value: str) -> str:
+        return value.strip()
+
+    @model_validator(mode="after")
+    def _somebody_is_named(self) -> CampaignPlayer:
+        if not self.player and not self.character:
+            raise ValueError("name the player, the character, or both")
+        return self
+
+
 class Campaign(BaseModel):
     """A campaign: the thing a session belongs to, and what collects its memory.
 
@@ -337,6 +367,11 @@ class Campaign(BaseModel):
     ``recap_prompt`` overrides the built-in recap instructions for this
     campaign only - a table that plays in German, or one that wants its recaps
     in character, says so once here rather than in every dialog.
+
+    ``players`` is the cast at this table, in priority order. It is the one
+    thing about a campaign that both halves of the app want: the names go to
+    the STT ahead of every glossary term, and they tell an LLM which of the
+    characters in a transcript are played rather than run.
     """
 
     id: str
@@ -344,6 +379,7 @@ class Campaign(BaseModel):
     created_at: float
     notes: str = ""
     recap_prompt: str = ""
+    players: list[CampaignPlayer] = Field(default_factory=list[CampaignPlayer])
 
 
 class CampaignSummary(BaseModel):

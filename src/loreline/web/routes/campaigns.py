@@ -38,7 +38,7 @@ from loreline.models import (
 )
 from loreline.web.auth import require_auth
 from loreline.web.deps import get_state
-from loreline.web.generation import llm_target
+from loreline.web.generation import cast_note, llm_target
 from loreline.web.schemas import (
     CampaignWrite,
     GlossaryAdd,
@@ -87,6 +87,7 @@ async def create_campaign(request: Request, body: CampaignWrite) -> Campaign:
         created_at=time.time(),
         notes=body.notes,
         recap_prompt=body.recap_prompt,
+        players=body.players,
     )
     await state.campaigns.create(campaign)
     return campaign
@@ -100,7 +101,7 @@ async def get_campaign(request: Request, campaign_id: str) -> Campaign:
 
 @router.put("/{campaign_id}")
 async def update_campaign(request: Request, campaign_id: str, body: CampaignWrite) -> Campaign:
-    """Rename a campaign, or change its notes or its recap prompt."""
+    """Rename a campaign, or change its notes, its recap prompt or its cast."""
     state = get_state(request)
     campaign = await _require_campaign(state, campaign_id)
     clash = await state.campaigns.by_name(body.name)
@@ -109,7 +110,12 @@ async def update_campaign(request: Request, campaign_id: str, body: CampaignWrit
             status_code=HTTP_409_CONFLICT, detail=f"a campaign named {body.name!r} already exists"
         )
     updated = campaign.model_copy(
-        update={"name": body.name, "notes": body.notes, "recap_prompt": body.recap_prompt}
+        update={
+            "name": body.name,
+            "notes": body.notes,
+            "recap_prompt": body.recap_prompt,
+            "players": body.players,
+        }
     )
     await state.campaigns.update(updated)
     return updated
@@ -257,6 +263,7 @@ async def write_previously_on(
                 f'Write the "previously on" for the next session of '
                 f"{campaign.name}, from these recaps:"
             ),
+            cast_line=await cast_note(state, campaign_id),
             reasoning_effort=body.reasoning_effort or None,
         )
     except LLMError as exc:

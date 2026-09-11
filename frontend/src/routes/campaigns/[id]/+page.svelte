@@ -10,13 +10,16 @@
  * linking into the transcript at the line. Then what to read aloud before the
  * next session. Then the cast, merged across every session that named anyone,
  * with the names worth biasing recognition towards tickable into the glossary
- * below it. The settings are last because they are answered once.
+ * below it. The settings are last because they are answered once, and the cast
+ * lives among them for the same reason: a table's players are typed in once and
+ * then read by every session it records.
  *
  * Everything here is per campaign and nothing is shared with the History page,
  * which answers a different question ("what did I record last") in the
  * opposite order.
  */
 
+import { ArrowDown, ArrowUp, Plus, Trash2 } from '@lucide/svelte'
 import { onMount } from 'svelte'
 import { goto } from '$app/navigation'
 import { page } from '$app/state'
@@ -39,6 +42,7 @@ import type {
 	Campaign,
 	CampaignDocument,
 	CampaignEntities,
+	CampaignPlayer,
 	GenerateRequest,
 	SearchHit,
 	Session,
@@ -72,6 +76,20 @@ let name = $state('')
 let notes = $state('')
 let recapPrompt = $state('')
 let savedMessage = $state('')
+
+// The cast, as rows being edited. A copy of what the campaign holds rather
+// than a view onto it, like every other field in this block: nothing is stored
+// until Save, and the row objects are what the each block is keyed on, so they
+// survive a reorder without the inputs losing focus.
+let cast = $state<CampaignPlayer[]>([])
+
+/** Move a row one place, which is a change in priority: the cast leads the
+ *  glossary, and a provider's ceiling is spent from the top of it. */
+function moveCast(from: number, to: number) {
+	if (to < 0 || to >= cast.length) return
+	const [row] = cast.splice(from, 1)
+	if (row) cast.splice(to, 0, row)
+}
 
 let previouslyOnOpen = $state(false)
 
@@ -113,6 +131,7 @@ async function load() {
 		name = row.name
 		notes = row.notes
 		recapPrompt = row.recap_prompt
+		cast = row.players.map((player) => ({ ...player }))
 	} catch (err) {
 		error = err instanceof ApiError ? err.message : 'failed to load the campaign'
 	}
@@ -143,11 +162,19 @@ async function save() {
 	busy = true
 	error = ''
 	try {
+		// A row with neither name is dropped rather than sent: the backend
+		// refuses it, and an empty row is what a GM leaves behind after pressing
+		// Add and changing their mind, not something to make them fix.
+		const players = cast
+			.map((row) => ({ player: row.player.trim(), character: row.character.trim() }))
+			.filter((row) => row.player || row.character)
 		campaign = await api.updateCampaign(id, {
 			name: name.trim(),
 			notes,
 			recap_prompt: recapPrompt,
+			players,
 		})
+		cast = campaign.players.map((player) => ({ ...player }))
 		await campaigns.reload()
 		savedMessage = 'Saved'
 		setTimeout(() => (savedMessage = ''), 2500)
@@ -348,8 +375,8 @@ onMount(() => {
 			<CardHeader>
 				<CardTitle>Glossary</CardTitle>
 				<CardDescription>
-					This campaign's terms, sent to the provider on top of the default word list rather than
-					instead of it.
+					The names and terms this campaign's sessions are transcribed with, in priority order. The
+					players above go in ahead of them.
 				</CardDescription>
 			</CardHeader>
 			<CardContent>
@@ -369,6 +396,73 @@ onMount(() => {
 				<div class="flex flex-col gap-2">
 					<Label for="campaign-notes">Notes</Label>
 					<Input id="campaign-notes" bind:value={notes} placeholder="Whose table, which system" />
+				</div>
+				<div class="flex flex-col gap-2">
+					<span class="text-sm font-medium">Players</span>
+					<!-- A plain list, filled in at the table in one sitting: a row per
+					     seat, both names optional, no dialog between the GM and typing
+					     the next one. The order is priority order, which is why the
+					     arrows are here and why it is said out loud below. -->
+					{#each cast as row, i (row)}
+						<div class="flex flex-wrap items-center gap-2">
+							<Input
+								class="min-w-32 flex-1"
+								bind:value={row.player}
+								placeholder="Player"
+								aria-label="Player {i + 1}"
+							/>
+							<Input
+								class="min-w-32 flex-1"
+								bind:value={row.character}
+								placeholder="Character"
+								aria-label="Character {i + 1}"
+							/>
+							<Button
+								variant="ghost"
+								size="icon-sm"
+								title="Move up"
+								aria-label="Move {row.character || row.player || 'this player'} up"
+								disabled={i === 0}
+								onclick={() => moveCast(i, i - 1)}
+							>
+								<ArrowUp />
+							</Button>
+							<Button
+								variant="ghost"
+								size="icon-sm"
+								title="Move down"
+								aria-label="Move {row.character || row.player || 'this player'} down"
+								disabled={i === cast.length - 1}
+								onclick={() => moveCast(i, i + 1)}
+							>
+								<ArrowDown />
+							</Button>
+							<Button
+								variant="ghost"
+								size="icon-sm"
+								title="Remove"
+								aria-label="Remove {row.character || row.player || 'this player'}"
+								onclick={() => cast.splice(i, 1)}
+							>
+								<Trash2 />
+							</Button>
+						</div>
+					{/each}
+					<div>
+						<Button
+							variant="outline"
+							size="sm"
+							onclick={() => cast.push({ player: '', character: '' })}
+						>
+							<Plus />
+							Add player
+						</Button>
+					</div>
+					<span class="text-xs text-muted-foreground">
+						Sent to the transcription ahead of every glossary term, and told to the model that
+						writes the recaps, so it knows which characters are played. Top of the list first: a
+						provider that only takes a hundred terms keeps the ones up here.
+					</span>
 				</div>
 				<div class="flex flex-col gap-2">
 					<Label for="campaign-recap-prompt">Recap prompt</Label>

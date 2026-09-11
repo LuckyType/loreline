@@ -363,7 +363,7 @@ async def test_start_applies_the_glossary_unless_switched_off(session_settings: 
 async def test_a_campaign_session_is_transcribed_with_its_terms(
     session_settings: Settings,
 ) -> None:
-    """The default list plus the session's own campaign's, in that order.
+    """The session's own campaign's terms, then the default list.
 
     The merge itself is ``GlossaryRepository.get_effective``'s; what this covers
     is that the campaign a session was *started in* is the one whose terms are
@@ -401,7 +401,10 @@ async def test_a_campaign_session_is_transcribed_with_its_terms(
             await ac.post("/api/session/stop")
 
             assert seen, "the backend was never asked to transcribe"
-            assert [getattr(g, "terms", None) for g in seen] == [["Aurora", "Strahd"]] * len(seen)
+            # The campaign's own term leads the always-on list now: the ceiling
+            # is spent from the head, and a term somebody put on this campaign
+            # is likelier to be in this audio than one on the global list.
+            assert [getattr(g, "terms", None) for g in seen] == [["Strahd", "Aurora"]] * len(seen)
 
 
 async def test_stop_without_session(session_client: AsyncClient) -> None:

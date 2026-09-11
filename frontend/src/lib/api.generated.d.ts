@@ -678,7 +678,7 @@ export interface paths {
         get: operations["get_campaign_api_campaigns__campaign_id__get"];
         /**
          * Update Campaign
-         * @description Rename a campaign, or change its notes or its recap prompt.
+         * @description Rename a campaign, or change its notes, its recap prompt or its cast.
          */
         put: operations["update_campaign_api_campaigns__campaign_id__put"];
         post?: never;
@@ -1705,6 +1705,11 @@ export interface components {
          *     ``recap_prompt`` overrides the built-in recap instructions for this
          *     campaign only - a table that plays in German, or one that wants its recaps
          *     in character, says so once here rather than in every dialog.
+         *
+         *     ``players`` is the cast at this table, in priority order. It is the one
+         *     thing about a campaign that both halves of the app want: the names go to
+         *     the STT ahead of every glossary term, and they tell an LLM which of the
+         *     characters in a transcript are played rather than run.
          */
         Campaign: {
             /** Id */
@@ -1723,6 +1728,8 @@ export interface components {
              * @default
              */
             recap_prompt?: string;
+            /** Players */
+            players?: components["schemas"]["CampaignPlayer"][];
         };
         /**
          * CampaignAssignment
@@ -1769,6 +1776,33 @@ export interface components {
             decisions?: components["schemas"]["MergedEntity"][];
         };
         /**
+         * CampaignPlayer
+         * @description One seat at the table: the person, and the character they play.
+         *
+         *     Both sides are optional and at least one has to be filled, because a GM
+         *     knows them at different moments: the character before the player has a
+         *     name for their fighter, the player when somebody is rolling for an absent
+         *     friend. What is refused is a row with neither, which is a blank line the
+         *     list would carry forever without ever biasing a recognizer or telling a
+         *     model anything.
+         *
+         *     The order of the rows is priority order, the same as a glossary's: the cast
+         *     goes into :meth:`GlossaryRepository.get_effective` ahead of every other
+         *     term, and a model's ceiling is spent from the head.
+         */
+        CampaignPlayer: {
+            /**
+             * Player
+             * @default
+             */
+            player?: string;
+            /**
+             * Character
+             * @default
+             */
+            character?: string;
+        };
+        /**
          * CampaignSummary
          * @description A campaign as the list page needs it: the row, plus what it holds.
          *
@@ -1808,6 +1842,8 @@ export interface components {
              * @default
              */
             recap_prompt?: string;
+            /** Players */
+            players?: components["schemas"]["CampaignPlayer"][];
         };
         /**
          * CapabilityConfig

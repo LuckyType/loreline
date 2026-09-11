@@ -220,6 +220,7 @@ async def summarize_transcript(
     transcript: str,
     system_prompt: str | None = None,
     instruction: str = "Summarize this session transcript:",
+    cast_line: str = "",
     reasoning_effort: str | None = None,
     client_factory: ClientFactory | None = None,
 ) -> str:
@@ -240,6 +241,14 @@ async def summarize_transcript(
     opens "Summarize this session transcript" while the system prompt asks for
     JSON is a contradiction the model has to resolve on its own.
 
+    ``cast_line`` is the one line naming the campaign's player characters (see
+    :func:`loreline.web.generation.describe_cast`), appended to whichever
+    instructions won rather than replacing them. Appended here and not by the
+    caller because the fallback above it is here: a route that joined the two
+    itself would have to restate "blank means the built-in prompt" to avoid
+    sending the cast line as the entire system prompt. Blank adds nothing, so a
+    campaign with no cast produces the request it always produced.
+
     ``reasoning_effort`` is sent only for a model that advertises support (the
     caller checks; see ModelInfo.supports_reasoning) and is dropped on retry if
     the endpoint rejects it anyway.
@@ -250,6 +259,8 @@ async def summarize_transcript(
     should all read as *why it failed*, not surface as an opaque 500.
     """
     instructions = (system_prompt or "").strip() or DEFAULT_SYSTEM_PROMPT
+    if cast_line.strip():
+        instructions = f"{instructions}\n\n{cast_line.strip()}"
     payload: dict[str, object] = {
         "model": model,
         "messages": [
@@ -373,6 +384,7 @@ async def extract_entities(
     api_key: str | None,
     model: str,
     transcript: str,
+    cast_line: str = "",
     reasoning_effort: str | None = None,
     client_factory: ClientFactory | None = None,
 ) -> SessionExtraction:
@@ -385,6 +397,10 @@ async def extract_entities(
     that produced nothing readable. Two attempts and no more: a model that
     cannot produce the schema twice is not going to on the third try, and the
     error names what it did instead.
+
+    ``cast_line`` is passed through to both attempts. This is the generation it
+    helps most: ``kind`` is ``pc`` or ``npc`` and nothing in a transcript says
+    which, so without it the model sorts the party by how much they talked.
     """
     attempt = await summarize_transcript(
         config=config,
@@ -393,6 +409,7 @@ async def extract_entities(
         transcript=transcript,
         system_prompt=EXTRACTION_PROMPT,
         instruction=_EXTRACTION_INSTRUCTION,
+        cast_line=cast_line,
         reasoning_effort=reasoning_effort,
         client_factory=client_factory,
     )
@@ -413,6 +430,7 @@ async def extract_entities(
             f"{_EXTRACTION_INSTRUCTION}\n\nYour previous answer could not be read: "
             f"{complaint}\nAnswer again with the JSON object alone."
         ),
+        cast_line=cast_line,
         reasoning_effort=reasoning_effort,
         client_factory=client_factory,
     )

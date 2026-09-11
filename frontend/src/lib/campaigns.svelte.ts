@@ -75,6 +75,22 @@ class CampaignStore {
 		return this.rows.find((row) => row.campaign.id === id)?.campaign.name ?? ''
 	}
 
+	/** The names at a campaign's table, characters before players, for a picker
+	 *  that would otherwise make somebody type them again. Empty for a session
+	 *  in no campaign, or one whose campaign has no cast. */
+	cast(id: string | null | undefined): string[] {
+		if (!id) return []
+		const row = this.rows.find((entry) => entry.campaign.id === id)
+		if (!row) return []
+		const names: string[] = []
+		for (const player of row.campaign.players) {
+			for (const name of [player.character, player.player]) {
+				if (name && !names.includes(name)) names.push(name)
+			}
+		}
+		return names
+	}
+
 	/** The rows as a Dropdown would take them, with the campaign-less choice
 	 *  first. Said once, because the capture card, the History filter and the
 	 *  session header's Change dialog all offer exactly this list. */

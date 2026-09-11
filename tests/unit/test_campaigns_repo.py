@@ -10,12 +10,14 @@ import aiosqlite
 import pytest
 import pytest_asyncio
 
+from loreline.capability_config import GlossarySupport
 from loreline.models import (
     DEFAULT_GLOSSARY_CAMPAIGN,
     DOCUMENT_PREVIOUSLY_ON,
     DOCUMENT_RECAP,
     Campaign,
     CampaignDocument,
+    CampaignPlayer,
     Glossary,
     Session,
     SessionDocument,
@@ -32,12 +34,16 @@ from loreline.persistence import (
     TranscriptRepository,
 )
 from loreline.persistence.database import FTS5_MARKER, MIGRATIONS
+from loreline.stt.base import capped_terms
 
-# The two migrations this module is about are the last two in the list, and
-# they are counted from the end on purpose: another migration landing in front
-# of them renumbers every index and would otherwise silently point these tests
-# at somebody else's script.
-_CAMPAIGNS_MIGRATIONS = 2
+# Where the campaign layer starts, found by what its script does rather than
+# counted from either end: migrations land at both ends of this list (the
+# campaign layer itself landed in front of the search one), and any count here
+# would silently point the upgrade test at somebody else's script the next time
+# one does.
+_BEFORE_CAMPAIGNS = next(
+    index for index, script in enumerate(MIGRATIONS) if "CREATE TABLE campaigns" in script
+)
 
 
 @pytest_asyncio.fixture
@@ -110,7 +116,7 @@ async def test_upgrading_backfills_the_search_index(tmp_path: Path) -> None:
     path = tmp_path / "upgrade.db"
     async with aiosqlite.connect(path) as conn:
         await conn.execute("CREATE TABLE schema_version (version INTEGER NOT NULL);")
-        for index, script in enumerate(MIGRATIONS[:-_CAMPAIGNS_MIGRATIONS], start=1):
+        for index, script in enumerate(MIGRATIONS[:_BEFORE_CAMPAIGNS], start=1):
             await conn.executescript(script)
             await conn.execute("INSERT INTO schema_version (version) VALUES (?);", (index,))
         await conn.execute(
@@ -412,3 +418,116 @@ async def test_a_replaced_turn_is_searched_as_its_final_text(db: Database) -> No
 
     assert [h.snippet for h in await SearchRepository(db).search("Vallaki")]
     assert await SearchRepository(db).search("Vall") == []
+
+
+# --- the cast at the table ------------------------------------------------
+
+
+async def test_a_campaign_stores_its_cast_in_order(db: Database) -> None:
+    """Created with it, updated with it, read back in the order it was given."""
+    campaigns = CampaignRepository(db)
+    campaign = _campaign().model_copy(
+        update={
+            "players": [
+                CampaignPlayer(player="Sara", character="Ireena"),
+                CampaignPlayer(character="Ismark"),
+                CampaignPlayer(player="Ben"),
+            ]
+        }
+    )
+    await campaigns.create(campaign)
+
+    reread = await campaigns.get(campaign.id)
+    assert reread is not None
+    assert [(p.player, p.character) for p in reread.players] == [
+        ("Sara", "Ireena"),
+        ("", "Ismark"),
+        ("Ben", ""),
+    ]
+
+    # Reordering is a save of the whole list, which is what makes the drag
+    # handles on the campaign page mean anything: order is priority.
+    flipped = list(reversed(reread.players))
+    await campaigns.update(reread.model_copy(update={"players": flipped}))
+    after = await campaigns.get(campaign.id)
+    assert after is not None
+    assert [p.character or p.player for p in after.players] == ["Ben", "Ismark", "Ireena"]
+
+    # And it survives the list query, which reads the same rows a different way.
+    listed = await campaigns.list()
+    assert [p.character or p.player for p in listed[0].campaign.players] == [
+        "Ben",
+        "Ismark",
+        "Ireena",
+    ]
+
+
+async def test_a_player_needs_a_name_on_one_side(db: Database) -> None:
+    with pytest.raises(ValueError, match="name the player"):
+        CampaignPlayer(player="  ", character="")
+    # Whitespace is trimmed on the way in, so " Sara " and "Sara" are one name.
+    assert CampaignPlayer(player=" Sara ").player == "Sara"
+
+
+async def test_an_unreadable_cast_is_no_cast_rather_than_an_error(db: Database) -> None:
+    """A body an older schema wrote must not be able to stop a capture starting.
+
+    ``get_effective`` runs while a session is being started, so the campaigns
+    row it reads is on the path that cannot fail: a column of nonsense means
+    this campaign has no cast, and the next save from the editor rewrites it.
+    """
+    campaigns = CampaignRepository(db)
+    campaign = _campaign()
+    await campaigns.create(campaign)
+    await db.connection.execute(
+        "UPDATE campaigns SET players = ? WHERE id = ?;",
+        ('[{"who": "Sara"}, "not an object", 7]', campaign.id),
+    )
+    await db.connection.commit()
+
+    reread = await campaigns.get(campaign.id)
+    assert reread is not None and reread.players == []
+    assert await GlossaryRepository(db).get_effective(campaign.id) is None
+
+
+async def test_the_cast_is_the_head_of_the_effective_glossary(db: Database) -> None:
+    """Cast, then the campaign's terms, then the default list.
+
+    Asserted through the ceiling rather than on the whole list, because the
+    ceiling is the only reason the order matters: ``capped_terms`` keeps the
+    head, so with room for three terms the three that survive have to be the
+    people at this table.
+    """
+    campaigns = CampaignRepository(db)
+    glossaries = GlossaryRepository(db)
+    campaign = _campaign().model_copy(
+        update={
+            "players": [
+                CampaignPlayer(player="Sara", character="Ireena"),
+                CampaignPlayer(player="Tom", character="Ismark"),
+            ]
+        }
+    )
+    await campaigns.create(campaign)
+    await glossaries.put(Glossary(campaign_id=campaign.id, terms=["Vallaki", "ireena"]))
+    await glossaries.put(
+        Glossary(campaign_id=DEFAULT_GLOSSARY_CAMPAIGN, terms=["Aurora", "Mistwood"])
+    )
+
+    effective = await glossaries.get_effective(campaign.id)
+    assert effective is not None
+    # Per row the character comes before the player: the character is the word
+    # that gets said out loud. "ireena" is dropped as a duplicate of "Ireena",
+    # and the higher-priority spelling is the one kept.
+    assert effective.terms == ["Ireena", "Sara", "Ismark", "Tom", "Vallaki", "Aurora", "Mistwood"]
+
+    support = GlossarySupport(supported=True, field="keyterm", max_terms=3, max_terms_realtime=3)
+    assert capped_terms(effective.terms, support, realtime=True) == ["Ireena", "Sara", "Ismark"]
+
+    # A campaign with no cast is the list it always was, campaign terms first.
+    bare = _campaign("Alpha Complex")
+    await campaigns.create(bare)
+    await glossaries.put(Glossary(campaign_id=bare.id, terms=["Friend Computer"]))
+    plain = await glossaries.get_effective(bare.id)
+    assert plain is not None
+    assert plain.terms == ["Friend Computer", "Aurora", "Mistwood"]

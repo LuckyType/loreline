@@ -1,12 +1,13 @@
 <script lang="ts">
 /**
- * One glossary, edited in a box: the always-on default list, or a campaign's.
+ * One glossary, edited in a box: a campaign's terms.
  *
- * The two are the same editor because they are the same thing at two scopes -
- * a list of names, one per line, sent to a provider to bias recognition - and
- * the campaign page would otherwise have been a second copy of the settings
- * page with a different fetch, which is exactly how the load gating below
- * stops being true in one of them.
+ * A glossary belongs to a campaign, and the campaign page is the only page
+ * that edits one. The other scope this component can read, the always-on
+ * `_default` list, is still served by the API and still merged into every
+ * session, and this is still the editor for it - there is just no page
+ * pointing at it any more, because a list of names with no campaign attached
+ * is a list nobody can say which table it is for.
  *
  * Saving is gated on a successful read. The box starts empty and saves on
  * blur, so one failed load (the app restarting for an update, say) followed by
@@ -31,8 +32,8 @@ let {
 	refreshToken = 0,
 	onsaved,
 }: {
-	/** The campaign whose list this is, or null for the always-on default one
-	 *  that every session gets. */
+	/** The campaign whose list this is. Null reads and writes the always-on
+	 *  `_default` list instead, which no page currently asks for. */
 	campaignId?: string | null
 	placeholder?: string
 	rows?: number

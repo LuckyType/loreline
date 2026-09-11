@@ -7,7 +7,6 @@ let { children }: { children: Snippet } = $props()
 const tabs = [
 	{ href: '/settings/client', label: 'Client' },
 	{ href: '/settings/providers', label: 'Providers' },
-	{ href: '/settings/glossary', label: 'Glossary' },
 	{ href: '/settings/alerts', label: 'Alerting' },
 	{ href: '/settings/services', label: 'Services' },
 ]
@@ -18,9 +17,12 @@ const tabs = [
      it on purpose. The tab strip therefore starts at the page padding, which is
      where every settings page's first card would sit anyway.
 
-     Five tabs are wider than a phone, so below sm the strip scrolls sideways,
+     The strip can still be wider than a phone, so below sm it scrolls sideways,
      snapping a tab to the left edge, with the scrollbar hidden: the cut-off
-     last tab is the cue that there is more. From sm up nothing changes. -->
+     last tab is the cue that there is more. From sm up nothing changes.
+
+     There is no Glossary tab: a glossary belongs to a campaign now, and it is
+     edited on the campaign it belongs to. -->
 <nav
 	class="mb-6 flex gap-1 overflow-x-auto border-b [scrollbar-width:none] sm:overflow-x-visible snap-x [&::-webkit-scrollbar]:hidden"
 >

@@ -150,6 +150,8 @@ export type ReprocessRequest = Schemas['ReprocessRequest']
 // --- campaigns --------------------------------------------------------------
 
 export type Campaign = Complete<Schemas['Campaign']>
+/** One seat at a campaign's table: the person, and the character they play. */
+export type CampaignPlayer = Complete<Schemas['CampaignPlayer']>
 export type CampaignSummary = Complete<Schemas['CampaignSummary']>
 export type CampaignWrite = Schemas['CampaignWrite']
 /** One generated text about a session: a recap or an extraction. */

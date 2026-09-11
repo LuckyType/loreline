@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_va
 
 from loreline.models import (
     ORIGINAL_VERSION,
+    CampaignPlayer,
     DiarizationConfig,
     OpenRouterRouting,
     ProviderKind,
@@ -385,6 +386,10 @@ class CampaignWrite(BaseModel):
     name: str = Field(min_length=1)
     notes: str = ""
     recap_prompt: str = ""
+    # The cast, in priority order, sent whole: the editor is a list, the order
+    # is what the glossary reads, and a PUT that patched rows one at a time
+    # could not express a reorder at all.
+    players: list[CampaignPlayer] = Field(default_factory=list[CampaignPlayer])
 
     @field_validator("name")
     @classmethod
