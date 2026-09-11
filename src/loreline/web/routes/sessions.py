@@ -64,7 +64,7 @@ from loreline.session.importing import (
 )
 from loreline.web.auth import require_auth
 from loreline.web.deps import get_manager, get_state, load_action_defaults
-from loreline.web.generation import llm_target, recap_prompt
+from loreline.web.generation import cast_note, llm_target, recap_prompt
 from loreline.web.routes.audio import INPUT_DEVICE_KEY, parse_device
 from loreline.web.schemas import (
     CampaignAssignment,
@@ -517,6 +517,9 @@ async def summarize_session(
             # model decides for itself.
             reasoning_effort=body.reasoning_effort or defaults.summarize_reasoning_effort or None,
             system_prompt=defaults.summarize_prompt or None,
+            # Who is at this table, when the session is in a campaign that says
+            # so. Blank otherwise, and blank changes nothing about the request.
+            cast_line=await cast_note(state, session.campaign_id),
         )
     except LLMError as exc:
         raise HTTPException(status_code=HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
@@ -580,6 +583,7 @@ async def write_session_recap(
             transcript=to_txt(session, events),
             system_prompt=await recap_prompt(state, session.campaign_id),
             instruction="Write the recap of this session, from its transcript:",
+            cast_line=await cast_note(state, session.campaign_id),
             reasoning_effort=body.reasoning_effort or defaults.summarize_reasoning_effort or None,
         )
     except LLMError as exc:
@@ -609,6 +613,9 @@ async def extract_session_entities(
             api_key=api_key,
             model=body.model,
             transcript=to_txt(session, events),
+            # The generation this helps most: without it the pc/npc split is a
+            # guess from how much each name was said.
+            cast_line=await cast_note(state, session.campaign_id),
             reasoning_effort=body.reasoning_effort or defaults.summarize_reasoning_effort or None,
         )
     except LLMError as exc:

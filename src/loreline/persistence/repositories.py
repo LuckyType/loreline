@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import aiosqlite
 
@@ -16,6 +16,7 @@ from loreline.models import (
     REPROCESS_SOURCE_PREFIX,
     Campaign,
     CampaignDocument,
+    CampaignPlayer,
     CampaignSummary,
     DiarizationConfig,
     Glossary,
@@ -114,19 +115,74 @@ class GlossaryRepository:
         await self._db.connection.commit()
 
     async def get_effective(self, campaign_id: str | None) -> Glossary | None:
-        """Default word list merged with a campaign's terms; None if both empty.
+        """Everything this session's provider should be biased towards, in priority order.
 
-        The always-on ``_default`` list applies to every session; a campaign's own
-        terms are appended (deduped) when a campaign id is given.
+        Three lists, narrowest first: the campaign's cast, then the campaign's
+        own terms, then the always-on ``_default`` list. Order is the whole
+        point. A model's ceiling is spent from the head (``capped_terms`` in
+        ``stt/base.py`` trims the tail), so first in the list is what survives
+        a 100-term streaming limit, and the names that must not come back
+        misspelled are the ones said every five minutes at this table.
+
+        The cast is first because it is the most specific thing the app knows:
+        a GM typed those names for this campaign, they recur in every session
+        of it, and a character's name is exactly the word a recognizer has no
+        prior for. Per row the character comes before the player, since the
+        character is what gets said out loud.
+
+        The campaign's terms ahead of ``_default`` is the same argument one
+        level down, and it is a change from the old order: the default list
+        used to win the ceiling. A term somebody put on *this* campaign is
+        more likely to be in *this* audio than one on a global list shared
+        with every other table.
+
+        Deduplicated case-insensitively, because "Strahd" and "strahd" bias a
+        recognizer identically and two of them only spend the ceiling twice.
+        The spelling kept is the first one seen, which is the highest-priority
+        one. None when there is nothing to send at all.
         """
-        terms: list[str] = list((await self.get(DEFAULT_GLOSSARY_CAMPAIGN)).terms)
+        terms: list[str] = []
+        seen: set[str] = set()
+
+        def add(raw: str) -> None:
+            term = raw.strip()
+            if term and term.casefold() not in seen:
+                seen.add(term.casefold())
+                terms.append(term)
+
         if campaign_id and campaign_id != DEFAULT_GLOSSARY_CAMPAIGN:
+            for player in await self._cast(campaign_id):
+                add(player.character)
+                add(player.player)
             for term in (await self.get(campaign_id)).terms:
-                if term not in terms:
-                    terms.append(term)
+                add(term)
+        for term in (await self.get(DEFAULT_GLOSSARY_CAMPAIGN)).terms:
+            add(term)
         if not terms:
             return None
         return Glossary(campaign_id=campaign_id or DEFAULT_GLOSSARY_CAMPAIGN, terms=terms)
+
+    async def _cast(self, campaign_id: str) -> list[CampaignPlayer]:
+        """The campaign's players, or nothing.
+
+        Read straight off the ``campaigns`` row rather than through
+        ``CampaignRepository``, so the two callers of ``get_effective`` (the
+        session manager and the re-process worker) keep holding exactly the
+        one repository they hold today. Nothing here is answered, only the
+        cast column is read.
+
+        A ``campaign_id`` no campaign answers to is a legacy free string that
+        predates the campaign table, and a body that no longer parses is one a
+        schema change left behind. Both mean "no cast", not "fail the capture":
+        this runs while a session is starting.
+        """
+        async with self._db.connection.execute(
+            "SELECT players FROM campaigns WHERE id = ?;", (campaign_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        if row is None:
+            return []
+        return _decode_players(row["players"])
 
 
 class SessionRepository:
@@ -674,8 +730,8 @@ class CampaignRepository:
     async def create(self, campaign: Campaign) -> None:
         await self._db.connection.execute(
             """
-            INSERT INTO campaigns (id, name, created_at, notes, recap_prompt)
-            VALUES (?, ?, ?, ?, ?);
+            INSERT INTO campaigns (id, name, created_at, notes, recap_prompt, players)
+            VALUES (?, ?, ?, ?, ?, ?);
             """,
             (
                 campaign.id,
@@ -683,6 +739,7 @@ class CampaignRepository:
                 campaign.created_at,
                 campaign.notes,
                 campaign.recap_prompt,
+                _encode_players(campaign.players),
             ),
         )
         await self._db.connection.commit()
@@ -737,8 +794,14 @@ class CampaignRepository:
 
     async def update(self, campaign: Campaign) -> None:
         await self._db.connection.execute(
-            "UPDATE campaigns SET name = ?, notes = ?, recap_prompt = ? WHERE id = ?;",
-            (campaign.name, campaign.notes, campaign.recap_prompt, campaign.id),
+            "UPDATE campaigns SET name = ?, notes = ?, recap_prompt = ?, players = ? WHERE id = ?;",
+            (
+                campaign.name,
+                campaign.notes,
+                campaign.recap_prompt,
+                _encode_players(campaign.players),
+                campaign.id,
+            ),
         )
         await self._db.connection.commit()
 
@@ -1071,7 +1134,38 @@ def _row_to_campaign(row: aiosqlite.Row) -> Campaign:
         created_at=row["created_at"],
         notes=row["notes"],
         recap_prompt=row["recap_prompt"],
+        players=_decode_players(row["players"]),
     )
+
+
+def _encode_players(players: list[CampaignPlayer]) -> str:
+    return json.dumps([player.model_dump() for player in players])
+
+
+def _decode_players(raw: str | None) -> list[CampaignPlayer]:
+    """The stored cast, or nothing at all.
+
+    Lenient on the way in and strict on the way out is the wrong trade for a
+    column that is read while a capture is starting: a body written by an
+    older schema, or a row where a player and a character both ended up blank,
+    means "this campaign has no cast I can read" and never means "refuse to
+    record". The editor rewrites the list the next time somebody saves it.
+    """
+    if not raw:
+        return []
+    try:
+        entries: object = json.loads(raw)
+    except ValueError:
+        return []
+    if not isinstance(entries, list):
+        return []
+    players: list[CampaignPlayer] = []
+    for entry in cast("list[object]", entries):
+        try:
+            players.append(CampaignPlayer.model_validate(entry))
+        except ValueError:
+            continue
+    return players
 
 
 def _row_to_session_document(row: aiosqlite.Row) -> SessionDocument:

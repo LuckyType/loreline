@@ -171,6 +171,124 @@ async def test_glossary_add_appends_and_deduplicates(client: AsyncClient) -> Non
     assert resp.json()["terms"] == ["Strahd", "Ireena", "Vallaki"]
 
 
+# --- the cast at the table ------------------------------------------------
+
+
+async def test_the_cast_rides_along_with_the_campaign(client: AsyncClient) -> None:
+    """Created, read back, reordered and cleared through the same PUT."""
+    campaign_id = await _campaign(client, "Barovia")
+
+    updated = await client.put(
+        f"/api/campaigns/{campaign_id}",
+        json={
+            "name": "Barovia",
+            "players": [
+                {"player": " Sara ", "character": "Ireena"},
+                {"character": "Ismark"},
+                {"player": "Ben"},
+            ],
+        },
+    )
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["players"] == [
+        {"player": "Sara", "character": "Ireena"},  # trimmed on the way in
+        {"player": "", "character": "Ismark"},
+        {"player": "Ben", "character": ""},
+    ]
+
+    # The list page carries it too, so a picker never has to fetch the row.
+    listed = (await client.get("/api/campaigns")).json()
+    assert listed[0]["campaign"]["players"][0]["character"] == "Ireena"
+
+    cleared = await client.put(
+        f"/api/campaigns/{campaign_id}", json={"name": "Barovia", "players": []}
+    )
+    assert cleared.json()["players"] == []
+
+
+async def test_a_player_row_with_no_name_at_all_is_refused(client: AsyncClient) -> None:
+    """A blank row is a line the list would carry forever without saying anything."""
+    campaign_id = await _campaign(client)
+    resp = await client.put(
+        f"/api/campaigns/{campaign_id}",
+        json={"name": "Curse of Strahd", "players": [{"player": "  ", "character": ""}]},
+    )
+    assert resp.status_code == 422
+
+
+async def test_the_cast_reaches_every_generation(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Summary, recap, extraction and "previously on" all carry the same line.
+
+    They are four routes with four prompts, and the one fact none of them can
+    read out of a transcript is which of the names in it belong to the people
+    in the room.
+    """
+    seen: list[str] = []
+
+    async def fake_summarize(**kwargs: object) -> str:
+        seen.append(str(kwargs.get("cast_line", "")))
+        return "text"
+
+    campaign_id = await _campaign(client)
+    await client.put(
+        f"/api/campaigns/{campaign_id}",
+        json={
+            "name": "Curse of Strahd",
+            "players": [{"player": "Sara", "character": "Ireena"}],
+        },
+    )
+    sid = await _session_with_transcript(client, campaign_id)
+    llm = await _llm_provider(client)
+    body = {"provider_id": llm, "model": "gpt-5.6-luna"}
+
+    monkeypatch.setattr(sessions_route, "summarize_transcript", fake_summarize)
+    await client.post(f"/api/session/{sid}/summarize", json=body)
+    await client.post(f"/api/session/{sid}/recap", json=body)
+    assert len(seen) == 2
+    assert all("Ireena (played by Sara)" in line for line in seen)
+
+    # The extraction goes through loreline.llm.extract_entities, which passes
+    # the line to both of its attempts. It is the generation that gains most:
+    # it has to sort every character into pc or npc.
+    async def fake_extract(**kwargs: object) -> str:
+        seen.append(str(kwargs.get("cast_line", "")))
+        return json.dumps(_EXTRACTION)
+
+    monkeypatch.setattr("loreline.llm.summarize_transcript", fake_extract)
+    await client.post(f"/api/session/{sid}/extract", json=body)
+    assert "Ireena (played by Sara)" in seen[-1]
+
+    monkeypatch.setattr(campaigns_route, "summarize_transcript", fake_summarize)
+    await client.post(f"/api/campaigns/{campaign_id}/previously-on", json=body)
+    assert "Ireena (played by Sara)" in seen[-1]
+
+
+async def test_no_campaign_and_no_cast_send_no_line(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nothing changes for a GM who never opens this setting."""
+    seen: list[str] = []
+
+    async def fake_summarize(**kwargs: object) -> str:
+        seen.append(str(kwargs.get("cast_line", "missing")))
+        return "text"
+
+    monkeypatch.setattr(sessions_route, "summarize_transcript", fake_summarize)
+    llm = await _llm_provider(client)
+    body = {"provider_id": llm, "model": "gpt-5.6-luna"}
+
+    loose = await _session_with_transcript(client)
+    await client.post(f"/api/session/{loose}/recap", json=body)
+
+    campaign_id = await _campaign(client)
+    in_campaign = await _session_with_transcript(client, campaign_id)
+    await client.post(f"/api/session/{in_campaign}/recap", json=body)
+
+    assert seen == ["", ""]
+
+
 # --- search --------------------------------------------------------------
 
 

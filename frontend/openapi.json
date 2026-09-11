@@ -1553,7 +1553,7 @@
           "campaigns"
         ],
         "summary": "Update Campaign",
-        "description": "Rename a campaign, or change its notes or its recap prompt.",
+        "description": "Rename a campaign, or change its notes, its recap prompt or its cast.",
         "operationId": "update_campaign_api_campaigns__campaign_id__put",
         "security": [
           {
@@ -3798,6 +3798,13 @@
             "type": "string",
             "title": "Recap Prompt",
             "default": ""
+          },
+          "players": {
+            "items": {
+              "$ref": "#/components/schemas/CampaignPlayer"
+            },
+            "type": "array",
+            "title": "Players"
           }
         },
         "type": "object",
@@ -3807,7 +3814,7 @@
           "created_at"
         ],
         "title": "Campaign",
-        "description": "A campaign: the thing a session belongs to, and what collects its memory.\n\nSessions have carried a ``campaign_id`` since the first schema, but nothing\nlisted the campaigns, so the id was a string a GM could only set by hand\nand the app could only print back. A campaign is a row now: it has a name\nsomebody chose, it owns a glossary (the ``glossaries`` table is keyed by\nthe same id), and it is where a recap, an extraction and a \"previously on\"\naccumulate into something worth reading a year later.\n\n``recap_prompt`` overrides the built-in recap instructions for this\ncampaign only - a table that plays in German, or one that wants its recaps\nin character, says so once here rather than in every dialog."
+        "description": "A campaign: the thing a session belongs to, and what collects its memory.\n\nSessions have carried a ``campaign_id`` since the first schema, but nothing\nlisted the campaigns, so the id was a string a GM could only set by hand\nand the app could only print back. A campaign is a row now: it has a name\nsomebody chose, it owns a glossary (the ``glossaries`` table is keyed by\nthe same id), and it is where a recap, an extraction and a \"previously on\"\naccumulate into something worth reading a year later.\n\n``recap_prompt`` overrides the built-in recap instructions for this\ncampaign only - a table that plays in German, or one that wants its recaps\nin character, says so once here rather than in every dialog.\n\n``players`` is the cast at this table, in priority order. It is the one\nthing about a campaign that both halves of the app want: the names go to\nthe STT ahead of every glossary term, and they tell an LLM which of the\ncharacters in a transcript are played rather than run."
       },
       "CampaignAssignment": {
         "properties": {
@@ -3927,6 +3934,23 @@
         "title": "CampaignEntities",
         "description": "Every session's extraction in a campaign, merged by name."
       },
+      "CampaignPlayer": {
+        "properties": {
+          "player": {
+            "type": "string",
+            "title": "Player",
+            "default": ""
+          },
+          "character": {
+            "type": "string",
+            "title": "Character",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "CampaignPlayer",
+        "description": "One seat at the table: the person, and the character they play.\n\nBoth sides are optional and at least one has to be filled, because a GM\nknows them at different moments: the character before the player has a\nname for their fighter, the player when somebody is rolling for an absent\nfriend. What is refused is a row with neither, which is a blank line the\nlist would carry forever without ever biasing a recognizer or telling a\nmodel anything.\n\nThe order of the rows is priority order, the same as a glossary's: the cast\ngoes into :meth:`GlossaryRepository.get_effective` ahead of every other\nterm, and a model's ceiling is spent from the head."
+      },
       "CampaignSummary": {
         "properties": {
           "campaign": {
@@ -3972,6 +3996,13 @@
             "type": "string",
             "title": "Recap Prompt",
             "default": ""
+          },
+          "players": {
+            "items": {
+              "$ref": "#/components/schemas/CampaignPlayer"
+            },
+            "type": "array",
+            "title": "Players"
           }
         },
         "type": "object",

@@ -74,7 +74,10 @@ async def test_glossary_get_effective_merges_default_and_campaign(db: Database) 
 
     effective = await repo.get_effective("camp1")
     assert effective is not None
-    assert effective.terms == ["Aurora", "Mistwood", "Drizzt"]  # default first, campaign deduped
+    # The campaign's own terms first, then the default list, deduped: the
+    # ceiling is spent from the head, and a term on this campaign is likelier
+    # to be in this audio than one on the list every table shares.
+    assert effective.terms == ["Drizzt", "Mistwood", "Aurora"]
 
     default_only = await repo.get_effective(None)
     assert default_only is not None

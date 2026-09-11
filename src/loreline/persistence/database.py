@@ -471,6 +471,22 @@ MIGRATIONS: list[str] = [
     """,
     # v24 - full-text search over the transcript (see FTS5_MIGRATION below).
     FTS5_MIGRATION,
+    # v26 - the cast at a campaign's table: who plays, and what they play.
+    #
+    # A JSON list on the campaign rather than a table of its own, for the same
+    # reason the glossary is one: it is read whole, written whole, and ordered,
+    # and the order is the point - the cast is the head of the glossary a
+    # session sends (see GlossaryRepository.get_effective), and a model's
+    # ceiling is spent from the head. Rows of five names each do not need a
+    # join, and a sortable child table would need a position column that the
+    # list gives for free.
+    #
+    # Every existing campaign gets an empty cast, which is what the default
+    # says, and an empty cast changes nothing anywhere: no glossary terms, no
+    # extra line in any prompt.
+    """
+    ALTER TABLE campaigns ADD COLUMN players TEXT NOT NULL DEFAULT '[]';
+    """,
 ]
 
 
