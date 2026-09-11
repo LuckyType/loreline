@@ -12,6 +12,11 @@ backed implementation. Silero (ONNX) is an optional native dependency from the
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from loreline.audio.chunker import SpeechDetector
+
 _SR_16K = 16000
 _WINDOW_16K = 512
 _WINDOW_8K = 256
@@ -56,3 +61,21 @@ class SileroVad:
             prob = float(self._model(tensor, self._sample_rate).item())
             self._last = prob >= self._threshold
         return self._last
+
+
+def default_detector(sample_rate: int) -> SpeechDetector:
+    """The detector every VAD pass in this app runs on, built for one rate.
+
+    One factory rather than a `SileroVad(...)` per caller, because "the same
+    VAD the live path uses" is a promise three places make and have to keep
+    together: the live capture, the startup sweep that rebuilds an orphaned
+    utterance index, and an import, whose index is built by that same sweep
+    code over a recording nobody captured here. A rebuilt index only lines up
+    with what an unbroken session would have stored if the detector is the
+    same one.
+
+    Constructing it is what loads the optional `audio` extra (numpy, torch,
+    onnxruntime), so it is slow and raises where that extra is absent; calling
+    it belongs off the event loop.
+    """
+    return SileroVad(sample_rate=sample_rate).is_speech
