@@ -48,9 +48,12 @@ WORKDIR /app
 # libpulse0: PortAudio's PulseAudio host API, for PipeWire-routed sources
 # (Bluetooth) - see the base-image note above.
 # ca-certificates: outbound HTTPS to the cloud STT/LLM providers.
+# ffmpeg: decodes an imported recording (m4a, mp3, ogg, opus, webm, flac) into
+# the 16 kHz mono WAV a capture produces. A PCM WAV import needs no ffmpeg;
+# everything a phone actually records does.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        ca-certificates libportaudio2 libgomp1 libpulse0 \
+        ca-certificates libportaudio2 libgomp1 libpulse0 ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 # Install dependencies first (cached layer). audio + providers match what a

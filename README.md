@@ -79,6 +79,16 @@ each model offers. The job runs in the background and the finished file is
 stored with the session and plays in the UI. Settings holds the default provider
 and model.
 
+**Import.** A recording you already have - a phone memo, a handheld recorder's
+card, a Discord rip - is uploaded and stored as a session that is
+indistinguishable from a captured one: m4a, mp3, ogg, opus, webm, flac or wav
+in, and everything above works on it unchanged. The upload can start its first
+transcription in the same request, or you can decide the model later. This is
+what lets you use Loreline on a laptop with no box and no microphone. Decoding
+anything but a 16-bit PCM WAV needs `ffmpeg` on the server;
+`LORELINE_IMPORT_MAX_MB` and `LORELINE_IMPORT_MAX_HOURS` cap what one upload
+may cost.
+
 **Exports.** txt, md, srt, vtt, json.
 
 **Web UI.** A SvelteKit SPA served by FastAPI: live transcript, session history,
@@ -402,7 +412,8 @@ bash deploy/install-source.sh
 `APP_DIR` defaults to `/opt/loreline` and `SERVICE_USER` to `loreline`; both are
 overridable through environment variables. The script creates the system user in
 the `audio` group, installs `libportaudio2` and `libgomp1` for the `audio`
-extra plus `nodejs` and `npm`, runs `uv sync --extra audio --extra providers`,
+extra, `ffmpeg` for importing recordings, plus `nodejs` and `npm`, runs
+`uv sync --extra audio --extra providers`,
 builds the SvelteKit UI into `frontend/build`, and installs the systemd unit and
 `deploy/sudoers.d/loreline`. Without that frontend build the app serves nothing
 at `/`. The sudoers rule grants the service user passwordless `systemctl` for
