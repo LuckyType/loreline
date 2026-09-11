@@ -140,3 +140,37 @@ service under the `session_id` every call carries, so a label means the same per
 first utterance and the hundredth. Without it each call clusters alone and calls whoever
 spoke "Speaker 0". Dropped when the diarizer closes, and on an idle TTL besides. See
 `docs/adr/0007`.
+
+## Campaign memory
+
+**Campaign**: What a session belongs to, and where the value of its transcript
+collects: its sessions in order, its glossary, its search, and the documents below.
+A row since the campaign layer landed; before that a free string on the session that
+nothing could resolve. Deleting one unassigns its sessions and never deletes them.
+See `docs/adr/0009`.
+
+**Document**: One generated text about a session (`recap`, `extraction`) or about a
+campaign (`previously_on`), with the provider, the model and, for a session, the
+transcript version behind it. One row per subject and kind, so writing one replaces
+the last. The summary still lives in its own columns on the session; folding it in
+here is a noted follow-up.
+_Avoid_: artifact, generation (the video jobs are the other thing called that)
+
+**Recap**: The player-facing account of one session, past tense, in the transcript's
+language, for people who were at the table. Not a **summary**, which is the GM's index
+of what happened: the two are separate texts because they are for separate readers.
+Its instructions are the campaign's, else the stored default, else the built-in.
+
+**Extraction**: The structured names one session used - characters, places, items,
+factions, quests, decisions - asked for as JSON and read leniently, retried once when
+the answer cannot be parsed. `GET /api/campaigns/{id}/entities` merges every session's
+by normalised name, newest notes winning, which is what makes the campaign's cast
+readable in one list.
+
+**Previously on**: The short text that opens the next session, written from the last
+few sessions' recaps and falling back per session to their summaries.
+
+**Search**: FTS5 over the transcript rows, external content so the rows stay the
+single source, ranked by `bm25` with `snippet()` marking the hits. A build with no
+FTS5 answers the same question with `LIKE`, newest first and unranked, and the answer
+says which ran.
