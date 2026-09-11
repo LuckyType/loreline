@@ -18,7 +18,7 @@ from httpx import ASGITransport, AsyncClient
 import loreline.updater.updater as updater_module
 import loreline.web.routes.system as system_route
 from loreline.health import HealthReport, HealthStatus
-from loreline.llm import DEFAULT_RECAP_PROMPT, DEFAULT_SYSTEM_PROMPT
+from loreline.llm import DEFAULT_RECAP_PROMPT, DEFAULT_SCENE_PROMPT, DEFAULT_SYSTEM_PROMPT
 from loreline.settings import Settings
 from loreline.updater.process import CommandResult
 from loreline.web.app import create_app
@@ -325,6 +325,12 @@ async def test_action_defaults_roundtrip(client: AsyncClient) -> None:
         # Same rule for the recap instructions, which are a different text for
         # a different reader (see docs/adr/0009).
         "recap_prompt": DEFAULT_RECAP_PROMPT,
+        # And for the instructions that condense a recap into one shot a video
+        # model can render.
+        "scene_prompt": DEFAULT_SCENE_PROMPT,
+        # The look, though, has no built-in text: blank means nobody has said
+        # what their videos should look like, which is a real answer.
+        "video_style": "",
         "video_provider": "",
         "video_model": "",
         "summarize_reasoning_effort": "",
@@ -374,6 +380,32 @@ async def test_summarize_prompt_default_tracking_and_reset(client: AsyncClient) 
     assert (await client.get("/api/system/defaults")).json()["summarize_prompt"] == (
         DEFAULT_SYSTEM_PROMPT
     )
+
+
+async def test_scene_prompt_and_video_style_roundtrip(client: AsyncClient) -> None:
+    """The scene prompt follows the same blank-means-built-in rule as the other
+    two, and the video style, which has no built-in text, round-trips as typed."""
+    saved = await client.put(
+        "/api/system/defaults",
+        json={"scene_prompt": "Nur ein Bild.", "video_style": "90s anime cel animation"},
+    )
+    assert saved.json()["scene_prompt"] == "Nur ein Bild."
+    assert saved.json()["video_style"] == "90s anime cel animation"
+    fetched = (await client.get("/api/system/defaults")).json()
+    assert fetched["scene_prompt"] == "Nur ein Bild."
+    assert fetched["video_style"] == "90s anime cel animation"
+
+    # Clearing the prompt resets it to the built-in text; clearing the style
+    # simply means no style, and stays cleared.
+    reset = await client.put("/api/system/defaults", json={"scene_prompt": "", "video_style": ""})
+    assert reset.json()["scene_prompt"] == DEFAULT_SCENE_PROMPT
+    assert reset.json()["video_style"] == ""
+    assert (await client.get("/api/system/defaults")).json()["video_style"] == ""
+
+    # Saving the served default verbatim stores blank, so the field keeps
+    # tracking later improvements to the built-in text.
+    await client.put("/api/system/defaults", json={"scene_prompt": DEFAULT_SCENE_PROMPT})
+    assert (await client.get("/api/system/defaults")).json()["scene_prompt"] == DEFAULT_SCENE_PROMPT
 
 
 async def test_alert_channels_crud_and_test(

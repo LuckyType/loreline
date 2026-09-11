@@ -1,4 +1,4 @@
-"""Video-generation routes: model catalog, enqueue, status, playback.
+"""Video-generation routes: model catalog, scene conversion, enqueue, status, playback.
 
 The generation itself is asynchronous (minutes), so ``POST /api/video`` returns
 a 202 with the job row and the client polls ``GET /api/video?session_id=…``.
@@ -10,8 +10,14 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Request
 from fastapi.exceptions import HTTPException
 from fastapi.responses import FileResponse
-from starlette.status import HTTP_400_BAD_REQUEST, HTTP_404_NOT_FOUND, HTTP_409_CONFLICT
+from starlette.status import (
+    HTTP_400_BAD_REQUEST,
+    HTTP_404_NOT_FOUND,
+    HTTP_409_CONFLICT,
+    HTTP_502_BAD_GATEWAY,
+)
 
+from loreline.llm import LLMError, summarize_transcript
 from loreline.models import JobStatus, VideoJob, VideoModelInfo
 from loreline.video import (
     EmptyPromptError,
@@ -21,8 +27,9 @@ from loreline.video import (
     supports_video,
 )
 from loreline.web.auth import require_auth
-from loreline.web.deps import get_state
-from loreline.web.schemas import OkResponse, VideoGenerateRequest
+from loreline.web.deps import get_state, load_action_defaults
+from loreline.web.generation import llm_target, scene_prompt
+from loreline.web.schemas import OkResponse, SceneRequest, SceneResult, VideoGenerateRequest
 
 router = APIRouter(prefix="/api/video", tags=["video"], dependencies=[Depends(require_auth)])
 
@@ -59,6 +66,40 @@ async def enqueue_video(request: Request, body: VideoGenerateRequest) -> VideoJo
         raise HTTPException(status_code=HTTP_409_CONFLICT, detail=str(exc)) from exc
     except EmptyPromptError as exc:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.post("/scene")
+async def write_video_scene(request: Request, body: SceneRequest) -> SceneResult:
+    """Condense a recap into the single scene a video model can render.
+
+    The dialog seeds its prompt from the session summary, which is a chapter: a
+    video model renders a few seconds of one shot and has no use for the other
+    twenty minutes. Rewriting it by hand was the only way out, and the dialog's
+    own warning said as much without offering anything.
+
+    Foreground, unlike the generation it feeds: it is one short completion, and
+    the answer has to land in the box where it can be read and edited before
+    any money is spent on a video. So it returns the scene rather than a job.
+    """
+    text = body.text.strip()
+    if not text:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="there is no text to convert")
+    state = get_state(request)
+    provider, api_key = await llm_target(state, body.provider_id)
+    defaults = await load_action_defaults(state)
+    try:
+        scene = await summarize_transcript(
+            config=provider,
+            api_key=api_key,
+            model=body.model,
+            transcript=text,
+            system_prompt=await scene_prompt(state, body.style),
+            instruction="Turn this session recap into one scene:",
+            reasoning_effort=body.reasoning_effort or defaults.summarize_reasoning_effort or None,
+        )
+    except LLMError as exc:
+        raise HTTPException(status_code=HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+    return SceneResult(scene=scene.strip(), model=body.model)
 
 
 @router.get("")

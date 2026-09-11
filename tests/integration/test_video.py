@@ -22,8 +22,10 @@ from httpx import ASGITransport, AsyncClient
 from test_catalog_reader import VIDEO_BODY
 from test_web_session import FakeBackend, capture_factory, fake_diarizers
 
+import loreline.web.routes.video as video_route
 from loreline import capabilities
 from loreline.capability_config import CapabilityConfig
+from loreline.llm import DEFAULT_SCENE_PROMPT, LLMError
 from loreline.models import (
     Interaction,
     JobStatus,
@@ -961,6 +963,56 @@ class TestVideoRoutes:
         )
         assert resp.status_code == 400
 
+    async def test_a_converted_prompt_records_the_model_and_what_it_read(
+        self, client: AsyncClient
+    ) -> None:
+        """The scene is saved with the video: which model wrote it, and the
+        recap it was condensed from. A hand-written prompt carries neither, and
+        that absence is the signal - see VideoGenerateRequest."""
+        session_id, provider_id = await self._setup(client)
+        job = (
+            await client.post(
+                "/api/video",
+                json={
+                    "session_id": session_id,
+                    "provider_id": provider_id,
+                    "model": "m",
+                    "prompt": "A lone rider on a burning bridge.",
+                    "scene_model": "gpt-5.6-luna",
+                    "scene_source": "The party did a lot, at length.",
+                    "duration": 4,
+                },
+            )
+        ).json()
+        assert job["scene_model"] == "gpt-5.6-luna"
+        assert job["scene_source"] == "The party did a lot, at length."
+
+        await _ctx(client).video.wait(job["id"])
+        # Read back out of SQLite, not out of the enqueue response.
+        listed = (await client.get("/api/video", params={"session_id": session_id})).json()
+        assert listed[0]["scene_model"] == "gpt-5.6-luna"
+        assert listed[0]["scene_source"] == "The party did a lot, at length."
+
+    async def test_a_hand_written_prompt_records_no_scene(self, client: AsyncClient) -> None:
+        """Blank and absent are the same answer, so a client that always sends
+        the fields cannot invent a conversion that never happened."""
+        session_id, provider_id = await self._setup(client)
+        job = (
+            await client.post(
+                "/api/video",
+                json={
+                    "session_id": session_id,
+                    "provider_id": provider_id,
+                    "model": "m",
+                    "prompt": "a wizard",
+                    "scene_model": "  ",
+                    "scene_source": "",
+                },
+            )
+        ).json()
+        assert job["scene_model"] is None
+        assert job["scene_source"] is None
+
     async def test_delete_removes_the_job_and_its_file(self, client: AsyncClient) -> None:
         session_id, provider_id = await self._setup(client)
         job = (
@@ -1010,6 +1062,142 @@ class TestVideoRoutes:
         assert deleted.status_code == 200
         assert not state.video_store.exists(job["id"])
         assert await state.video_jobs.get(job["id"]) is None
+
+
+class TestSceneRoute:
+    """``POST /api/video/scene``: the recap in the prompt box, condensed into one
+    shot a video model can actually render.
+
+    The LLM call itself is replaced wholesale - what matters here is which
+    instructions it is handed, not what a model would answer.
+    """
+
+    @pytest_asyncio.fixture
+    async def client(self, tmp_path: Path) -> AsyncIterator[AsyncClient]:
+        settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="x")
+        app = create_app(settings)
+        async with LifespanManager(app):
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                yield ac
+
+    @staticmethod
+    async def _llm(client: AsyncClient) -> str:
+        return (
+            await client.post(
+                "/api/providers",
+                json={"name": "LLM", "kind": "openai_compat", "base_url": "http://llm:1234/v1"},
+            )
+        ).json()["id"]
+
+    @staticmethod
+    def _fake_conversion(
+        monkeypatch: pytest.MonkeyPatch, seen: dict[str, object], answer: str = "A lone rider."
+    ) -> None:
+        async def fake(**kwargs: object) -> str:
+            seen.clear()
+            seen.update(kwargs)
+            return answer
+
+        monkeypatch.setattr(video_route, "summarize_transcript", fake)
+
+    async def test_converts_a_recap_into_a_scene(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen: dict[str, object] = {}
+        self._fake_conversion(monkeypatch, seen, answer="  A lone rider on a burning bridge.  ")
+        llm = await self._llm(client)
+
+        resp = await client.post(
+            "/api/video/scene",
+            json={"provider_id": llm, "model": "gpt-5.6-luna", "text": "The party did a lot."},
+        )
+        assert resp.status_code == 200
+        # Trimmed, because it lands straight in a character-counted box.
+        assert resp.json() == {
+            "scene": "A lone rider on a burning bridge.",
+            "model": "gpt-5.6-luna",
+        }
+        assert seen["transcript"] == "The party did a lot."
+        assert seen["model"] == "gpt-5.6-luna"
+
+    async def test_blank_text_is_refused(self, client: AsyncClient) -> None:
+        """Nothing to convert is a 400, not a paid round trip that answers about
+        an empty recap."""
+        llm = await self._llm(client)
+        resp = await client.post(
+            "/api/video/scene", json={"provider_id": llm, "model": "m", "text": "   "}
+        )
+        assert resp.status_code == 400
+
+    async def test_stored_prompt_wins_over_the_built_in_one(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen: dict[str, object] = {}
+        self._fake_conversion(monkeypatch, seen)
+        llm = await self._llm(client)
+        body = {"provider_id": llm, "model": "m", "text": "a recap"}
+
+        resp = await client.post("/api/video/scene", json=body)
+        assert resp.status_code == 200
+        assert seen["system_prompt"] == DEFAULT_SCENE_PROMPT  # nothing stored
+
+        await client.put("/api/system/defaults", json={"scene_prompt": "Ein Bild, sonst nichts."})
+        assert (await client.post("/api/video/scene", json=body)).status_code == 200
+        assert seen["system_prompt"] == "Ein Bild, sonst nichts."
+
+    async def test_the_style_shapes_the_instructions_and_only_the_request_supplies_it(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The look reaches the model as part of the scene instructions, so the
+        text that lands in the box already reads that way - and it comes from
+        the request, never from the stored default behind the GM's back, which
+        is what lets them clear it for one video."""
+        seen: dict[str, object] = {}
+        self._fake_conversion(monkeypatch, seen)
+        llm = await self._llm(client)
+        await client.put("/api/system/defaults", json={"video_style": "gritty photoreal"})
+        body: dict[str, object] = {"provider_id": llm, "model": "m", "text": "a recap"}
+
+        assert (await client.post("/api/video/scene", json=body)).status_code == 200
+        assert "gritty photoreal" not in str(seen["system_prompt"])
+
+        styled = {**body, "style": "90s anime cel animation"}
+        assert (await client.post("/api/video/scene", json=styled)).status_code == 200
+        instructions = str(seen["system_prompt"])
+        assert instructions.startswith(DEFAULT_SCENE_PROMPT)
+        assert "90s anime cel animation" in instructions
+
+    async def test_an_upstream_failure_is_a_502_carrying_the_reason(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The dialog shows this message inline and leaves the box alone, so it
+        has to say what went wrong rather than read as a bug in Loreline."""
+
+        async def fail(**_kwargs: object) -> str:
+            raise LLMError("model not found")
+
+        monkeypatch.setattr(video_route, "summarize_transcript", fail)
+        llm = await self._llm(client)
+        resp = await client.post(
+            "/api/video/scene", json={"provider_id": llm, "model": "nope", "text": "a recap"}
+        )
+        assert resp.status_code == 502
+        assert resp.json()["detail"] == "model not found"
+
+    async def test_a_non_llm_provider_is_refused(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen: dict[str, object] = {}
+        self._fake_conversion(monkeypatch, seen)
+        stt = (
+            await client.post("/api/providers", json={"name": "Deepgram", "kind": "deepgram"})
+        ).json()["id"]
+        resp = await client.post(
+            "/api/video/scene", json={"provider_id": stt, "model": "m", "text": "a recap"}
+        )
+        assert resp.status_code == 400
+        assert seen == {}
 
 
 class TestInteractionScoping:

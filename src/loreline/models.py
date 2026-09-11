@@ -580,6 +580,14 @@ class VideoJob(BaseModel):
     provider_id: str
     model: str
     prompt: str
+    scene_model: str | None = None
+    """The model that condensed ``scene_source`` into ``prompt``, when one did.
+
+    Kept with the job rather than recomputed, because it is the only record
+    that the prompt was written by a model at all: None means the GM wrote or
+    edited it, and both halves are cleared the moment they touch it."""
+    scene_source: str | None = None
+    """The text the scene was condensed from, as the box held it."""
     duration: int | None = None
     resolution: str | None = None
     aspect_ratio: str | None = None

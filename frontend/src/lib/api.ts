@@ -31,6 +31,8 @@ import type {
 	ReprocessJob,
 	ReprocessRequest,
 	RevisionResponse,
+	SceneRequest,
+	SceneResult,
 	SearchResults,
 	ServiceLogs,
 	ServiceState,
@@ -405,6 +407,14 @@ export const api = {
 	// queued job and the caller polls listVideoJobs/getVideoJob.
 	videoModels: (providerId: string) =>
 		request<VideoModelInfo[]>(`/api/video/models?provider_id=${encodeURIComponent(providerId)}`),
+	/** Condense a recap into the one scene a video model can render. Foreground,
+	 *  unlike the generation it feeds: the dialog waits on it and drops the
+	 *  answer into the prompt box, where it can still be read and edited. */
+	videoScene: (body: SceneRequest) =>
+		request<SceneResult>('/api/video/scene', {
+			method: 'POST',
+			body: JSON.stringify(body),
+		}),
 	enqueueVideo: (body: VideoGenerateRequest) =>
 		request<VideoJob>('/api/video', {
 			method: 'POST',

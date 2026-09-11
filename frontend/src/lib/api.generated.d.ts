@@ -197,19 +197,17 @@ export interface paths {
          * Get Defaults
          * @description Return the per-action default models/mode used to pre-select the pickers.
          *
-         *     A blank stored summary or recap prompt is served as the built-in default
-         *     text, so the settings UI always shows the concrete, editable instructions -
-         *     clearing the field and saving is the reset-to-default gesture.
+         *     A blank stored prompt is served as the built-in default text, so the
+         *     settings UI always shows the concrete, editable instructions - clearing the
+         *     field and saving is the reset-to-default gesture.
          */
         get: operations["get_defaults_api_system_defaults_get"];
         /**
          * Set Defaults
          * @description Persist the per-action defaults.
          *
-         *     A summary or recap prompt equal to the built-in default (or blank) is
-         *     stored blank, so an untouched field keeps tracking future improvements to
-         *     the built-in text instead of pinning today's copy. The response mirrors
-         *     GET: served filled in.
+         *     A prompt equal to its built-in default (or blank) is stored blank; see
+         *     :data:`_BUILT_IN_PROMPTS`. The response mirrors GET: served filled in.
          */
         put: operations["set_defaults_api_system_defaults_put"];
         post?: never;
@@ -1403,6 +1401,35 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/video/scene": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Write Video Scene
+         * @description Condense a recap into the single scene a video model can render.
+         *
+         *     The dialog seeds its prompt from the session summary, which is a chapter: a
+         *     video model renders a few seconds of one shot and has no use for the other
+         *     twenty minutes. Rewriting it by hand was the only way out, and the dialog's
+         *     own warning said as much without offering anything.
+         *
+         *     Foreground, unlike the generation it feeds: it is one short completion, and
+         *     the answer has to land in the box where it can be read and edited before
+         *     any money is spent on a video. So it returns the scene rather than a job.
+         */
+        post: operations["write_video_scene_api_video_scene_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/video/{job_id}": {
         parameters: {
             query?: never;
@@ -1515,6 +1542,16 @@ export interface components {
              * @default
              */
             recap_prompt?: string;
+            /**
+             * Scene Prompt
+             * @default
+             */
+            scene_prompt?: string;
+            /**
+             * Video Style
+             * @default
+             */
+            video_style?: string;
             /**
              * Campaign Id
              * @default
@@ -2624,6 +2661,39 @@ export interface components {
             commit: string;
         };
         /**
+         * SceneRequest
+         * @description Condense a recap into the one scene a video model can render.
+         *
+         *     Unlike the generation itself this is a foreground call: the dialog waits on
+         *     it and drops the answer into the prompt box, where it can be read and
+         *     edited before anything is spent on a video.
+         */
+        SceneRequest: {
+            /** Provider Id */
+            provider_id: string;
+            /** Model */
+            model: string;
+            /** Text */
+            text: string;
+            /**
+             * Style
+             * @default
+             */
+            style?: string;
+            /** Reasoning Effort */
+            reasoning_effort?: string | null;
+        };
+        /**
+         * SceneResult
+         * @description The scene the conversion wrote, and the model that wrote it.
+         */
+        SceneResult: {
+            /** Scene */
+            scene: string;
+            /** Model */
+            model: string;
+        };
+        /**
          * SearchHit
          * @description One transcript line a search matched, with enough context to open it.
          *
@@ -3208,6 +3278,10 @@ export interface components {
             generate_audio?: boolean;
             /** Seed */
             seed?: number | null;
+            /** Scene Model */
+            scene_model?: string | null;
+            /** Scene Source */
+            scene_source?: string | null;
         };
         /**
          * VideoJob
@@ -3232,6 +3306,10 @@ export interface components {
             model: string;
             /** Prompt */
             prompt: string;
+            /** Scene Model */
+            scene_model?: string | null;
+            /** Scene Source */
+            scene_source?: string | null;
             /** Duration */
             duration?: number | null;
             /** Resolution */
@@ -5423,6 +5501,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["VideoJob"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    write_video_scene_api_video_scene_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SceneRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SceneResult"];
                 };
             };
             /** @description Validation Error */

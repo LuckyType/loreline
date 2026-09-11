@@ -282,7 +282,7 @@
           "system"
         ],
         "summary": "Get Defaults",
-        "description": "Return the per-action default models/mode used to pre-select the pickers.\n\nA blank stored summary or recap prompt is served as the built-in default\ntext, so the settings UI always shows the concrete, editable instructions -\nclearing the field and saving is the reset-to-default gesture.",
+        "description": "Return the per-action default models/mode used to pre-select the pickers.\n\nA blank stored prompt is served as the built-in default text, so the\nsettings UI always shows the concrete, editable instructions - clearing the\nfield and saving is the reset-to-default gesture.",
         "operationId": "get_defaults_api_system_defaults_get",
         "responses": {
           "200": {
@@ -307,7 +307,7 @@
           "system"
         ],
         "summary": "Set Defaults",
-        "description": "Persist the per-action defaults.\n\nA summary or recap prompt equal to the built-in default (or blank) is\nstored blank, so an untouched field keeps tracking future improvements to\nthe built-in text instead of pinning today's copy. The response mirrors\nGET: served filled in.",
+        "description": "Persist the per-action defaults.\n\nA prompt equal to its built-in default (or blank) is stored blank; see\n:data:`_BUILT_IN_PROMPTS`. The response mirrors GET: served filled in.",
         "operationId": "set_defaults_api_system_defaults_put",
         "requestBody": {
           "content": {
@@ -3279,6 +3279,53 @@
         }
       }
     },
+    "/api/video/scene": {
+      "post": {
+        "tags": [
+          "video"
+        ],
+        "summary": "Write Video Scene",
+        "description": "Condense a recap into the single scene a video model can render.\n\nThe dialog seeds its prompt from the session summary, which is a chapter: a\nvideo model renders a few seconds of one shot and has no use for the other\ntwenty minutes. Rewriting it by hand was the only way out, and the dialog's\nown warning said as much without offering anything.\n\nForeground, unlike the generation it feeds: it is one short completion, and\nthe answer has to land in the box where it can be read and edited before\nany money is spent on a video. So it returns the scene rather than a job.",
+        "operationId": "write_video_scene_api_video_scene_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SceneRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SceneResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
+      }
+    },
     "/api/video/{job_id}": {
       "get": {
         "tags": [
@@ -3477,6 +3524,16 @@
           "recap_prompt": {
             "type": "string",
             "title": "Recap Prompt",
+            "default": ""
+          },
+          "scene_prompt": {
+            "type": "string",
+            "title": "Scene Prompt",
+            "default": ""
+          },
+          "video_style": {
+            "type": "string",
+            "title": "Video Style",
             "default": ""
           },
           "campaign_id": {
@@ -5661,6 +5718,66 @@
         "title": "RollbackRequest",
         "description": "Roll the deployment back to a prior commit."
       },
+      "SceneRequest": {
+        "properties": {
+          "provider_id": {
+            "type": "string",
+            "title": "Provider Id"
+          },
+          "model": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Model"
+          },
+          "text": {
+            "type": "string",
+            "title": "Text"
+          },
+          "style": {
+            "type": "string",
+            "title": "Style",
+            "default": ""
+          },
+          "reasoning_effort": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reasoning Effort"
+          }
+        },
+        "type": "object",
+        "required": [
+          "provider_id",
+          "model",
+          "text"
+        ],
+        "title": "SceneRequest",
+        "description": "Condense a recap into the one scene a video model can render.\n\nUnlike the generation itself this is a foreground call: the dialog waits on\nit and drops the answer into the prompt box, where it can be read and\nedited before anything is spent on a video."
+      },
+      "SceneResult": {
+        "properties": {
+          "scene": {
+            "type": "string",
+            "title": "Scene"
+          },
+          "model": {
+            "type": "string",
+            "title": "Model"
+          }
+        },
+        "type": "object",
+        "required": [
+          "scene",
+          "model"
+        ],
+        "title": "SceneResult",
+        "description": "The scene the conversion wrote, and the model that wrote it."
+      },
       "SearchHit": {
         "properties": {
           "session_id": {
@@ -6888,6 +7005,28 @@
               }
             ],
             "title": "Seed"
+          },
+          "scene_model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scene Model"
+          },
+          "scene_source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scene Source"
           }
         },
         "type": "object",
@@ -6921,6 +7060,28 @@
           "prompt": {
             "type": "string",
             "title": "Prompt"
+          },
+          "scene_model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scene Model"
+          },
+          "scene_source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scene Source"
           },
           "duration": {
             "anyOf": [
