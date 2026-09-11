@@ -1944,6 +1944,11 @@ export interface components {
              * @default 0
              */
             segments_added?: number;
+            /**
+             * Has Speakers
+             * @default false
+             */
+            has_speakers?: boolean;
             /** Error */
             error?: string | null;
         };

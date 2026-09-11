@@ -328,6 +328,26 @@ MIGRATIONS: list[str] = [
     """
     ALTER TABLE sessions ADD COLUMN merged_from TEXT NOT NULL DEFAULT '[]';
     """,
+    # v21 - record whether a job's rows carry speaker labels. The version list
+    # decided "diarized" from diarize jobs alone, so a re-transcription that
+    # ran with a diarizer, or a vendor that labels speakers itself, printed
+    # "Not diarized" over rows that named who spoke. The flag is written with
+    # the rows from now on (see ReprocessManager._drive and _diarize_session);
+    # existing rows are backfilled from the rows each job wrote, which are
+    # tagged with the job's own id for a re-transcription and with its target
+    # for a relabeling.
+    """
+    ALTER TABLE reprocess_jobs ADD COLUMN has_speakers INTEGER NOT NULL DEFAULT 0;
+    UPDATE reprocess_jobs SET has_speakers = 1 WHERE EXISTS (
+        SELECT 1 FROM transcript_segments s
+        WHERE s.session_id = reprocess_jobs.session_id
+          AND s.source = CASE reprocess_jobs.operation
+              WHEN 'diarize' THEN 'diarize:' || reprocess_jobs.target
+              ELSE 'reprocess:' || reprocess_jobs.id
+          END
+          AND s.speaker IS NOT NULL AND s.speaker != ''
+    );
+    """,
 ]
 
 

@@ -409,4 +409,14 @@ class ReprocessJob(BaseModel):
     started_at: float | None = None
     finished_at: float | None = None
     segments_added: int = 0
+    has_speakers: bool = False
+    """Whether any row this job wrote carries a speaker label.
+
+    Set as the rows are written, so a running re-transcription reports it as
+    soon as its first labelled segment lands. It is what lets the version list
+    say "diarized" about a version it has not loaded: a re-transcription that
+    ran with a diarizer, or against a vendor that labels speakers itself, has
+    labelled rows and no diarize job to show for them, and the page used to
+    print "Not diarized" over lines that plainly named who spoke.
+    """
     error: str | None = None

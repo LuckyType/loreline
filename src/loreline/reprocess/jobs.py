@@ -830,6 +830,9 @@ class ReprocessManager:
             assign_speakers(event, segments).model_copy(update={"source": source}) for event in base
         ]
         await self._transcripts.delete_source(job.session_id, source)
+        # Known before the first row lands, so the live count's writes carry
+        # it: the version list reads the row, not the rows.
+        job.has_speakers = any(event.speaker for event in relabeled)
         live = _LiveSegmentCount(job, self._reprocess)
         try:
             for written, event in enumerate(relabeled, start=1):
@@ -847,6 +850,7 @@ class ReprocessManager:
             # Shielded because this task is being torn down: an interrupted
             # cleanup is the corrupt state it exists to prevent.
             job.segments_added = 0
+            job.has_speakers = False
             await asyncio.shield(self._transcripts.delete_source(job.session_id, source))
             raise
         return len(relabeled)
@@ -892,6 +896,10 @@ class ReprocessManager:
                     await self._transcripts.add(tagged)
                     await self._bus.publish(tagged)
                     count += 1
+                    # Before the count's write, so the row that says "1 so
+                    # far" already says whether that one names a speaker.
+                    if tagged.speaker:
+                        job.has_speakers = True
                     await live.set(count)
             finally:
                 await run_task

@@ -25,6 +25,13 @@
  * the section folded, which is exactly when "which transcript is this?" is the
  * question being asked.
  *
+ * "Diarized" is answered from the rows, not only from the jobs. A diarize pass
+ * is one way labels get onto a version; the other is the transcription itself,
+ * when it ran with a diarizer or the vendor labelled speakers on its own, and
+ * a caption that only knew about passes printed "Not diarized" over lines that
+ * plainly named who spoke. A version with labelled rows and no pass says the
+ * labels came inline, and names the diarizer its own run was configured with.
+ *
  * The search box filters here rather than inside the list, because the count
  * in the header has to agree with what the list is showing. The box itself is
  * the only part of it that is not in the header: it appears as a row above the
@@ -48,7 +55,13 @@ import DiarizeDialog from '$lib/DiarizeDialog.svelte'
 import Foldable from '$lib/Foldable.svelte'
 import { Input } from '$lib/components/ui/input'
 import RenameSpeakersDialog from '$lib/RenameSpeakersDialog.svelte'
-import { diarizerLabel, GAP_SOURCE, providerName, versionLabel } from '$lib/stores'
+import {
+	diarizerLabel,
+	GAP_SOURCE,
+	inlineDiarizationLabel,
+	providerName,
+	versionLabel,
+} from '$lib/stores'
 import TranscriptList from '$lib/TranscriptList.svelte'
 import { matchesQuery } from '$lib/transcriptSearch'
 import { cn } from '$lib/utils'
@@ -199,6 +212,10 @@ const selectedProviderName = $derived(
 		: providerName(selectedJob?.provider_id, actionSetup.providers),
 )
 const selectedModel = $derived(version === 'original' ? '-' : (selectedJob?.model ?? '-'))
+// What the shown version's own run was set to diarize with: the capture's
+// config for the original, the job's for a re-transcription. Undefined only
+// while the job list has not landed yet.
+const ownRun = $derived(version === 'original' ? detail.session : selectedJob)
 </script>
 
 <CardContent class={cn('flex flex-col gap-3', open ? 'min-h-0 flex-1' : 'shrink-0')}>
@@ -217,6 +234,15 @@ const selectedModel = $derived(version === 'original' ? '-' : (selectedJob?.mode
 				<span class="ml-3"
 					><span class="text-muted-foreground">Diarized with</span>
 					{diarizerLabel(diarizeJob)}</span
+				>
+			{:else if loading}
+				<!-- `speakers` still describes the version being left, so nothing
+				     about this one can be claimed until its rows are here. -->
+				<span class="ml-3 text-muted-foreground">Diarized …</span>
+			{:else if speakers.length > 0}
+				<span class="ml-3"
+					><span class="text-muted-foreground">Diarized</span>
+					{ownRun ? inlineDiarizationLabel(ownRun) : 'inline'}</span
 				>
 			{:else}
 				<span class="ml-3 text-muted-foreground">Not diarized</span>

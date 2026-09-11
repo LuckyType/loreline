@@ -48,9 +48,9 @@ import { confirm } from '$lib/confirm.svelte'
 import Foldable from '$lib/Foldable.svelte'
 import ReprocessPanel from '$lib/ReprocessPanel.svelte'
 import SessionLogsDialog from '$lib/SessionLogsDialog.svelte'
-import { diarizerLabel, fmtWhen, inFlight, providerName } from '$lib/stores'
+import { diarizerLabel, fmtWhen, inFlight, inlineDiarizationLabel, providerName } from '$lib/stores'
 import { cn } from '$lib/utils'
-import type { ReprocessJob, SessionDetail } from '$lib/wire'
+import type { DiarizationConfig, ReprocessJob, SessionDetail } from '$lib/wire'
 
 let {
 	sessionId,
@@ -270,14 +270,22 @@ async function deleteVersion(job: ReprocessJob) {
 	}
 }
 
+/** What a version's own run says about its rows: whether they carry speaker
+ *  labels, and what the run was set to diarize with. A job row carries both
+ *  fields itself; the original's are assembled from the session and its rows. */
+type OwnRun = { has_speakers: boolean; diarization: DiarizationConfig }
+
 /**
  * What the table's Diarization column says about one version.
  *
  * A successful pass wins over a failed one however recent the failure, because
  * the labels on screen are that pass's and the cell describes what is showing.
- * With nothing to show, a failed attempt is named here rather than only in the
- * line under the table: the failure belongs next to the run it happened to,
- * and this cell has the room. `note` carries the message as a tooltip, so the
+ * With no pass, rows that carry labels of their own are the next thing
+ * showing: they came with the transcription (see `inlineDiarizationLabel`),
+ * and a cell that only knew about passes printed "-" over them. Only with
+ * nothing to show is a failed attempt named here rather than only in the line
+ * under the table: the failure belongs next to the run it happened to, and
+ * this cell has the room. `note` carries the message as a tooltip, so the
  * cell stays one word wide whatever the vendor wrote.
  *
  * A cancelled diarize pass is named by none of these, and correctly so: it
@@ -285,7 +293,10 @@ async function deleteVersion(job: ReprocessJob) {
  * of the transcript, so the server drops it - see `_diarize_session`), which
  * means this cell describes whatever pass was showing before it, or nothing.
  */
-function diarizeInfo(version: string): { text: string; failed: boolean; note?: string } {
+function diarizeInfo(
+	version: string,
+	own: OwnRun,
+): { text: string; failed: boolean; note?: string } {
 	const targeting = jobs.filter((j) => j.operation === 'diarize' && j.target === version)
 	// A running pass counts the segments it has relabeled so far, for the same
 	// reason a running transcription does: something has to move.
@@ -298,12 +309,22 @@ function diarizeInfo(version: string): { text: string; failed: boolean; note?: s
 		.filter((j) => j.status === 'done' && j.segments_added > 0)
 		.sort((a, b) => (b.finished_at ?? 0) - (a.finished_at ?? 0))[0]
 	if (done) return { text: diarizerLabel(done), failed: false }
+	if (own.has_speakers) return { text: inlineDiarizationLabel(own), failed: false }
 	const failed = targeting
 		.filter((j) => j.status === 'error')
 		.sort((a, b) => failedAt(b) - failedAt(a))[0]
 	if (failed) return { text: 'failed', failed: true, note: failureText(failed) }
 	return { text: '-', failed: false }
 }
+
+// The original's own run, for the Diarization cell: the capture's config, and
+// whether the rows it produced name a speaker. Those rows are here already
+// (the page fetched them with the session), which is why the original needs
+// no `has_speakers` of its own where a re-transcription's row carries one.
+const originalRun = $derived<OwnRun>({
+	has_speakers: detail.transcript.some((e) => !!e.speaker),
+	diarization: detail.session.diarization,
+})
 
 // Status of the "original" row. That version is the live capture itself, so
 // its state is the *session's*, not a job's: "live" is only true while the
@@ -360,7 +381,7 @@ const originalStatus = $derived.by(() => {
               : ''}"
 					onclick={() => onselect?.('original')}
 				>
-					{@const diar = diarizeInfo('original')}
+					{@const diar = diarizeInfo('original', originalRun)}
 					<TableCell><code>original</code></TableCell>
 					<TableCell
 						>{providerName(detail.session.primary_provider, actionSetup.providers)}</TableCell
@@ -400,7 +421,7 @@ const originalStatus = $derived.by(() => {
 						title={unselectableReason(j)}
 						onclick={() => selectable(j) && onselect?.(j.id)}
 					>
-						{@const diar = diarizeInfo(j.id)}
+						{@const diar = diarizeInfo(j.id, j)}
 						<TableCell><code>{j.id.slice(0, 8)}</code></TableCell>
 						<TableCell>{providerName(j.provider_id, actionSetup.providers)}</TableCell>
 						<TableCell>{j.model ?? '-'}</TableCell>

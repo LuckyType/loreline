@@ -4148,6 +4148,11 @@
             "title": "Segments Added",
             "default": 0
           },
+          "has_speakers": {
+            "type": "boolean",
+            "title": "Has Speakers",
+            "default": false
+          },
           "error": {
             "anyOf": [
               {

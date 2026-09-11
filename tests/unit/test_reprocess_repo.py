@@ -80,3 +80,25 @@ async def test_delete_version_takes_the_diarize_jobs_aimed_at_it(db: Database) -
 
     left = {j.id for j in await reprocess.for_session("s1")}
     assert left == {"v2", "d2", "d0"}
+
+
+async def test_has_speakers_survives_a_round_trip(db: Database) -> None:
+    """The flag the version list reads to say "diarized" about a version it
+    has not loaded: written with the row on create, and again on every update,
+    since a running re-transcription sets it the moment a labelled row lands."""
+    sessions = SessionRepository(db)
+    reprocess = ReprocessRepository(db)
+    await sessions.create(Session(id="s1", started_at=time.time()))
+    job = ReprocessJob(id="j1", session_id="s1", provider_id="p", created_at=time.time())
+    await reprocess.create(job)
+
+    stored = await reprocess.get("j1")
+    assert stored is not None
+    assert stored.has_speakers is False
+
+    job.has_speakers = True
+    await reprocess.update(job)
+    stored = await reprocess.get("j1")
+    assert stored is not None
+    assert stored.has_speakers is True
+    assert [j.has_speakers for j in await reprocess.for_session("s1")] == [True]
