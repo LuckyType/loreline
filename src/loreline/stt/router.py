@@ -88,6 +88,12 @@ class SttRouter:
         self._on_failover = on_failover
         self._consecutive_failures = 0
         self._degraded_since: float | None = None
+        # Utterances no provider transcribed, over the whole run, and the
+        # reason the last of them was lost. A re-transcription reads these
+        # when it ends with nothing written, to tell "the recording was silent"
+        # from "every request failed" (see ``loreline.reprocess.jobs``).
+        self._dropped = 0
+        self._last_failure: str | None = None
         # provider id -> "<name>: <the vendor's own sentence>", for a provider
         # whose failure will repeat for every remaining utterance. Retiring it
         # is what stops the doomed calls and the per-utterance log line.
@@ -102,6 +108,16 @@ class SttRouter:
         the GM what the vendor said.
         """
         return self._exhausted_message() if self._retired and not self._viable() else None
+
+    @property
+    def dropped(self) -> int:
+        """Utterances this run produced no transcript for, primary and fallback both failing."""
+        return self._dropped
+
+    @property
+    def last_failure(self) -> str | None:
+        """Why the most recently dropped utterance was lost, or None if none was."""
+        return self._last_failure
 
     @property
     def degraded_since(self) -> float | None:
@@ -200,7 +216,13 @@ class SttRouter:
             f"stt.{role}.failed",
             provider=backend.config.name,
             provider_id=backend.config.id,
-            error=str(exc),
+            status=failure.status.value,
+            # The classified detail rather than str(exc): the bare TimeoutError
+            # that wait_for raises has no words of its own, and a version log
+            # that says "failed" with an empty reason on every line answers
+            # nothing. The detail is the exception's words when it has any and
+            # its type when it does not (see classify_request_error).
+            error=failure.detail,
         )
         return reason
 
@@ -223,6 +245,8 @@ class SttRouter:
         down for hours.
         """
         self._consecutive_failures += 1
+        self._dropped += 1
+        self._last_failure = error
         if self._consecutive_failures != _DEGRADED_AFTER_FAILURES:
             return
         self._degraded_since = time.time()
