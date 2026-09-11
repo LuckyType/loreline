@@ -124,7 +124,10 @@ thing that says so, and only the browser reads it. See `docs/adr/0008`.
 _Avoid_: upload (the request, not the session it makes)
 
 **Glossary**: A campaign's list of names and terms, in priority order, sent to a model to
-bias recognition. Trimmed to the model's ceiling, head first.
+bias recognition. Trimmed to the model's ceiling, head first, so what a session actually
+sends is the cast, then the campaign's terms, then the always-on `_default` list, deduped
+case-insensitively. Edited on the campaign it belongs to; `_default` is still merged and
+still served, and no page points at it.
 _Avoid_: prompt, vocabulary, keyterms (each is one vendor's wire name for it)
 
 **SttRouter**: Runs a session's utterances through a primary connector, fails over to a
@@ -156,6 +159,15 @@ collects: its sessions in order, its glossary, its search, and the documents bel
 A row since the campaign layer landed; before that a free string on the session that
 nothing could resolve. Deleting one unassigns its sessions and never deletes them.
 See `docs/adr/0009`.
+
+**Cast**: Who is at a campaign's table: a row per seat, the person and the character
+they play, at least one of the two filled, in priority order. The one fact both halves of
+the app want. It leads the glossary, because a character's name is the word a recognizer
+has no prior for and the ceiling is spent from the head; and it is one line of instruction
+in the summary, the recap, the extraction and the "previously on", which is what turns the
+extraction's `pc`/`npc` split from a guess into a reading. No cast means no line and no
+terms, so a campaign nobody fills in behaves exactly as it did before.
+_Avoid_: party (a party is in the fiction, the cast is the room)
 
 **Document**: One generated text about a session (`recap`, `extraction`) or about a
 campaign (`previously_on`), with the provider, the model and, for a session, the
