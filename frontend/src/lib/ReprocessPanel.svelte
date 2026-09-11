@@ -177,7 +177,7 @@ async function reprocess() {
 					<span class={glossaryBlocked ? 'text-muted-foreground' : ''}>Use glossary</span>
 					{#if glossaryWarning && !glossaryBlocked}
 						<TriangleAlert
-							class="size-3.5 shrink-0 text-amber-500"
+							class="size-3.5 shrink-0 text-amber-700 dark:text-amber-500"
 							aria-label="Diarization quality warning"
 						/>
 					{/if}
@@ -186,7 +186,7 @@ async function reprocess() {
 				     readable before the job is queued, not after the version comes
 				     back unlabelled. -->
 				{#if useGlossary && glossaryWarning}
-					<p class="m-0 text-xs text-amber-500">{glossaryWarning}</p>
+					<p class="m-0 text-xs text-amber-700 dark:text-amber-500">{glossaryWarning}</p>
 				{/if}
 			</div>
 		</div>

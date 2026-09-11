@@ -541,7 +541,7 @@ onMount(() => {
 					be re-transcribed once this is fixed.
 				</p>
 			{:else if sttDegradedAt}
-				<p class="mt-2 border-t border-dashed pt-2 text-sm text-amber-500">
+				<p class="mt-2 border-t border-dashed pt-2 text-sm text-amber-700 dark:text-amber-500">
 					Live transcription has been failing since {sttDegradedAt} - audio is still being recorded
 					and the session can be re-transcribed later.
 				</p>
@@ -627,7 +627,10 @@ onMount(() => {
 				<!-- The panel below is collapsed by default and the glossary is on by
 				     default, so the folded summary is where most GMs will meet this. -->
 				{#if useGlossary && glossaryWarning}
-					<TriangleAlert class="size-3 shrink-0 text-amber-500" aria-label={glossaryWarning} />
+					<TriangleAlert
+						class="size-3 shrink-0 text-amber-700 dark:text-amber-500"
+						aria-label={glossaryWarning}
+					/>
 				{/if}
 				<Button
 					variant="ghost"
@@ -711,7 +714,7 @@ onMount(() => {
 							</span>
 							{#if glossaryWarning && !glossaryBlocked}
 								<TriangleAlert
-									class="size-3.5 shrink-0 text-amber-500"
+									class="size-3.5 shrink-0 text-amber-700 dark:text-amber-500"
 									aria-label="Diarization quality warning"
 								/>
 							{/if}
@@ -719,7 +722,7 @@ onMount(() => {
 						<span
 							class={cn(
 								'text-xs',
-								glossaryWarning && !glossaryBlocked ? 'text-amber-500' : 'text-muted-foreground',
+								glossaryWarning && !glossaryBlocked ? 'text-amber-700 dark:text-amber-500' : 'text-muted-foreground',
 							)}
 						>
 							{glossaryBlocked ||
@@ -741,14 +744,14 @@ onMount(() => {
 									Required for remote diarization - the service's base URL.
 								</span>
 							{:else if diarProbeCurrent && diarProbe && !diarProbe.reachable}
-								<span class="text-xs text-amber-500">
+								<span class="text-xs text-amber-700 dark:text-amber-500">
 									No diarization service answered at {diarEndpoint}.
 									{#if diarProbe.detail}
 										({diarProbe.detail})
 									{/if}
 								</span>
 							{:else if diarProbeCurrent && diarProbe?.status === 'degraded'}
-								<span class="text-xs text-amber-500">
+								<span class="text-xs text-amber-700 dark:text-amber-500">
 									The diarization service at {diarEndpoint} answered but cannot serve right now.
 									{#if diarProbe.detail}
 										({diarProbe.detail})

@@ -239,7 +239,7 @@ async function submit() {
 							</span>
 						{/if}
 						{#if sunset}
-							<span class="text-xs text-amber-500">{sunset}</span>
+							<span class="text-xs text-amber-700 dark:text-amber-500">{sunset}</span>
 						{/if}
 					</div>
 
@@ -276,7 +276,7 @@ async function submit() {
 								class="shrink-0 text-xs {promptOverMax
 									? 'text-destructive'
 									: promptLong
-										? 'text-amber-500'
+										? 'text-amber-700 dark:text-amber-500'
 										: 'text-muted-foreground'}"
 							>
 								{prompt.length}{promptMax === null ? '' : ` / ${promptMax}`}
@@ -289,7 +289,7 @@ async function submit() {
 								characters) - it will be rejected.
 							</span>
 						{:else if promptLong}
-							<span class="text-xs text-amber-500">
+							<span class="text-xs text-amber-700 dark:text-amber-500">
 								That is a whole recap. Video models take a scene, not a chapter, and some cap the
 								prompt well below this length.
 							</span>

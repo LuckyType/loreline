@@ -9,6 +9,7 @@ import { Separator } from '$lib/components/ui/separator'
 import { Switch } from '$lib/components/ui/switch'
 import Dropdown from '$lib/Dropdown.svelte'
 import LevelMeter from '$lib/LevelMeter.svelte'
+import { THEME_OPTIONS, parseTheme, theme } from '$lib/theme.svelte'
 import type { InputDevice, RevisionResponse, UpdateResult } from '$lib/wire'
 
 let devices = $state<InputDevice[]>([])
@@ -367,5 +368,31 @@ onDestroy(stopMeter)
 		{#if showUpdateOutput}
 			<pre class="mt-2 max-h-32 overflow-auto font-mono text-xs">{updateNotes}</pre>
 		{/if}
+	</CardContent>
+</Card>
+
+<!-- Its own card: everything above is a fact about the recorder, saved on
+     the server; the palette is a fact about this browser and never leaves
+     it, so the two are not mixed in one list. -->
+<Card class="mt-4">
+	<CardHeader>
+		<CardTitle>Appearance</CardTitle>
+		<CardDescription>Kept in this browser, not on the recorder.</CardDescription>
+	</CardHeader>
+	<CardContent class="flex flex-wrap items-end gap-6">
+		<div class="flex min-w-60 flex-1 flex-col gap-2">
+			<Label for="theme">Theme</Label>
+			<Dropdown
+				id="theme"
+				value={theme.preference}
+				options={THEME_OPTIONS}
+				onpick={(v) => (theme.preference = parseTheme(v))}
+			/>
+		</div>
+	</CardContent>
+	<CardContent class="pt-0">
+		<p class="text-xs text-muted-foreground">
+			System follows the device's own light or dark setting, and changes with it.
+		</p>
 	</CardContent>
 </Card>

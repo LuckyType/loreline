@@ -9,12 +9,17 @@ export const authed = writable<boolean>(true)
 export const transcriptWs = writable<ConnectionStatus>('offline')
 export const logsWs = writable<ConnectionStatus>('offline')
 
-/** Deterministic speaker color from a label, for transcript rendering. */
+/** Deterministic speaker color from a label, for transcript rendering.
+ *
+ *  One hue per name, at two lightnesses: the 55% that reads on a dark ground
+ *  is too pale on white, so light-dark() picks 40% there. It resolves against
+ *  the color-scheme app.css sets beside each palette, which is what lets a
+ *  value computed here follow the theme without knowing which one is on. */
 export function speakerColor(speaker: string | null): string {
-	if (!speaker) return '#94a3b8'
+	if (!speaker) return 'var(--muted-foreground)'
 	let hash = 0
 	for (let i = 0; i < speaker.length; i++) hash = (hash * 31 + speaker.charCodeAt(i)) % 360
-	return `hsl(${hash}, 60%, 55%)`
+	return `light-dark(hsl(${hash} 60% 40%), hsl(${hash} 60% 55%))`
 }
 
 /** One moment on the session clock, spelled for a person. */
