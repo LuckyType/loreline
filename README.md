@@ -73,6 +73,15 @@ Studio or vLLM. An OpenRouter row can also constrain its routing: sort upstream
 providers by price, throughput or latency, refuse providers that store or train
 on the transcript, and require Zero Data Retention.
 
+**Campaigns.** A session belongs to a campaign, and the campaign is where the
+value of a transcript collects: its sessions in order, its glossary, full-text
+search across all of them, a player-facing recap per session, the characters,
+places, quests and decisions each session named, and a "previously on" for the
+next one. Recaps are a separate text from summaries because they are for the
+players rather than the GM, and the instructions behind them can be set per
+campaign. Search runs on SQLite's FTS5 and falls back to an unranked scan on a
+build without it.
+
 **Video.** Turn a session summary into a video prompt and generate a clip
 through OpenRouter's video models, with the length, resolution and aspect ratio
 each model offers. The job runs in the background and the finished file is
@@ -82,7 +91,7 @@ and model.
 **Exports.** txt, md, srt, vtt, json.
 
 **Web UI.** A SvelteKit SPA served by FastAPI: live transcript, session history,
-provider and glossary config, live logs, health and alerting. The dashboard's
+campaigns, provider and glossary config, live logs, health and alerting. The dashboard's
 transcript and log panels follow the running capture only. Every transcript
 version, the live capture and each re-processing run, keeps its own log file,
 readable from the session page.
