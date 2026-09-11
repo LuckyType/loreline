@@ -911,8 +911,11 @@ export interface paths {
          *
          *     ``started_at`` is epoch seconds and defaults to now - the dialog seeds it
          *     from the file's own modification time, which is the closest thing a
-         *     recording carries to when the evening was. ``campaign_id`` is a plain
-         *     string. ``transcribe`` is a JSON object (``provider_id``, ``model``,
+         *     recording carries to when the evening was. ``campaign_id`` names the
+         *     campaign the session joins, and is checked like the provider below: an id
+         *     no campaign answers to is the unresolvable string ``docs/adr/0009`` exists
+         *     to end, and it would also decide which glossary the transcription in this
+         *     same request runs with. ``transcribe`` is a JSON object (``provider_id``, ``model``,
          *     ``use_glossary``, ``diarization``) that starts the first transcription in
          *     the same request; leave it out to store the recording and decide later.
          *

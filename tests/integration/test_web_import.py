@@ -197,6 +197,27 @@ async def test_an_unknown_provider_is_refused_before_the_upload_is_read(harness:
     assert (await harness.client.get("/api/session")).json() == []  # nothing was stored
 
 
+async def test_an_import_joins_the_campaign_it_names(harness: Harness) -> None:
+    """And an id no campaign answers to is refused, not stored.
+
+    The import dialog offers the campaigns by name, so a bad id only arrives
+    from a client of somebody's own - but storing it would produce exactly the
+    unresolvable ``campaign_id`` campaigns exist to end, and it would also
+    decide which glossary a transcribe block in the same request runs with.
+    """
+    campaign_id = (await harness.client.post("/api/campaigns", json={"name": "Barovia"})).json()[
+        "id"
+    ]
+
+    ok = await post_import(harness.client, data={"campaign_id": campaign_id})
+    assert ok.status_code == 201
+    assert ok.json()["session"]["campaign_id"] == campaign_id
+
+    refused = await post_import(harness.client, data={"campaign_id": "ghost"})
+    assert refused.status_code == 404
+    assert len((await harness.client.get("/api/session")).json()) == 1  # only the good one
+
+
 async def test_a_transcribe_block_that_names_no_model_is_refused(harness: Harness) -> None:
     """The provider row carries no model, so there is nothing to fall back to."""
     pid = await create_provider(harness.client)

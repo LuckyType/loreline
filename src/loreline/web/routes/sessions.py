@@ -328,8 +328,11 @@ async def import_session_recording(
 
     ``started_at`` is epoch seconds and defaults to now - the dialog seeds it
     from the file's own modification time, which is the closest thing a
-    recording carries to when the evening was. ``campaign_id`` is a plain
-    string. ``transcribe`` is a JSON object (``provider_id``, ``model``,
+    recording carries to when the evening was. ``campaign_id`` names the
+    campaign the session joins, and is checked like the provider below: an id
+    no campaign answers to is the unresolvable string ``docs/adr/0009`` exists
+    to end, and it would also decide which glossary the transcription in this
+    same request runs with. ``transcribe`` is a JSON object (``provider_id``, ``model``,
     ``use_glossary``, ``diarization``) that starts the first transcription in
     the same request; leave it out to store the recording and decide later.
 
@@ -348,13 +351,18 @@ async def import_session_recording(
         raise HTTPException(
             status_code=HTTP_404_NOT_FOUND, detail=f"unknown provider {options.provider_id!r}"
         )
+    campaign = (campaign_id or "").strip() or None
+    if campaign is not None and await state.campaigns.get(campaign) is None:
+        # Same check and the same reason as the provider above, and the same
+        # one PUT /api/session/{id}/campaign makes.
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="campaign not found")
     _refuse_an_upload_that_cannot_fit(request, state.settings.import_max_bytes)
     try:
         session = await import_recording(
             _upload_chunks(file),
             name=file.filename or "recording",
             started_at=started_at,
-            campaign_id=(campaign_id or "").strip() or None,
+            campaign_id=campaign,
             sessions=state.sessions,
             audio_store=state.audio_store,
             settings=state.settings,
