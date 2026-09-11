@@ -25,6 +25,18 @@ from loreline.logging import get_logger
 log = get_logger(__name__)
 
 _TIMEOUT_S = 10.0
+# Docker's stop grace period: how long the daemon waits after SIGTERM before it
+# sends SIGKILL. Passed explicitly as the stop call's `t`, so the wait below is
+# derived from a number this module chose rather than from a daemon default it
+# happens to equal. 10 is that default, and none of the compose services set a
+# StopTimeout of their own.
+_STOP_GRACE_S = 10
+# Slack past the grace period for the kill itself, the daemon's bookkeeping and
+# the reply. The stop call used to get the plain _TIMEOUT_S, which is exactly
+# the grace period: a container that does not exit on SIGTERM was killed at the
+# tenth second (exit 137) in the same moment httpx gave up waiting for the
+# answer, and the page reported 503 for a stop that had in fact succeeded.
+_STOP_SLACK_S = 5.0
 _PROJECT_LABEL = "com.docker.compose.project"
 _SERVICE_LABEL = "com.docker.compose.service"
 
@@ -33,6 +45,17 @@ _SERVICE_LABEL = "com.docker.compose.service"
 # it), and the proxy is what enforces the whole feature - taking either down
 # from the UI is a foot-gun, not a feature.
 CONTROLLABLE = frozenset({"speaches", "diarization"})
+
+
+def stop_timeout(grace_s: float = _STOP_GRACE_S) -> httpx.Timeout:
+    """The wait a stop call gets: the grace period plus slack for the kill and the reply.
+
+    Only the read phase is stretched. Connecting to the proxy and sending the
+    request take no longer for a stop than for anything else; it is the answer
+    that arrives up to ``grace_s`` seconds late, once the daemon has finished
+    waiting on the container.
+    """
+    return httpx.Timeout(_TIMEOUT_S, read=grace_s + _STOP_SLACK_S)
 
 
 class ServiceState(BaseModel):
@@ -131,7 +154,18 @@ class ServiceManager:
             raise DockerUnavailableError(msg)
         target = await self._resolve(service)
         action = "start" if running else "stop"
-        response = await self._request("POST", f"/containers/{target.container_id}/{action}")
+        if running:
+            response = await self._request("POST", f"/containers/{target.container_id}/start")
+        else:
+            # `t` names the grace period the daemon will wait, and the timeout
+            # is derived from that same number: see _STOP_SLACK_S for what
+            # happened while the two were merely equal by coincidence.
+            response = await self._request(
+                "POST",
+                f"/containers/{target.container_id}/stop",
+                params={"t": str(_STOP_GRACE_S)},
+                timeout=stop_timeout(),
+            )
         # 304 = already started/stopped, which is a success for our purposes.
         if response.status_code not in {HTTPStatus.NO_CONTENT, HTTPStatus.NOT_MODIFIED}:
             msg = f"docker {action} failed ({response.status_code}): {response.text[:200]}"

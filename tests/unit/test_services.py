@@ -9,9 +9,12 @@ import httpx
 import pytest
 
 from loreline.services import (
+    _STOP_GRACE_S,  # pyright: ignore[reportPrivateUsage]
+    _TIMEOUT_S,  # pyright: ignore[reportPrivateUsage]
     DockerUnavailableError,
     ServiceManager,
     _demux,  # pyright: ignore[reportPrivateUsage]
+    stop_timeout,
 )
 
 _PROJECT = "loreline"
@@ -92,6 +95,50 @@ async def test_start_posts_to_docker_and_reports_new_state() -> None:
 
     assert result.state == "running"
     assert calls == [f"/containers/{_fake_id('diarization')[:12]}/start"]
+
+
+def test_stop_timeout_outlasts_the_grace_period() -> None:
+    """The read wait must be longer than the time Docker may take to answer a stop.
+
+    The two used to be equal: ten seconds of grace before the daemon sends
+    SIGKILL, ten seconds before httpx gave up. A container that ignored SIGTERM
+    was killed and the call abandoned in the same moment, and the page reported
+    a failure for a stop that had succeeded.
+    """
+    read = stop_timeout().read
+    assert read is not None
+    assert read > _STOP_GRACE_S
+    long_read = stop_timeout(30).read
+    assert long_read is not None
+    assert long_read > 30
+    # Only the answer arrives late. Connecting to the proxy and sending the
+    # request take no longer for a stop than for anything else.
+    assert stop_timeout().connect == _TIMEOUT_S
+    assert stop_timeout().write == _TIMEOUT_S
+
+
+async def test_stop_names_the_grace_period_and_waits_it_out() -> None:
+    """A stop tells Docker how long to wait, and waits longer than that itself."""
+    seen: dict[str, object] = {}
+    state = {"value": "running"}
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/stop"):
+            seen["t"] = request.url.params.get("t")
+            seen["read"] = request.extensions["timeout"]["read"]
+            state["value"] = "exited"
+            return httpx.Response(204)
+        return httpx.Response(200, json=[_container("diarization", state=state["value"])])
+
+    manager = _manager(httpx.MockTransport(handle))
+    result = await manager.set_running("diarization", running=False)
+
+    # The state reported is the one read back after the stop, not a guess.
+    assert result.state == "exited"
+    assert seen["t"] == str(_STOP_GRACE_S)
+    read = seen["read"]
+    assert isinstance(read, float)
+    assert read > _STOP_GRACE_S
 
 
 async def test_already_running_is_not_an_error() -> None:
