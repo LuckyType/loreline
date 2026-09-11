@@ -109,6 +109,7 @@ function handleHealthPointerEnter() {
 const nav = [
 	{ href: '/', label: 'Dashboard' },
 	{ href: '/sessions', label: 'History' },
+	{ href: '/campaigns', label: 'Campaigns' },
 	{ href: '/settings', label: 'Settings' },
 ]
 

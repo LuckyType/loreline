@@ -9,12 +9,18 @@
  * parts, so the merge says outright what it is. Duration says which row is the
  * long one, which is the question this table gets asked most and is worth a
  * column whether or not anything was ever merged.
+ *
+ * The Campaign column shows a name and links to it. It printed the raw
+ * `campaign_id` before campaigns were rows, which in practice meant a dash on
+ * every line; the filter above the table is what makes a library of a hundred
+ * sessions readable one campaign at a time.
  */
 
 import { onMount } from 'svelte'
 import { goto } from '$app/navigation'
 import { actionSetup } from '$lib/actionSetup.svelte'
 import { api, ApiError } from '$lib/api'
+import { campaigns } from '$lib/campaigns.svelte'
 import { confirm } from '$lib/confirm.svelte'
 import { Button } from '$lib/components/ui/button'
 import { Card, CardContent } from '$lib/components/ui/card'
@@ -28,6 +34,7 @@ import {
 	TableHeader,
 	TableRow,
 } from '$lib/components/ui/table'
+import Dropdown from '$lib/Dropdown.svelte'
 import { fmtDuration, providerName } from '$lib/stores'
 import type { Session } from '$lib/wire'
 
@@ -35,9 +42,25 @@ let sessions = $state<Session[]>([])
 let selected = $state<Record<string, boolean>>({})
 let error = $state('')
 let busy = $state(false)
+// Which campaign the table is narrowed to: '' is every session, ANY_CAMPAIGN
+// picks out the ones in none. A sentinel rather than a second control, because
+// "unassigned" is an answer to the same question the names answer.
+const ANY_CAMPAIGN = ''
+const NO_CAMPAIGN = '\u0000none'
+let campaignFilter = $state(ANY_CAMPAIGN)
 
-const selectedIds = $derived(sessions.filter((s) => selected[s.id]).map((s) => s.id))
-const allChecked = $derived(sessions.length > 0 && selectedIds.length === sessions.length)
+const shown = $derived(
+	campaignFilter === ANY_CAMPAIGN
+		? sessions
+		: sessions.filter((s) =>
+				campaignFilter === NO_CAMPAIGN ? !s.campaign_id : s.campaign_id === campaignFilter,
+			),
+)
+
+// Selection follows the filter: bulk-deleting rows the table is not showing is
+// the one thing a filter must never make possible.
+const selectedIds = $derived(shown.filter((s) => selected[s.id]).map((s) => s.id))
+const allChecked = $derived(shown.length > 0 && selectedIds.length === shown.length)
 
 function when(ts: number): string {
 	return new Date(ts * 1000).toLocaleString()
@@ -87,15 +110,18 @@ async function reload() {
 	} catch (err) {
 		error = err instanceof ApiError ? err.message : 'failed to load sessions'
 	}
-	// Only used to render provider ids as names, so its failure is not the
-	// list's: the store records it, and providerName() already falls back to
-	// a short id.
+	// Only used to render provider and campaign ids as names, so their failure
+	// is not the list's: each store records it, and both name helpers already
+	// fall back to something readable.
 	void actionSetup.load()
+	void campaigns.load()
 }
 
 function toggleAll() {
 	const next = !allChecked
-	selected = Object.fromEntries(sessions.map((s) => [s.id, next]))
+	// Only the rows on screen: the checkbox in the header says "select all" about
+	// the table it sits on, not about the sessions the filter is hiding.
+	selected = { ...selected, ...Object.fromEntries(shown.map((s) => [s.id, next])) }
 }
 
 async function deleteSelected() {
@@ -156,8 +182,23 @@ onMount(reload)
 
 <Card>
 	<CardContent>
-		<div class="mb-2 flex items-center justify-between">
-			<span class="text-muted-foreground">{selectedIds.length} selected</span>
+		<div class="mb-2 flex flex-wrap items-center justify-between gap-2">
+			<div class="flex flex-wrap items-center gap-2">
+				<Dropdown
+					class="w-52"
+					bind:value={campaignFilter}
+					options={[
+						{ value: ANY_CAMPAIGN, label: 'All campaigns' },
+						{ value: NO_CAMPAIGN, label: 'No campaign' },
+						...campaigns.rows.map((row) => ({
+							value: row.campaign.id,
+							label: `${row.campaign.name} (${row.sessions})`,
+						})),
+					]}
+					placeholder="All campaigns"
+				/>
+				<span class="text-muted-foreground">{selectedIds.length} selected</span>
+			</div>
 			<div class="flex gap-2">
 				<Button variant="outline" onclick={mergeSelected} disabled={busy || selectedIds.length < 2}>
 					Merge selected
@@ -186,7 +227,7 @@ onMount(reload)
 				</TableRow>
 			</TableHeader>
 			<TableBody>
-				{#each sessions as s (s.id)}
+				{#each shown as s (s.id)}
 					<TableRow>
 						<TableCell>
 							<Checkbox bind:checked={selected[s.id]} aria-label="Select session" />
@@ -223,15 +264,30 @@ onMount(reload)
 						<TableCell class="text-muted-foreground"
 							>{providerName(s.primary_provider, actionSetup.providers)}</TableCell
 						>
-						<TableCell class="text-muted-foreground">{s.campaign_id ?? '-'}</TableCell>
+						<!-- The name, linking to the campaign. A session in none, and one
+						     whose campaign has since been deleted, both read as a dash:
+						     the id behind the second is not something anyone can act on. -->
+						<TableCell class="text-muted-foreground">
+							{#if campaigns.name(s.campaign_id)}
+								<a class="text-primary hover:underline" href="/campaigns/{s.campaign_id}">
+									{campaigns.name(s.campaign_id)}
+								</a>
+							{:else}
+								-
+							{/if}
+						</TableCell>
 						<TableCell
 							><a class="text-primary hover:underline" href="/sessions/{s.id}">Open</a></TableCell
 						>
 					</TableRow>
 				{/each}
-				{#if sessions.length === 0}
+				{#if shown.length === 0}
 					<TableRow>
-						<TableCell colspan={7} class="text-muted-foreground">No sessions recorded.</TableCell>
+						<TableCell colspan={7} class="text-muted-foreground">
+							{sessions.length === 0
+								? 'No sessions recorded.'
+								: 'No sessions in this campaign.'}
+						</TableCell>
 					</TableRow>
 				{/if}
 			</TableBody>

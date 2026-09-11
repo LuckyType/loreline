@@ -8,9 +8,15 @@ import type {
 	AlertChannelWrite,
 	AlertTestResult,
 	AutostartState,
+	Campaign,
+	CampaignDocument,
+	CampaignEntities,
+	CampaignSummary,
+	CampaignWrite,
 	CapabilityConfig,
 	DeviceSetting,
 	DiarizerProbe,
+	GenerateRequest,
 	Glossary,
 	Health,
 	InputDevice,
@@ -19,14 +25,18 @@ import type {
 	ProviderConfig,
 	ProviderCreate,
 	ProviderModelsRequest,
+	PreviouslyOnRequest,
 	ProviderTestResult,
 	ReprocessJob,
 	ReprocessRequest,
 	RevisionResponse,
+	SearchResults,
 	ServiceLogs,
 	ServiceState,
 	Session,
 	SessionDetail,
+	SessionDocument,
+	SessionExtraction,
 	StartSessionRequest,
 	SummarizeRequest,
 	SummarizeResult,
@@ -128,9 +138,13 @@ export const api = {
 			body: JSON.stringify(body),
 		}),
 	deleteAlertChannel: (id: string) =>
-		request<OkResponse>(`/api/system/alerts/channels/${id}`, { method: 'DELETE' }),
+		request<OkResponse>(`/api/system/alerts/channels/${id}`, {
+			method: 'DELETE',
+		}),
 	testAlertChannel: (id: string) =>
-		request<AlertTestResult>(`/api/system/alerts/channels/${id}/test`, { method: 'POST' }),
+		request<AlertTestResult>(`/api/system/alerts/channels/${id}/test`, {
+			method: 'POST',
+		}),
 
 	// --- audio ---
 	listDevices: () => request<InputDevice[]>('/api/audio/devices'),
@@ -156,7 +170,10 @@ export const api = {
 			body: JSON.stringify(body),
 		}),
 	createProvider: (body: ProviderCreate) =>
-		request<ProviderConfig>('/api/providers', { method: 'POST', body: JSON.stringify(body) }),
+		request<ProviderConfig>('/api/providers', {
+			method: 'POST',
+			body: JSON.stringify(body),
+		}),
 	updateProvider: (id: string, body: ProviderCreate) =>
 		request<ProviderConfig>(`/api/providers/${id}`, {
 			method: 'PUT',
@@ -169,7 +186,9 @@ export const api = {
 			body: JSON.stringify({ value }),
 		}),
 	testProvider: (id: string) =>
-		request<ProviderTestResult>(`/api/providers/${id}/test`, { method: 'POST' }),
+		request<ProviderTestResult>(`/api/providers/${id}/test`, {
+			method: 'POST',
+		}),
 
 	// --- glossary ---
 	getGlossary: (campaign: string) => request<Glossary>(`/api/glossary/${campaign}`),
@@ -180,11 +199,66 @@ export const api = {
 		}),
 	getDefaultGlossary: () => request<Glossary>('/api/glossary'),
 	putDefaultGlossary: (terms: string[]) =>
-		request<Glossary>('/api/glossary', { method: 'PUT', body: JSON.stringify({ terms }) }),
+		request<Glossary>('/api/glossary', {
+			method: 'PUT',
+			body: JSON.stringify({ terms }),
+		}),
+
+	// --- campaigns ---
+	// A campaign is a row now, not the free string `sessions.campaign_id` used
+	// to hold: it has a name, a glossary, a recap prompt and the documents its
+	// sessions accumulate. See docs/adr/0009.
+	listCampaigns: () => request<CampaignSummary[]>('/api/campaigns'),
+	getCampaign: (id: string) => request<Campaign>(`/api/campaigns/${id}`),
+	createCampaign: (body: CampaignWrite) =>
+		request<Campaign>('/api/campaigns', {
+			method: 'POST',
+			body: JSON.stringify(body),
+		}),
+	updateCampaign: (id: string, body: CampaignWrite) =>
+		request<Campaign>(`/api/campaigns/${id}`, {
+			method: 'PUT',
+			body: JSON.stringify(body),
+		}),
+	/** Delete the campaign. Its sessions are kept, unassigned - say so wherever
+	 *  this is offered, because it is the one thing about it anyone fears. */
+	deleteCampaign: (id: string) => request<OkResponse>(`/api/campaigns/${id}`, { method: 'DELETE' }),
+	/** The campaign's sessions, oldest first: the order they were played in. */
+	campaignSessions: (id: string) => request<Session[]>(`/api/campaigns/${id}/sessions`),
+	campaignDocuments: (id: string, kind?: string) =>
+		request<SessionDocument[]>(
+			`/api/campaigns/${id}/documents${kind ? `?kind=${encodeURIComponent(kind)}` : ''}`,
+		),
+	campaignEntities: (id: string) => request<CampaignEntities>(`/api/campaigns/${id}/entities`),
+	addToCampaignGlossary: (id: string, terms: string[]) =>
+		request<Glossary>(`/api/campaigns/${id}/glossary/add`, {
+			method: 'POST',
+			body: JSON.stringify({ terms }),
+		}),
+	getPreviouslyOn: (id: string) =>
+		request<CampaignDocument | null>(`/api/campaigns/${id}/previously-on`),
+	writePreviouslyOn: (id: string, body: PreviouslyOnRequest) =>
+		request<CampaignDocument>(`/api/campaigns/${id}/previously-on`, {
+			method: 'POST',
+			body: JSON.stringify(body),
+		}),
+
+	// --- search ---
+	/** Find a transcript line, everywhere or inside one campaign. `indexed`
+	 *  comes back false on a SQLite build with no FTS5, where the hits are real
+	 *  and the ranking is not. */
+	search: (q: string, campaignId?: string, limit = 50) =>
+		request<SearchResults>(
+			`/api/search?q=${encodeURIComponent(q)}&limit=${limit}` +
+				(campaignId ? `&campaign_id=${encodeURIComponent(campaignId)}` : ''),
+		),
 
 	// --- sessions ---
 	startSession: (body: StartSessionRequest) =>
-		request<Session>('/api/session/start', { method: 'POST', body: JSON.stringify(body) }),
+		request<Session>('/api/session/start', {
+			method: 'POST',
+			body: JSON.stringify(body),
+		}),
 	stopSession: () => request<Session>('/api/session/stop', { method: 'POST' }),
 	listSessions: () => request<Session[]>('/api/session'),
 	getSession: (id: string) => request<SessionDetail>(`/api/session/${id}`),
@@ -212,6 +286,26 @@ export const api = {
 			method: 'POST',
 			body: JSON.stringify(body),
 		}),
+	/** Put the session in a campaign, or take it out of one (null). */
+	setSessionCampaign: (id: string, campaignId: string | null) =>
+		request<Session>(`/api/session/${id}/campaign`, {
+			method: 'PUT',
+			body: JSON.stringify({ campaign_id: campaignId }),
+		}),
+	/** The player-facing account of the session. A different text for a
+	 *  different reader than the summary, stored beside it as a document. */
+	recapSession: (id: string, body: GenerateRequest) =>
+		request<SessionDocument>(`/api/session/${id}/recap`, {
+			method: 'POST',
+			body: JSON.stringify(body),
+		}),
+	/** The names the session used, as structured data. Stored as a document
+	 *  too; what comes back is the parsed copy. */
+	extractSession: (id: string, body: GenerateRequest) =>
+		request<SessionExtraction>(`/api/session/${id}/extract`, {
+			method: 'POST',
+			body: JSON.stringify(body),
+		}),
 	/** Download one version's transcript. The version is explicit because the
 	 *  page can be showing a re-transcription while the header's Export menu
 	 *  sits above it: the server defaults to 'original', so leaving it off is
@@ -225,7 +319,10 @@ export const api = {
 			body: JSON.stringify({ ids }),
 		}),
 	mergeSessions: (ids: string[]) =>
-		request<Session>('/api/session/merge', { method: 'POST', body: JSON.stringify({ ids }) }),
+		request<Session>('/api/session/merge', {
+			method: 'POST',
+			body: JSON.stringify({ ids }),
+		}),
 
 	// --- video generation ---
 	// Generation is asynchronous upstream (minutes), so enqueue returns a
@@ -233,7 +330,10 @@ export const api = {
 	videoModels: (providerId: string) =>
 		request<VideoModelInfo[]>(`/api/video/models?provider_id=${encodeURIComponent(providerId)}`),
 	enqueueVideo: (body: VideoGenerateRequest) =>
-		request<VideoJob>('/api/video', { method: 'POST', body: JSON.stringify(body) }),
+		request<VideoJob>('/api/video', {
+			method: 'POST',
+			body: JSON.stringify(body),
+		}),
 	getVideoJob: (jobId: string) => request<VideoJob>(`/api/video/${jobId}`),
 	listVideoJobs: (sessionId: string) =>
 		request<VideoJob[]>(`/api/video?session_id=${encodeURIComponent(sessionId)}`),
@@ -244,7 +344,10 @@ export const api = {
 
 	// --- reprocess ---
 	enqueueReprocess: (body: ReprocessRequest) =>
-		request<ReprocessJob>('/api/reprocess', { method: 'POST', body: JSON.stringify(body) }),
+		request<ReprocessJob>('/api/reprocess', {
+			method: 'POST',
+			body: JSON.stringify(body),
+		}),
 	getReprocess: (jobId: string) => request<ReprocessJob>(`/api/reprocess/${jobId}`),
 	listReprocess: (sessionId: string) =>
 		request<ReprocessJob[]>(`/api/reprocess?session_id=${sessionId}`),

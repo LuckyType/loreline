@@ -42,6 +42,8 @@ const NO_DEFAULTS: ActionDefaults = {
 	summarize_model: '',
 	summarize_prompt: '',
 	summarize_reasoning_effort: '',
+	recap_prompt: '',
+	campaign_id: '',
 	video_provider: '',
 	video_model: '',
 	strict_model_filtering: true,

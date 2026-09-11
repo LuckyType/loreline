@@ -143,6 +143,25 @@ export type SummarizeResult = Complete<Schemas['SummarizeResult']>
 export type ReprocessJob = Complete<Schemas['ReprocessJob']>
 export type ReprocessRequest = Schemas['ReprocessRequest']
 
+// --- campaigns --------------------------------------------------------------
+
+export type Campaign = Complete<Schemas['Campaign']>
+export type CampaignSummary = Complete<Schemas['CampaignSummary']>
+export type CampaignWrite = Schemas['CampaignWrite']
+/** One generated text about a session: a recap or an extraction. */
+export type SessionDocument = Complete<Schemas['SessionDocument']>
+/** The campaign-level one: the "previously on". */
+export type CampaignDocument = Complete<Schemas['CampaignDocument']>
+export type SessionExtraction = Complete<Schemas['SessionExtraction']>
+export type ExtractedCharacter = Complete<Schemas['ExtractedCharacter']>
+export type MergedEntity = Complete<Schemas['MergedEntity']>
+export type CampaignEntities = Complete<Schemas['CampaignEntities']>
+/** The body a recap, an extraction or a previously-on is asked for with. */
+export type GenerateRequest = Schemas['GenerateRequest']
+export type PreviouslyOnRequest = Schemas['PreviouslyOnRequest']
+export type SearchHit = Complete<Schemas['SearchHit']>
+export type SearchResults = Complete<Schemas['SearchResults']>
+
 // --- video ------------------------------------------------------------------
 
 export type VideoModelInfo = Complete<Schemas['VideoModelInfo']>

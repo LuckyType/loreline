@@ -923,6 +923,24 @@ onMount(load)
 		</div>
 
 		<div class="flex flex-col gap-2.5 rounded-lg border p-3.5">
+			<div class="flex items-center gap-2 font-medium">
+				<AlignLeft class="size-4" />
+				Recap system prompt
+			</div>
+			<Textarea
+				id="def-recap-prompt"
+				rows={5}
+				bind:value={draft.recap_prompt}
+				placeholder="Instructions the recap model receives before the transcript"
+			/>
+			<p class="m-0 text-xs text-muted-foreground">
+				A recap is the players' account of the session, which is not the GM's summary above it. A
+				campaign can override this on its own page. Clear it and save to restore the built-in
+				default.
+			</p>
+		</div>
+
+		<div class="flex flex-col gap-2.5 rounded-lg border p-3.5">
 			<div class="flex items-center justify-between gap-4">
 				<div class="flex flex-col gap-0.5">
 					<span class="flex items-center gap-2 font-medium">

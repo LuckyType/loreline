@@ -27,6 +27,13 @@
  * Which segment is being spoken is worked out here, once, because both the
  * timeline's dots and the transcript's highlight are answers to it.
  *
+ * A search result links here with `?v=<version>&t=<start_ts>`: the version to
+ * select and the line to look at. Handled once, on arrival, by selecting that
+ * version and putting the playhead on the line, which is what the transcript's
+ * highlight and its scroll-into-view already follow. It is deliberately not an
+ * effect on the URL: the deep link is where the reader came in, not a state the
+ * page has to keep matching while they move around inside it.
+ *
  * The refreshes the page runs on its own - the job poll, the video poll, the
  * reloads after a card changed something - report their failures in the same
  * banner the cards use, through `refresh`. They used to be bare awaits, so a
@@ -40,6 +47,7 @@ import { onMount } from 'svelte'
 import { page } from '$app/state'
 import { actionSetup } from '$lib/actionSetup.svelte'
 import { ApiError, api } from '$lib/api'
+import { campaigns } from '$lib/campaigns.svelte'
 import { Card } from '$lib/components/ui/card'
 import { jsonFrame, LiveFeed } from '$lib/liveFeed.svelte'
 import SessionHeader from '$lib/SessionHeader.svelte'
@@ -302,14 +310,37 @@ onMount(async () => {
 	// Providers, defaults and the capability gate: the seeds in the cards below
 	// are derived from the store, so nothing here has to wait for it.
 	void actionSetup.load()
+	// The campaign names the header shows and its Change dialog offers.
+	void campaigns.load()
 	try {
 		detail = await api.getSession(id)
 		await refreshJobs()
 		await refreshVideoJobs()
 	} catch (err) {
 		error = err instanceof ApiError ? err.message : 'failed to load'
+		return
 	}
+	await openDeepLink()
 })
+
+/** Follow a `?v=&t=` link in, once, after the session has loaded.
+ *
+ * Both halves are optional and mean different things: `v` is which transcript
+ * to show, `t` is where in it to look. A search hit carries both; a link to a
+ * moment in the capture carries only `t`. An unusable `t` is ignored rather
+ * than reported - the transcript is on screen either way, and a banner about a
+ * malformed query string helps nobody who did not type it. */
+async function openDeepLink() {
+	const wanted = page.url.searchParams.get('v')
+	if (wanted) await selectVersion(wanted)
+	const at = Number(page.url.searchParams.get('t'))
+	if (!Number.isFinite(at) || at < 0) return
+	// The playhead is what the transcript highlights and the timeline points
+	// at, so putting it on the line is the whole of "show me this line".
+	currentTime = at
+	if (audioEl) audioEl.currentTime = at
+	seekNonce++
+}
 </script>
 
 <!-- The window, less the header above and this page's own padding, exactly as
@@ -334,6 +365,7 @@ onMount(async () => {
 				audioDurationS={detail.audio_duration_s}
 				version={selectedVersion}
 				{videoJobs}
+				oncampaignchanged={reloadDetail}
 			/>
 
 			<div class="shrink-0 border-t"></div>
@@ -374,11 +406,12 @@ onMount(async () => {
 			<SessionSummary
 				sessionId={id}
 				session={detail.session}
+				documents={detail.documents}
 				{speakers}
 				version={selectedVersion}
 				{videoJobs}
 				bind:open={sections.summary}
-				onsummarized={reloadDetail}
+				ongenerated={reloadDetail}
 				onvideoschanged={refreshVideoJobs}
 				onerror={setError}
 			/>

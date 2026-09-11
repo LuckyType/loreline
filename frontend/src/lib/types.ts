@@ -50,3 +50,13 @@ export function capabilityBadges(p: { kind: ProviderKind }): string[] {
 	if (supportsInteraction(p, 'video')) badges.push('Video')
 	return badges
 }
+
+/**
+ * Which generated text a GenerateDialog is asking a model for.
+ *
+ * Not a wire type: the server has a route per kind and a `kind` column per
+ * document, and nothing sends this string anywhere. It exists so the dialog's
+ * wording table has one key per thing it can be opened for, and so a page
+ * cannot open it for a fifth thing nobody wrote a heading for.
+ */
+export type GenerateKind = 'summary' | 'recap' | 'extraction' | 'previously-on'

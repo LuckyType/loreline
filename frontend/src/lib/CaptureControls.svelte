@@ -20,6 +20,7 @@ import {
 	inlineDiarizationFor,
 	preferredModel,
 } from '$lib/capabilities.svelte'
+import { campaigns } from '$lib/campaigns.svelte'
 import { Button } from '$lib/components/ui/button'
 import { Card, CardContent } from '$lib/components/ui/card'
 import { Checkbox } from '$lib/components/ui/checkbox'
@@ -125,6 +126,60 @@ const inlineConflict = $derived(
 			)
 		: '',
 )
+
+// --- which campaign this session belongs to ---
+// Seeded from the stored default and overridden by a pick, the same rule every
+// other control here follows. A default naming a campaign that has since been
+// deleted seeds nothing rather than a dead id: the picker would show a blank
+// trigger and the start request would be refused.
+let campaignId = $derived(
+	campaigns.rows.some((row) => row.campaign.id === actionSetup.defaults.campaign_id)
+		? actionSetup.defaults.campaign_id
+		: '',
+)
+// The sentinel the picker's last entry carries. A value no campaign can have,
+// because it is not an id: picking it opens the name box below instead of
+// selecting anything.
+const NEW_CAMPAIGN = '\u0000new'
+// What was selected when the list was opened, so picking "New campaign" can
+// put it back rather than quietly emptying the choice while the box is filled
+// in - and leaving it emptied if the box is then cancelled.
+let campaignBeforePick = ''
+let creatingCampaign = $state(false)
+let newCampaignName = $state('')
+let campaignBusy = $state(false)
+let campaignError = $state('')
+
+const campaignOptions = $derived([
+	...campaigns.options(),
+	{ value: NEW_CAMPAIGN, label: 'New campaign…' },
+])
+const campaignSummary = $derived(campaigns.name(campaignId) || 'None')
+
+function onCampaignPick(value: string) {
+	if (value !== NEW_CAMPAIGN) return
+	campaignId = campaignBeforePick
+	campaignError = ''
+	newCampaignName = ''
+	creatingCampaign = true
+}
+
+async function createCampaign() {
+	const name = newCampaignName.trim()
+	if (!name) return
+	campaignBusy = true
+	campaignError = ''
+	try {
+		campaignId = (await campaigns.create(name)).id
+		creatingCampaign = false
+		newCampaignName = ''
+	} catch (err) {
+		campaignError = err instanceof ApiError ? err.message : 'could not create the campaign'
+	} finally {
+		campaignBusy = false
+	}
+}
+
 let error = $state('')
 let busy = $state(false)
 
@@ -431,7 +486,18 @@ async function start() {
 				max_speakers: null,
 			},
 			use_glossary: useGlossary,
+			campaign_id: campaignId || null,
 		})
+		// Remembered for the next session, where it is almost always the same
+		// answer. Stored server-side rather than in this browser: the tablet at
+		// the table and the laptop in the kitchen are the same campaign.
+		if (campaignId !== actionSetup.defaults.campaign_id) {
+			void actionSetup
+				.saveDefaults({ ...actionSetup.defaults, campaign_id: campaignId })
+				.catch(() => {
+					/* the session started; which campaign to offer next time is not worth a banner */
+				})
+		}
 		await refresh()
 	} catch (err) {
 		error = err instanceof ApiError ? err.message : 'failed to start'
@@ -493,6 +559,9 @@ onMount(() => {
 	// Providers, defaults and the capability gate: every seed above is derived
 	// from the store, so nothing here has to wait for it.
 	void actionSetup.load()
+	// The campaign list is its own store for the same reason: the History table
+	// and the session header read the same names.
+	void campaigns.load()
 	void checkStoredDevice()
 })
 </script>
@@ -612,6 +681,12 @@ onMount(() => {
 					</a>
 					<span class="text-muted-foreground">·</span>
 				{/if}
+				<!-- First of the folded settings: recording into the wrong campaign is
+				     the one mistake here that is invisible afterwards and tedious to
+				     undo, so the name is on the line whether the panel is open or not. -->
+				<span class="text-muted-foreground">Campaign</span>
+				<span class="text-foreground">{campaignSummary}</span>
+				<span class="text-muted-foreground">·</span>
 				<span class="text-muted-foreground">Fallback</span>
 				<span class={fallbackModelMissing ? 'text-destructive' : 'text-foreground'}
 					>{fallbackSummary}</span
@@ -646,6 +721,52 @@ onMount(() => {
 
 			{#if advancedOpen}
 				<div class="mt-3 grid grid-cols-[repeat(auto-fit,minmax(200px,1fr))] items-start gap-3">
+					<div class="flex flex-col gap-2">
+						<Label for="campaign">Campaign</Label>
+						<Dropdown
+							id="campaign"
+							bind:value={campaignId}
+							defaultValue={actionSetup.defaults.campaign_id}
+							options={campaignOptions}
+							placeholder={campaigns.ready ? 'No campaign' : 'Loading campaigns…'}
+							loading={!campaigns.ready}
+							onopen={() => (campaignBeforePick = campaignId)}
+							onpick={onCampaignPick}
+						/>
+						{#if creatingCampaign}
+							<!-- The name box, inline: making a campaign is a two-word
+							     decision and sending someone to another page to make it is
+							     how a session ends up recorded into none. -->
+							<div class="flex gap-2">
+								<Input
+									bind:value={newCampaignName}
+									placeholder="Campaign name"
+									aria-label="New campaign name"
+									onkeydown={(e: KeyboardEvent) => {
+										if (e.key === 'Enter') createCampaign()
+										if (e.key === 'Escape') creatingCampaign = false
+									}}
+								/>
+								<Button
+									size="sm"
+									onclick={createCampaign}
+									disabled={campaignBusy || !newCampaignName.trim()}
+								>
+									{campaignBusy ? 'Creating…' : 'Create'}
+								</Button>
+								<Button size="sm" variant="ghost" onclick={() => (creatingCampaign = false)}>
+									Cancel
+								</Button>
+							</div>
+						{/if}
+						{#if campaignError}
+							<span class="text-xs text-destructive">{campaignError}</span>
+						{:else}
+							<span class="text-xs text-muted-foreground">
+								Its glossary biases this session, and its recaps collect here.
+							</span>
+						{/if}
+					</div>
 					<div class="flex flex-col gap-2">
 						<Label for="fallback">Fallback provider</Label>
 						<Dropdown

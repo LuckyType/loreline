@@ -44,6 +44,7 @@
 
 import { ArrowLeft, ChevronDown } from '@lucide/svelte'
 import { api } from '$lib/api'
+import { campaigns } from '$lib/campaigns.svelte'
 import { Badge } from '$lib/components/ui/badge'
 import { Button } from '$lib/components/ui/button'
 import { CardContent } from '$lib/components/ui/card'
@@ -53,6 +54,7 @@ import {
 	DropdownMenuItem,
 	DropdownMenuTrigger,
 } from '$lib/components/ui/dropdown-menu'
+import SessionCampaignDialog from '$lib/SessionCampaignDialog.svelte'
 import { audioIsEmpty, EMPTY_AUDIO_NOTE, fmtDuration, fmtWhen, versionLabel } from '$lib/stores'
 import type { ExportFormat } from '$lib/types'
 import type { Session, VideoJob } from '$lib/wire'
@@ -63,6 +65,7 @@ let {
 	audioDurationS,
 	version,
 	videoJobs = [],
+	oncampaignchanged,
 }: {
 	sessionId: string
 	session: Session
@@ -73,7 +76,15 @@ let {
 	/** Every video generated from this session, finished or not. The page owns
 	 *  the list; the menu below offers the ones with a file behind them. */
 	videoJobs?: VideoJob[]
+	/** The session moved to another campaign: the caller refetches it. */
+	oncampaignchanged?: () => Promise<void> | void
 } = $props()
+
+let campaignOpen = $state(false)
+// '' for a session in no campaign, and for one whose campaign has been
+// deleted: the id behind the second is not something anyone can act on, and
+// "None" is what both of them mean to a reader.
+const campaignName = $derived(campaigns.name(session.campaign_id))
 
 const formats: ExportFormat[] = ['txt', 'md', 'srt', 'vtt', 'json']
 const formatLabels: Record<ExportFormat, string> = {
@@ -145,6 +156,27 @@ const durationText = $derived(fmtDuration(session.started_at, session.ended_at))
 	<span class="text-muted-foreground max-sm:order-1 max-sm:basis-full">
 		{fmtWhen(session.started_at)}{durationText ? ` · ${durationText}` : ''}
 	</span>
+	<!-- Which campaign this belongs to, beside when it ran, because both are
+	     facts about the session rather than actions on it. The name links to the
+	     campaign; Change is what moves it, and is the only way to, since the
+	     capture card can only answer the question as a session starts. -->
+	<span class="flex items-center gap-1 text-muted-foreground max-sm:order-1">
+		{#if campaignName}
+			<a class="text-primary hover:underline" href="/campaigns/{session.campaign_id}">
+				{campaignName}
+			</a>
+		{:else}
+			No campaign
+		{/if}
+		<Button
+			variant="ghost"
+			size="sm"
+			class="h-6 px-2 text-xs"
+			onclick={() => (campaignOpen = true)}
+		>
+			Change
+		</Button>
+	</span>
 	<DropdownMenu>
 		<DropdownMenuTrigger>
 			{#snippet child({ props })}
@@ -213,3 +245,10 @@ const durationText = $derived(fmtDuration(session.started_at, session.ended_at))
 		</DropdownMenuContent>
 	</DropdownMenu>
 </CardContent>
+
+<SessionCampaignDialog
+	bind:open={campaignOpen}
+	{sessionId}
+	campaignId={session.campaign_id}
+	onchanged={oncampaignchanged}
+/>
