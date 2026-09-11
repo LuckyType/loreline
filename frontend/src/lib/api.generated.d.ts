@@ -708,11 +708,7 @@ export interface paths {
         };
         /**
          * Campaign Sessions
-         * @description The campaign's sessions, oldest first - the order they were played in.
-         *
-         *     The opposite of the History page's order, deliberately: that page answers
-         *     "what did I record last", and a campaign answers "what happened, and then
-         *     what happened", which is a story and reads forwards.
+         * @description The campaign's sessions, oldest first.
          */
         get: operations["campaign_sessions_api_campaigns__campaign_id__sessions_get"];
         put?: never;

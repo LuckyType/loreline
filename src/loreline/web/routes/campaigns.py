@@ -130,19 +130,24 @@ async def delete_campaign(request: Request, campaign_id: str) -> OkResponse:
     return OkResponse()
 
 
-@router.get("/{campaign_id}/sessions")
-async def campaign_sessions(request: Request, campaign_id: str) -> list[Session]:
+async def _ordered_sessions(state: AppState, campaign_id: str) -> list[Session]:
     """The campaign's sessions, oldest first - the order they were played in.
 
     The opposite of the History page's order, deliberately: that page answers
     "what did I record last", and a campaign answers "what happened, and then
     what happened", which is a story and reads forwards.
     """
-    state = get_state(request)
-    await _require_campaign(state, campaign_id)
     sessions = [s for s in await state.sessions.list() if s.campaign_id == campaign_id]
     sessions.sort(key=lambda s: s.started_at)
     return sessions
+
+
+@router.get("/{campaign_id}/sessions")
+async def campaign_sessions(request: Request, campaign_id: str) -> list[Session]:
+    """The campaign's sessions, oldest first."""
+    state = get_state(request)
+    await _require_campaign(state, campaign_id)
+    return await _ordered_sessions(state, campaign_id)
 
 
 @router.get("/{campaign_id}/documents")
@@ -224,7 +229,7 @@ async def write_previously_on(
     campaign = await _require_campaign(state, campaign_id)
     provider, api_key = await llm_target(state, body.provider_id)
 
-    sessions = await campaign_sessions(request, campaign_id)
+    sessions = await _ordered_sessions(state, campaign_id)
     recaps = {
         document.session_id: document.body
         for document in await state.documents.for_campaign(campaign_id, DOCUMENT_RECAP)

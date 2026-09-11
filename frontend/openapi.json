@@ -1657,7 +1657,7 @@
           "campaigns"
         ],
         "summary": "Campaign Sessions",
-        "description": "The campaign's sessions, oldest first - the order they were played in.\n\nThe opposite of the History page's order, deliberately: that page answers\n\"what did I record last\", and a campaign answers \"what happened, and then\nwhat happened\", which is a story and reads forwards.",
+        "description": "The campaign's sessions, oldest first.",
         "operationId": "campaign_sessions_api_campaigns__campaign_id__sessions_get",
         "security": [
           {
