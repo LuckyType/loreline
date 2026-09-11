@@ -1,5 +1,11 @@
 import { writable } from 'svelte/store'
-import type { Health, ProviderConfig, ReprocessJob, TranscriptEvent } from './wire'
+import type {
+	DiarizationConfig,
+	Health,
+	ProviderConfig,
+	ReprocessJob,
+	TranscriptEvent,
+} from './wire'
 import type { ConnectionStatus } from './ws'
 
 export const health = writable<Health | null>(null)
@@ -51,13 +57,33 @@ export function versionLabel(version: string): string {
 	return version === 'original' ? 'original' : version.slice(0, 8)
 }
 
-/** What the diarizer a job used is called: named in the version list, and
- *  again next to the transcript that job relabeled. */
-export function diarizerLabel(job: ReprocessJob): string {
-	if (job.diarization.mode === 'openai') return 'OpenAI · gpt-4o-transcribe-diarize'
-	if (job.diarization.mode === 'remote')
-		return `sherpa-onnx${job.diarization.endpoint ? ` · ${job.diarization.endpoint}` : ''}`
-	return job.diarization.mode
+/** What the diarizer a run used is called: named in the version list, and
+ *  again next to the transcript it labelled.
+ *
+ *  Takes anything that carries a diarization config, because two things do:
+ *  a job, whose config is what a diarize pass or a re-transcription ran with,
+ *  and a session, whose config is what its live capture ran with. */
+export function diarizerLabel(ran: { diarization: DiarizationConfig }): string {
+	const config = ran.diarization
+	if (config.mode === 'openai') return 'OpenAI · gpt-4o-transcribe-diarize'
+	if (config.mode === 'remote')
+		return `sherpa-onnx${config.endpoint ? ` · ${config.endpoint}` : ''}`
+	return config.mode
+}
+
+/**
+ * What a version whose rows carry speakers, with no diarize pass to show for
+ * them, says about where the labels came from.
+ *
+ * They came with the transcription: the router labels each segment as the
+ * STT hands it over, with whichever diarizer the run was configured with, or
+ * the vendor labelled them itself. "inline" says that much on its own, and
+ * the diarizer is named after it when the config names one. A config of
+ * `none` or `inline` adds nothing: the labels already say all there is.
+ */
+export function inlineDiarizationLabel(ran: { diarization: DiarizationConfig }): string {
+	const mode = ran.diarization.mode
+	return mode === 'remote' || mode === 'openai' ? `inline · ${diarizerLabel(ran)}` : 'inline'
 }
 
 /**

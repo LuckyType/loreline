@@ -17,9 +17,9 @@
  * row of unlabelled squares. So summarizing stays, because it is the thing
  * this section is for, and the two that make and show a video move into an
  * overflow menu behind a `…`. That menu is a real one (see the vendored
- * dropdown-menu): it opens on tap, on Enter and on the arrow keys, and it
- * closes on Escape or a press anywhere else, which the hand-rolled popover in
- * the session header does not.
+ * dropdown-menu, which the session header's Export menu is built on too): it
+ * opens on tap, on Enter and on the arrow keys, and it closes on Escape or a
+ * press anywhere else.
  *
  * The video count follows them onto that trigger. It is the whole reason the
  * Videos button exists - the complaint that moved the players in here was that

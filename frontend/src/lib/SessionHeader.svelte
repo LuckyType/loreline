@@ -3,11 +3,15 @@
  * What a session is, in one band: when it ran, how long for, and the ways out
  * of it.
  *
- * The export menu is hand-rolled rather than a Dropdown because it is not a
- * picker: nothing stays selected, each item is a download, and the audio entry
- * only exists when there is a recording to hand over - and says so plainly
- * when that "recording" is a bare WAV header with nothing in it (a session
- * that errored before capturing any audio still writes one).
+ * The export menu is a menu, not a Dropdown picker: nothing stays selected,
+ * each item is a download, and the audio entry only exists when there is a
+ * recording to hand over - and says so plainly when that "recording" is a bare
+ * WAV header with nothing in it (a session that errored before capturing any
+ * audio still writes one). It is the vendored bits-ui dropdown menu (the same
+ * one the summary card's overflow uses) rather than a hand-rolled popover: the
+ * hand-rolled one closed on a click outside and on nothing else, so Escape
+ * left it open and focus never came back to the button, and a menu that
+ * ignores Escape is one keyboard users cannot leave.
  *
  * It exports the version the page is showing, and says which one at the top of
  * the menu. Both halves matter: the export used to be the capture no matter
@@ -43,6 +47,12 @@ import { api } from '$lib/api'
 import { Badge } from '$lib/components/ui/badge'
 import { Button } from '$lib/components/ui/button'
 import { CardContent } from '$lib/components/ui/card'
+import {
+	DropdownMenu,
+	DropdownMenuContent,
+	DropdownMenuItem,
+	DropdownMenuTrigger,
+} from '$lib/components/ui/dropdown-menu'
 import { audioIsEmpty, EMPTY_AUDIO_NOTE, fmtDuration, fmtWhen, versionLabel } from '$lib/stores'
 import type { ExportFormat } from '$lib/types'
 import type { Session, VideoJob } from '$lib/wire'
@@ -97,20 +107,25 @@ function videoDetail(job: VideoJob): string {
 	return parts.join(' · ')
 }
 
-let exportOpen = $state(false)
+// The empty-audio entry's reason line needs a stable id to be pointed at.
+const uid = $props.id()
+const audioReasonId = `${uid}-audio-reason`
 
+/** Every entry navigates rather than fetching: each route serves its file
+ *  with a filename attached, so the browser treats it as an attachment and
+ *  the page stays where it is. The menu closes itself on select. */
 function exportAs(fmt: ExportFormat) {
-	exportOpen = false
 	window.location.href = api.exportUrl(sessionId, fmt, version)
 }
 
-/** Hand over the .mp4. Navigating downloads rather than replacing the page:
- *  the route serves the file with a filename attached (see get_video_content),
- *  so the browser treats it as an attachment. The players in the summary's
+function exportAudio() {
+	window.location.href = api.audioUrl(sessionId)
+}
+
+/** Hand over the .mp4 (see get_video_content). The players in the summary's
  *  video dialog read the same URL, which a media element fetches rather than
  *  navigates to, so playback is unaffected either way. */
 function exportVideo(jobId: string) {
-	exportOpen = false
 	window.location.href = api.videoContentUrl(jobId)
 }
 
@@ -130,71 +145,71 @@ const durationText = $derived(fmtDuration(session.started_at, session.ended_at))
 	<span class="text-muted-foreground max-sm:order-1 max-sm:basis-full">
 		{fmtWhen(session.started_at)}{durationText ? ` · ${durationText}` : ''}
 	</span>
-	<div class="relative ml-auto">
-		<Button variant="outline" size="sm" onclick={() => (exportOpen = !exportOpen)}>
-			Export <ChevronDown class="size-4" />
-		</Button>
-		{#if exportOpen}
-			<button
-				class="fixed inset-0 z-20 cursor-default"
-				aria-label="Close export menu"
-				onclick={() => (exportOpen = false)}
-			></button>
-			<div
-				class="absolute top-full left-0 z-30 mt-1.5 flex w-56 flex-col rounded-lg border bg-popover p-1 shadow-lg"
-			>
-				<!-- Which transcript is about to be written, named before the
-				     formats rather than after the download. The audio entry below
-				     is deliberately outside this claim: there is one recording,
-				     and every version describes that same one. -->
-				<span class="px-3 py-1.5 text-xs text-muted-foreground">
-					Transcript <code>{versionLabel(version)}</code>
-				</span>
-				{#each formats as fmt (fmt)}
-					<button
-						class="rounded px-3 py-1.5 text-left hover:bg-accent"
-						onclick={() => exportAs(fmt)}
-					>
-						{formatLabels[fmt]}
-					</button>
-				{/each}
-				{#if hasAudio}
-					<button
-						class="mt-1 rounded border-t px-3 py-1.5 pt-2 text-left {audioEmpty
-							? 'cursor-not-allowed text-muted-foreground'
-							: 'hover:bg-accent'}"
-						disabled={audioEmpty}
-						title={audioEmpty ? EMPTY_AUDIO_NOTE : undefined}
-						onclick={() => {
-							exportOpen = false
-							window.location.href = api.audioUrl(sessionId)
-						}}
-					>
+	<DropdownMenu>
+		<DropdownMenuTrigger>
+			{#snippet child({ props })}
+				<Button {...props} variant="outline" size="sm" class="ml-auto">
+					Export <ChevronDown class="size-4" />
+				</Button>
+			{/snippet}
+		</DropdownMenuTrigger>
+		<!-- Aligned to its own end, so it hangs under the right edge of the band
+		     rather than off the side of a phone. -->
+		<DropdownMenuContent align="end" class="w-56">
+			<!-- Which transcript is about to be written, named before the formats
+			     rather than after the download. The audio entry below is
+			     deliberately outside this claim: there is one recording, and
+			     every version describes that same one. -->
+			<span class="px-2 py-1.5 text-xs text-muted-foreground">
+				Transcript <code>{versionLabel(version)}</code>
+			</span>
+			{#each formats as fmt (fmt)}
+				<DropdownMenuItem onSelect={() => exportAs(fmt)}>{formatLabels[fmt]}</DropdownMenuItem>
+			{/each}
+			{#if hasAudio}
+				<!-- An empty recording says why on a line of its own rather than in
+				     a `title`: a disabled item takes no pointer events, so a tooltip
+				     would never show, and a phone has no hover to show it on. The
+				     reason keeps full opacity while the label dims, for the same
+				     reason the summary's overflow menu does it that way. -->
+				<DropdownMenuItem
+					class={[
+						'mt-1 flex-col items-start gap-0.5 border-t pt-2',
+						audioEmpty && 'data-disabled:opacity-100',
+					]}
+					disabled={audioEmpty}
+					aria-describedby={audioEmpty ? audioReasonId : undefined}
+					onSelect={exportAudio}
+				>
+					<span class={[audioEmpty && 'text-muted-foreground']}>
 						{audioEmpty ? 'Audio (empty)' : 'Audio (.wav)'}
-					</button>
-				{/if}
-				<!-- Numbered, oldest first, because the number is the only part
-				     guaranteed to differ; the muted line under it says which model
-				     and at what settings, truncated rather than wrapped so one long
-				     model id cannot stretch the menu. Like the audio entry, these
-				     are outside the "Transcript <version>" claim above: a video is
-				     made from the summary, not from a transcript. -->
-				{#each videos as job, i (job.id)}
-					<button
-						class={[
-							'flex w-full flex-col items-start rounded px-3 py-1.5 text-left hover:bg-accent',
-							// The group's own rule, drawn once above the first entry.
-							i === 0 && 'mt-1 border-t pt-2',
-						]}
-						onclick={() => exportVideo(job.id)}
-					>
-						<span>Video {i + 1} (.mp4)</span>
-						<span class="max-w-full truncate text-xs text-muted-foreground">
-							{videoDetail(job)}
-						</span>
-					</button>
-				{/each}
-			</div>
-		{/if}
-	</div>
+					</span>
+					{#if audioEmpty}
+						<span id={audioReasonId} class="text-xs text-muted-foreground">{EMPTY_AUDIO_NOTE}</span>
+					{/if}
+				</DropdownMenuItem>
+			{/if}
+			<!-- Numbered, oldest first, because the number is the only part
+			     guaranteed to differ; the muted line under it says which model and
+			     at what settings, truncated rather than wrapped so one long model
+			     id cannot stretch the menu. Like the audio entry, these are outside
+			     the "Transcript <version>" claim above: a video is made from the
+			     summary, not from a transcript. -->
+			{#each videos as job, i (job.id)}
+				<DropdownMenuItem
+					class={[
+						'flex-col items-start gap-0.5',
+						// The group's own rule, drawn once above the first entry.
+						i === 0 && 'mt-1 border-t pt-2',
+					]}
+					onSelect={() => exportVideo(job.id)}
+				>
+					<span>Video {i + 1} (.mp4)</span>
+					<span class="max-w-full truncate text-xs text-muted-foreground">
+						{videoDetail(job)}
+					</span>
+				</DropdownMenuItem>
+			{/each}
+		</DropdownMenuContent>
+	</DropdownMenu>
 </CardContent>

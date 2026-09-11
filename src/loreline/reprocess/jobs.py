@@ -85,6 +85,10 @@ class DiarizerUnreachableError(ValueError):
     """Raised when a diarize job is asked for while nothing answers at its endpoint."""
 
 
+class DiarizerEndpointMissingError(ValueError):
+    """Raised when a remote diarize job names no endpoint and none is stored as the default."""
+
+
 class OriginalVersionError(ValueError):
     """Raised when asked to delete the original (live capture) transcript version."""
 
@@ -152,6 +156,16 @@ def stored_audio_backend(
 # default is the probe ``/api/system/healthz`` and ``/api/system/diarizer/probe``
 # already call, so all three agree on what "not answering" means.
 DiarizerProbe = Callable[[str], Awaitable[HealthReport]]
+
+# Where a remote diarize job that names no endpoint gets one: the stored
+# default, read when the job is enqueued rather than once at startup, so a
+# default saved on the settings page is honoured by the next press. None when
+# nothing is stored, which is the one case the job is refused for.
+DefaultEndpoint = Callable[[], Awaitable[str | None]]
+
+
+async def _no_default_endpoint() -> str | None:
+    return None
 
 
 # How often a running job's segment count is written back to its row. The
@@ -305,6 +319,7 @@ class ReprocessManager:
         diarizer_factory: BuildDiarizer,
         backend_factory: BackendFactory | None = None,
         diarizer_probe: DiarizerProbe | None = None,
+        default_endpoint: DefaultEndpoint | None = None,
     ) -> None:
         self._providers = providers
         self._glossaries = glossaries
@@ -320,6 +335,7 @@ class ReprocessManager:
         self._backend_factory = backend_factory or stored_audio_backend
         self._diarizer_factory = diarizer_factory
         self._diarizer_probe = diarizer_probe or probe_diarizer
+        self._default_endpoint = default_endpoint or _no_default_endpoint
         self._runs: dict[str, _Run] = {}
 
     async def enqueue(self, req: ReprocessRequest) -> ReprocessJob:
@@ -349,8 +365,9 @@ class ReprocessManager:
             if not variant_rows(events, req.target):
                 msg = f"unknown transcript version {req.target!r}"
                 raise TargetNotFoundError(msg)
+        diarization = await self._resolve_endpoint(req.diarization)
         if req.operation == "diarize":
-            await self._refuse_an_unreachable_diarizer(req.diarization)
+            await self._refuse_an_unreachable_diarizer(diarization)
 
         job = ReprocessJob(
             id=uuid.uuid4().hex,
@@ -368,7 +385,10 @@ class ReprocessManager:
             # Same reason as `model`: the row says whether this version was
             # produced with the glossary, not merely what was asked for.
             use_glossary=req.use_glossary if req.operation == "transcribe" else True,
-            diarization=req.diarization,
+            # The resolved config, not the request's: the row is the record of
+            # what ran, and "endpoint: null" on a job that ran at the stored
+            # default would send the reader to the settings page to find out.
+            diarization=diarization,
             status=JobStatus.QUEUED,
             created_at=time.time(),
         )
@@ -386,6 +406,41 @@ class ReprocessManager:
         task.add_done_callback(lambda _t: self._runs.pop(job.id, None))
         log.info("reprocess.enqueue", job_id=job.id, session_id=job.session_id)
         return job
+
+    async def _resolve_endpoint(self, config: DiarizationConfig) -> DiarizationConfig:
+        """Fill in a remote diarizer's endpoint from the stored default when
+        the request left it blank.
+
+        The diarize dialog promises exactly this: its endpoint field says a
+        blank value falls back to the server's configured one, and it sends
+        ``null`` to mean so. Nothing downstream honoured that. The factory
+        refused the config outright ("remote diarization requires an
+        endpoint"), so a GM who had saved a default on the settings page and
+        left the field blank, as the copy invited, got a failed job. Resolving
+        here rather than in the factory is what makes the probe below check
+        the endpoint the job will actually use, and what puts that endpoint on
+        the job row, where the version list and the failure message read it.
+
+        A remote config with nothing to resolve to is refused, not queued, for
+        either operation. A diarize job's whole work is one call to that
+        endpoint. A transcribe job builds its diarizer before the router ever
+        runs (see :meth:`_transcribe_session`), so the "survives a diarizer
+        that is not there" allowance ``_refuse_an_unreachable_diarizer`` makes
+        does not reach a diarizer that cannot be built at all: the job would
+        fail on its first line, minutes after the press. A live capture asked
+        for the same config is refused at the start button (see
+        ``SessionConfigError``), and this is the same answer.
+        """
+        if config.mode != DiarizationMode.REMOTE or (config.endpoint or "").strip():
+            return config
+        endpoint = await self._default_endpoint()
+        if endpoint:
+            return config.model_copy(update={"endpoint": endpoint})
+        msg = (
+            "remote diarization needs an endpoint and none is configured: type the "
+            "diarization service's address, or save one as the default under Settings."
+        )
+        raise DiarizerEndpointMissingError(msg)
 
     async def _refuse_an_unreachable_diarizer(self, config: DiarizationConfig) -> None:
         """Say no at the button when nothing answers at the diarizer's endpoint.
@@ -807,6 +862,9 @@ class ReprocessManager:
             assign_speakers(event, segments).model_copy(update={"source": source}) for event in base
         ]
         await self._transcripts.delete_source(job.session_id, source)
+        # Known before the first row lands, so the live count's writes carry
+        # it: the version list reads the row, not the rows.
+        job.has_speakers = any(event.speaker for event in relabeled)
         live = _LiveSegmentCount(job, self._reprocess)
         try:
             for written, event in enumerate(relabeled, start=1):
@@ -824,6 +882,7 @@ class ReprocessManager:
             # Shielded because this task is being torn down: an interrupted
             # cleanup is the corrupt state it exists to prevent.
             job.segments_added = 0
+            job.has_speakers = False
             await asyncio.shield(self._transcripts.delete_source(job.session_id, source))
             raise
         return len(relabeled)
@@ -869,6 +928,10 @@ class ReprocessManager:
                     await self._transcripts.add(tagged)
                     await self._bus.publish(tagged)
                     count += 1
+                    # Before the count's write, so the row that says "1 so
+                    # far" already says whether that one names a speaker.
+                    if tagged.speaker:
+                        job.has_speakers = True
                     await live.set(count)
             finally:
                 await run_task

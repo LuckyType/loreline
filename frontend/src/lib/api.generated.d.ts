@@ -951,6 +951,12 @@ export interface paths {
          *     the request is fine and the machine it needs is not there. It is also the
          *     one refusal here that clears up by itself, so the message names the
          *     endpoint and invites another press rather than describing a bad request.
+         *
+         *     400 for a remote diarization that names no endpoint when none is stored
+         *     as the default either: a blank field means "the default", and with no
+         *     default there is nothing the job could run against, so the request is what
+         *     has to change. The dialog refuses that press itself; this is the answer for
+         *     a client that did not.
          */
         post: operations["enqueue_reprocess_api_reprocess_post"];
         delete?: never;
@@ -1938,6 +1944,11 @@ export interface components {
              * @default 0
              */
             segments_added?: number;
+            /**
+             * Has Speakers
+             * @default false
+             */
+            has_speakers?: boolean;
             /** Error */
             error?: string | null;
         };

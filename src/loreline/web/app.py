@@ -46,6 +46,7 @@ from loreline.updater.process import CommandRunner
 from loreline.video import VideoManager, VideoStore
 from loreline.video.client import ClientFactory as VideoClientFactory
 from loreline.web.auth import LoginRateLimiter, ensure_jwt_secret
+from loreline.web.deps import read_action_defaults
 from loreline.web.routes import (
     audio,
     auth,
@@ -172,6 +173,13 @@ def _build_state(
         diarizer_factory=diarizers,
         disk_threshold_bytes=settings.disk_alert_threshold_bytes,
     )
+
+    async def default_diar_endpoint() -> str | None:
+        # The same stored value ``/api/system/healthz`` grades and the capture
+        # panel seeds its field from, so a diarize job left blank runs where
+        # the settings page says the diarizer is.
+        return (await read_action_defaults(settings_repo)).diar_endpoint or None
+
     reprocess_manager = ReprocessManager(
         providers=provider_repo,
         glossaries=glossary_repo,
@@ -184,6 +192,7 @@ def _build_state(
         backend_factory=backend_factory,
         diarizer_factory=diarizers,
         diarizer_probe=diarizer_probe,
+        default_endpoint=default_diar_endpoint,
     )
     video_manager = VideoManager(
         providers=provider_repo,

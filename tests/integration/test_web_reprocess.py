@@ -784,6 +784,204 @@ async def test_diarizing_against_a_service_that_is_not_answering_is_refused(
     assert probed == ["http://diar"]
 
 
+async def test_a_diarization_left_blank_runs_at_the_stored_default_endpoint(
+    tmp_path: Path,
+) -> None:
+    """The fallback the diarize dialog promises, honoured end to end.
+
+    The dialog's endpoint field says a blank value falls back to the server's
+    configured one, and sends null to mean so; nothing resolved it, and the
+    factory refused the config, so the job failed for a GM who had done what
+    the copy invited. Now the stored default is read when the job is enqueued:
+    the probe checks that endpoint, the diarizer is built for it, and the row
+    records it, so the version list names where the run actually went rather
+    than "endpoint: null". A transcribe job that asks for remote diarization
+    the same way gets the same endpoint.
+    """
+    probed: list[str] = []
+    built: list[DiarizationConfig] = []
+
+    async def reachable(endpoint: str) -> HealthReport:
+        probed.append(endpoint)
+        return HealthReport(HealthStatus.HEALTHY)
+
+    async def diarizers(config: DiarizationConfig) -> DiarizationProvider:
+        built.append(config)
+        return _WholeSessionDiarizer()
+
+    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t")
+    app = create_app(
+        settings,
+        capture_factory=capture_factory,  # type: ignore[arg-type]
+        backend_factory=FakeBackend,  # type: ignore[arg-type]
+        diarizer_factory=diarizers,
+        diarizer_probe=reachable,
+    )
+    async with LifespanManager(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            pid = await _provider(client)
+            sid = await _run_session(client, pid)
+            saved = await client.put(
+                "/api/system/defaults",
+                json={"diar_mode": "remote", "diar_endpoint": "http://stored:8001"},
+            )
+            assert saved.status_code == 200
+            built.clear()
+
+            # Null, the dialog's spelling of "blank", and whitespace, a
+            # client's: neither is an address.
+            for endpoint in (None, "   "):
+                enqueue = await client.post(
+                    "/api/reprocess",
+                    json={
+                        "session_id": sid,
+                        "operation": "diarize",
+                        "diarization": {"mode": "remote", "endpoint": endpoint},
+                    },
+                )
+                assert enqueue.status_code == 202, enqueue.text
+                assert enqueue.json()["diarization"]["endpoint"] == "http://stored:8001"
+                job = await _wait_done(client, enqueue.json()["id"])
+                assert job["status"] == "done"
+                assert int(job["segments_added"]) >= 1  # type: ignore[arg-type]
+
+            transcribe = await client.post(
+                "/api/reprocess",
+                json={
+                    "session_id": sid,
+                    "provider_id": pid,
+                    "model": _MODEL,
+                    "diarization": {"mode": "remote"},
+                },
+            )
+            assert transcribe.status_code == 202, transcribe.text
+            assert transcribe.json()["diarization"]["endpoint"] == "http://stored:8001"
+            assert (await _wait_done(client, transcribe.json()["id"]))["status"] == "done"
+
+    # Probed once per diarize job, at the resolved address; a transcribe job
+    # is not probed (see test_diarizing_against_a_service_that_is_not_answering_is_refused).
+    assert probed == ["http://stored:8001", "http://stored:8001"]
+    # And every diarizer built for those jobs was built for that address.
+    remote = [c.endpoint for c in built if c.mode is DiarizationMode.REMOTE]
+    assert remote == ["http://stored:8001"] * 3
+
+
+async def test_a_remote_diarization_with_no_endpoint_anywhere_is_refused(
+    client: AsyncClient,
+) -> None:
+    """Blank means "the default", and with no default there is nothing to run
+    against, so the press is answered with a 400 that says where to put one.
+
+    A 400 and not a 503: the request is what has to change. No job row is
+    left behind either, for the same reason the unreachable case leaves none.
+    A transcribe job asking for remote diarization the same way is refused
+    too: it builds its diarizer before the router runs, so it would fail on
+    its first line rather than survive without labels, and a live capture
+    asked for the same config is refused at the start button.
+    """
+    pid = await _provider(client)
+    sid = await _run_session(client, pid)
+
+    refused = await client.post(
+        "/api/reprocess",
+        json={"session_id": sid, "operation": "diarize", "diarization": {"mode": "remote"}},
+    )
+    assert refused.status_code == 400
+    detail = refused.json()["detail"]
+    assert "none is configured" in detail
+    assert "Settings" in detail  # where the default lives
+
+    transcribe = await client.post(
+        "/api/reprocess",
+        json={
+            "session_id": sid,
+            "provider_id": pid,
+            "model": _MODEL,
+            "diarization": {"mode": "remote"},
+        },
+    )
+    assert transcribe.status_code == 400
+    assert (await client.get("/api/reprocess", params={"session_id": sid})).json() == []
+
+    # The other modes have no address to resolve, and are untouched.
+    plain = await client.post(
+        "/api/reprocess", json={"session_id": sid, "provider_id": pid, "model": _MODEL}
+    )
+    assert plain.status_code == 202
+
+
+async def test_a_job_row_says_whether_its_rows_carry_speakers(tmp_path: Path) -> None:
+    """``has_speakers`` is what lets the version list call a version diarized
+    without loading it.
+
+    The list decided that from diarize jobs alone, so a re-transcription that
+    ran with a diarizer (its rows labelled one by one by the router) showed
+    "Not diarized" over lines that named who spoke. The flag is set as the
+    rows are written: a run with no diarizer leaves it off, a run with one
+    turns it on, and a diarize pass says so on its own row while leaving the
+    version it relabeled saying what that version's own rows say.
+    """
+    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t")
+    app = create_app(
+        settings,
+        capture_factory=capture_factory,  # type: ignore[arg-type]
+        backend_factory=FakeBackend,  # type: ignore[arg-type]
+        diarizer_factory=_whole_session_diarizers,
+        diarizer_probe=_reachable_diarizer,
+    )
+    async with LifespanManager(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            pid = await _provider(client)
+            sid = await _run_session(client, pid)
+
+            plain = await client.post(
+                "/api/reprocess", json={"session_id": sid, "provider_id": pid, "model": _MODEL}
+            )
+            plain_job = await _wait_done(client, plain.json()["id"])
+            assert plain_job["status"] == "done"
+            assert int(plain_job["segments_added"]) >= 1  # type: ignore[arg-type]
+            assert plain_job["has_speakers"] is False
+
+            labelled = await client.post(
+                "/api/reprocess",
+                json={
+                    "session_id": sid,
+                    "provider_id": pid,
+                    "model": _MODEL,
+                    "diarization": {"mode": "remote", "endpoint": "http://diar"},
+                },
+            )
+            labelled_id = labelled.json()["id"]
+            labelled_job = await _wait_done(client, labelled_id)
+            assert labelled_job["status"] == "done"
+            assert labelled_job["has_speakers"] is True
+            rows = (
+                await client.get(f"/api/session/{sid}/transcript", params={"version": labelled_id})
+            ).json()
+            assert rows and all(r["speaker"] == "Speaker A" for r in rows)
+
+            relabel = await client.post(
+                "/api/reprocess",
+                json={
+                    "session_id": sid,
+                    "operation": "diarize",
+                    "target": plain_job["id"],
+                    "diarization": {"mode": "remote", "endpoint": "http://diar"},
+                },
+            )
+            relabel_job = await _wait_done(client, relabel.json()["id"])
+            assert relabel_job["status"] == "done"
+            assert relabel_job["has_speakers"] is True
+            # The relabeled version's own row is about its own rows, which
+            # still carry no speaker: the pass's copy supersedes them on read
+            # and the pass's row is what says so.
+            assert (await client.get(f"/api/reprocess/{plain_job['id']}")).json()[
+                "has_speakers"
+            ] is False
+
+
 class _TrackingDiarizer:
     """Diarizer standing in for the remote service's per-session bank memory.
 

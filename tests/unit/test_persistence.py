@@ -11,9 +11,11 @@ import pytest_asyncio
 from loreline.models import (
     DEFAULT_GLOSSARY_CAMPAIGN,
     Glossary,
+    JobStatus,
     OpenRouterRouting,
     ProviderConfig,
     ProviderKind,
+    ReprocessJob,
     Session,
     SessionStatus,
     TranscriptEvent,
@@ -23,6 +25,7 @@ from loreline.persistence import (
     Database,
     GlossaryRepository,
     ProviderRepository,
+    ReprocessRepository,
     SessionRepository,
     TranscriptRepository,
 )
@@ -36,6 +39,7 @@ _V_MERGE_KINDS = 11  # v12: fold openrouter_stt / openai_chat onto merged kinds
 _V_DROP_VOSK = 14  # v15: delete rows of the removed vosk kind and what named them
 _V_DROP_PROVIDER_MODEL = 15  # v16: drop providers.model, chosen per request now
 _V_DROP_PROVIDER_WIRE = 16  # v17: drop providers.protocol and providers.capabilities
+_V_HAS_SPEAKERS = 20  # v21: reprocess_jobs.has_speakers, backfilled from each job's rows
 
 
 @pytest_asyncio.fixture
@@ -617,3 +621,70 @@ async def test_provider_routing_survives_a_round_trip(db: Database) -> None:
     plain = await repo.get("dg1")
     assert plain is not None
     assert plain.routing is None
+
+
+async def test_migration_backfills_has_speakers_from_the_rows_each_job_wrote(
+    tmp_path: Path,
+) -> None:
+    """A job row that predates the flag says what its rows say.
+
+    The version list reads ``has_speakers`` off the row to call a version
+    diarized without loading it, so a column that defaulted to 0 for every
+    existing job would have put "Not diarized" back on exactly the versions
+    the flag was added for. The backfill reads each job's own rows: a
+    re-transcription's are tagged with its id, a relabeling's with its target.
+    """
+    path = tmp_path / "legacy-speakers.db"
+    async with Database(path) as database:
+        conn = database.connection
+        sessions = SessionRepository(database)
+        transcripts = TranscriptRepository(database)
+        reprocess = ReprocessRepository(database)
+        await sessions.create(Session(id="s1", started_at=time.time()))
+
+        def job(
+            job_id: str, *, operation: str = "transcribe", target: str = "original"
+        ) -> ReprocessJob:
+            return ReprocessJob(
+                id=job_id,
+                session_id="s1",
+                provider_id="p",
+                operation=operation,
+                target=target,
+                status=JobStatus.DONE,
+                created_at=time.time(),
+            )
+
+        def row(source: str, speaker: str | None) -> TranscriptEvent:
+            return TranscriptEvent(
+                session_id="s1",
+                source=source,
+                text="hello",
+                speaker=speaker,
+                start_ts=0.0,
+                end_ts=1.0,
+                is_final=True,
+            )
+
+        await reprocess.create(job("labelled"))
+        await reprocess.create(job("plain"))
+        await reprocess.create(job("empty"))
+        await reprocess.create(job("pass", operation="diarize", target="plain"))
+        await transcripts.add(row("reprocess:labelled", "Speaker A"))
+        await transcripts.add(row("reprocess:plain", None))
+        await transcripts.add(row("reprocess:plain", ""))
+        await transcripts.add(row("diarize:plain", "Speaker B"))
+
+        # Take the column away to stand in for a pre-v21 database, then run
+        # only the migration under test (see the v16 test above for why).
+        await conn.execute("ALTER TABLE reprocess_jobs DROP COLUMN has_speakers;")
+        await conn.executescript(MIGRATIONS[_V_HAS_SPEAKERS])
+        await conn.commit()
+
+        flags = {j.id: j.has_speakers for j in await reprocess.for_session("s1")}
+        assert flags == {
+            "labelled": True,  # its own rows name a speaker
+            "plain": False,  # rows, but none labelled; the diarize pass's rows are not its own
+            "empty": False,  # no rows at all
+            "pass": True,  # the relabeled copy it wrote, tagged with its target
+        }

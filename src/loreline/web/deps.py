@@ -9,6 +9,7 @@ from fastapi import Request
 from loreline.web.schemas import ActionDefaults
 
 if TYPE_CHECKING:
+    from loreline.persistence import SettingsRepository
     from loreline.reprocess import ReprocessManager
     from loreline.session import SessionManager
     from loreline.web.app import AppState
@@ -22,10 +23,21 @@ def get_state(request: Request) -> AppState:
     return state
 
 
-async def load_action_defaults(state: AppState) -> ActionDefaults:
-    """Read the stored per-action defaults (blank model when never saved)."""
-    raw = await state.settings_repo.get(ACTION_DEFAULTS_KEY)
+async def read_action_defaults(settings: SettingsRepository) -> ActionDefaults:
+    """Read the stored per-action defaults (blank model when never saved).
+
+    Takes the repository rather than the app state so it can be called from
+    where the state does not exist yet: ``create_app`` hands the reprocess
+    manager a reader for the default diarizer endpoint while it is still
+    building the state the routes get.
+    """
+    raw = await settings.get(ACTION_DEFAULTS_KEY)
     return ActionDefaults.model_validate_json(raw) if raw else ActionDefaults()
+
+
+async def load_action_defaults(state: AppState) -> ActionDefaults:
+    """The stored per-action defaults, off the app state a route has in hand."""
+    return await read_action_defaults(state.settings_repo)
 
 
 def get_manager(request: Request) -> SessionManager:

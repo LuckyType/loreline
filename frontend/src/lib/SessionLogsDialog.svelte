@@ -8,6 +8,12 @@
  *
  * One instance serves the whole table, so where focus goes on close is not
  * something this dialog can work out for itself - see `trigger`.
+ *
+ * "Loading…" is keyed on the fetch being in flight, not on the list being
+ * empty. The stored log is split into lines and the blank ones dropped, so a
+ * log that exists and holds nothing readable used to leave the list empty and
+ * the placeholder saying "Loading…" for as long as the dialog stayed open; a
+ * fetch that has come back with nothing to show now says that instead.
  */
 
 import { ApiError, api } from '$lib/api'
@@ -46,6 +52,11 @@ let {
 
 let lines = $state<string[]>([])
 let error = $state('')
+let loading = $state(false)
+// Bumped per fetch, so one that is still in flight when the version changes
+// under the dialog cannot land its lines, or clear `loading`, after the newer
+// one. A plain variable: only ever compared after an await, never rendered.
+let loadToken = 0
 
 // Opening is what fetches, and a version changing under an open dialog
 // refetches: the row that asked is the only thing that knows which log is
@@ -55,18 +66,24 @@ $effect(() => {
 })
 
 async function load(wanted: string) {
+	const token = ++loadToken
 	lines = []
 	error = ''
+	loading = true
 	try {
 		const stored = await api.getVersionLogs(sessionId, wanted)
+		if (token !== loadToken) return
 		lines = stored.logs.split('\n').filter((line) => line !== '')
 	} catch (err) {
+		if (token !== loadToken) return
 		error =
 			err instanceof ApiError && err.status === 404
 				? 'No logs were stored for this version.'
 				: err instanceof ApiError
 					? err.message
 					: 'failed to load logs'
+	} finally {
+		if (token === loadToken) loading = false
 	}
 }
 </script>
@@ -98,8 +115,10 @@ async function load(wanted: string) {
 				{#each lines as line, i (i)}
 					<LogLine {line} wrap={false} />
 				{/each}
-				{#if lines.length === 0}
+				{#if loading}
 					<span class="text-muted-foreground">Loading…</span>
+				{:else if lines.length === 0}
+					<span class="text-muted-foreground">The stored log has no lines to show.</span>
 				{/if}
 			</div>
 		{/if}

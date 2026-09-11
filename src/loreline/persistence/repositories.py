@@ -337,8 +337,8 @@ class ReprocessRepository:
             INSERT INTO reprocess_jobs
                 (id, session_id, provider_id, operation, model, target, use_glossary,
                  diarization, status, created_at, started_at, finished_at, segments_added,
-                 error)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                 has_speakers, error)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
             """,
             (
                 job.id,
@@ -354,6 +354,7 @@ class ReprocessRepository:
                 job.started_at,
                 job.finished_at,
                 job.segments_added,
+                int(job.has_speakers),
                 job.error,
             ),
         )
@@ -379,7 +380,7 @@ class ReprocessRepository:
             """
             UPDATE reprocess_jobs SET
                 status = ?, started_at = ?, finished_at = ?,
-                segments_added = ?, error = ?
+                segments_added = ?, has_speakers = ?, error = ?
             WHERE id = ?;
             """,
             (
@@ -387,6 +388,7 @@ class ReprocessRepository:
                 job.started_at,
                 job.finished_at,
                 job.segments_added,
+                int(job.has_speakers),
                 job.error,
                 job.id,
             ),
@@ -511,6 +513,7 @@ def _row_to_job(row: aiosqlite.Row) -> ReprocessJob:
         started_at=row["started_at"],
         finished_at=row["finished_at"],
         segments_added=row["segments_added"],
+        has_speakers=bool(row["has_speakers"]),
         error=row["error"],
     )
 
