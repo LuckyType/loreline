@@ -761,9 +761,16 @@ onMount(() => {
 						{/if}
 						{#if campaignError}
 							<span class="text-xs text-destructive">{campaignError}</span>
-						{:else}
+						{:else if campaignId}
 							<span class="text-xs text-muted-foreground">
-								Its glossary biases this session, and its recaps collect here.
+								Its players and its glossary bias this session, and its recaps collect here.
+							</span>
+						{:else}
+							<!-- Said here because this is where a GM meets it: a glossary
+							     belongs to a campaign now, so a session in none is
+							     transcribed with no names at all. -->
+							<span class="text-xs text-muted-foreground">
+								A session in no campaign is transcribed with no glossary and no player names.
 							</span>
 						{/if}
 					</div>

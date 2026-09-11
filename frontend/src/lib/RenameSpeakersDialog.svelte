@@ -6,6 +6,12 @@
  * actually carries and whatever names the session already stores. It is not
  * bound to either: a version arriving under an open dialog must not wipe an
  * edit in progress.
+ *
+ * The names offered are the campaign's cast, through a datalist rather than a
+ * dropdown: a speaker's name is usually one of the five people at that table,
+ * and the GM typed them once on the campaign already - but it is sometimes the
+ * guest who sat in for one evening, so the field stays a free text box that
+ * suggests rather than a picker that insists.
  */
 
 import { untrack } from 'svelte'
@@ -27,6 +33,7 @@ let {
 	sessionId,
 	speakers,
 	names = {},
+	suggestions = [],
 	onsaved,
 	onerror,
 }: {
@@ -36,6 +43,8 @@ let {
 	speakers: string[]
 	/** The names already stored for them. */
 	names?: Record<string, string>
+	/** Offered in each box: the cast of the session's campaign, if it is in one. */
+	suggestions?: string[]
 	/** Names were saved: the caller refetches the session. Awaited, so the
 	 *  dialog only closes once the transcript behind it has caught up. */
 	onsaved?: () => Promise<void> | void
@@ -44,6 +53,9 @@ let {
 } = $props()
 
 let nameForm = $state<Record<string, string>>({})
+
+const uid = $props.id()
+const listId = `${uid}-cast`
 
 $effect(() => {
 	if (!open) return
@@ -77,10 +89,22 @@ async function saveNames() {
 			</DialogDescription>
 		</DialogHeader>
 		<div class="flex flex-col gap-3">
+			{#if suggestions.length > 0}
+				<datalist id={listId}>
+					{#each suggestions as name (name)}
+						<option value={name}></option>
+					{/each}
+				</datalist>
+			{/if}
 			{#each speakers as s, i (s)}
 				<div class="flex flex-col gap-2">
 					<Label for="speaker-name-{i}">{s}</Label>
-					<Input id="speaker-name-{i}" bind:value={nameForm[s]} placeholder={s} />
+					<Input
+						id="speaker-name-{i}"
+						bind:value={nameForm[s]}
+						placeholder={s}
+						list={suggestions.length > 0 ? listId : undefined}
+					/>
 				</div>
 			{/each}
 		</div>

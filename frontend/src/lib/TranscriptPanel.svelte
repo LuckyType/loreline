@@ -49,6 +49,7 @@
 import { Filter, Users } from '@lucide/svelte'
 import { actionSetup } from '$lib/actionSetup.svelte'
 import { ApiError, api } from '$lib/api'
+import { campaigns } from '$lib/campaigns.svelte'
 import { Button } from '$lib/components/ui/button'
 import { CardContent } from '$lib/components/ui/card'
 import DiarizeDialog from '$lib/DiarizeDialog.svelte'
@@ -369,6 +370,7 @@ const ownRun = $derived(version === 'original' ? detail.session : selectedJob)
 	{sessionId}
 	{speakers}
 	names={detail.session.speaker_names}
+	suggestions={campaigns.cast(detail.session.campaign_id)}
 	onsaved={onrenamed}
 	{onerror}
 />
