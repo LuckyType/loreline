@@ -1,4 +1,4 @@
-"""PCM resampling: one-shot (linear) and streaming (soxr).
+"""PCM shaping: resampling (one-shot linear, streaming soxr) and downmixing.
 
 Isolated here (with the native-dep pyright pragma) because it uses numpy from the
 optional ``audio`` extra; keeping it out of the STT backend lets that module stay
@@ -27,6 +27,31 @@ def resample_pcm16(pcm: bytes, src_rate: int, dst_rate: int) -> bytes:
     x_out = np.linspace(0.0, 1.0, num=n_out, endpoint=False)
     resampled = np.interp(x_out, x_in, samples)
     return np.clip(resampled, _INT16_MIN, _INT16_MAX).astype(np.int16).tobytes()
+
+
+def downmix_pcm16(pcm: bytes, channels: int) -> bytes:
+    """Average interleaved s16le channels down to one.
+
+    numpy rather than a Python loop because this runs over every sample of a
+    whole recording, and averaging rather than keeping the first channel
+    because two channels are two microphones as often as they are one signal
+    twice - dropping one of them would drop half the table.
+
+    A pass-through for mono, which is what makes the common import (a mono
+    WAV) need no native dependency at all.
+    """
+    if channels <= 1 or not pcm:
+        return pcm
+    try:
+        import numpy as np  # noqa: PLC0415 - lazy: numpy is an optional audio-extra dep
+    except ImportError as exc:  # pragma: no cover - numpy ships with the audio extra
+        msg = (
+            f"cannot mix {channels} channels down to mono: numpy is not installed "
+            "(it ships with the `audio` extra)."
+        )
+        raise RuntimeError(msg) from exc
+    frames = np.frombuffer(pcm, dtype=np.int16).reshape(-1, channels)
+    return frames.mean(axis=1).round().astype(np.int16).tobytes()
 
 
 class Pcm16Stream:
