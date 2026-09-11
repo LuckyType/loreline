@@ -371,6 +371,11 @@ async function openDeepLink() {
 	if (wanted) await selectVersion(wanted)
 	const at = Number(page.url.searchParams.get('t'))
 	if (!Number.isFinite(at) || at < 0) return
+	// The transcript folds away by default on a first visit, and a link to a
+	// line that arrives on a folded transcript looks exactly like a link that
+	// did nothing. Arriving by deep link is the one case that overrides how
+	// the reader last left this section.
+	sections.transcript = true
 	// The playhead is what the transcript highlights and the timeline points
 	// at, so putting it on the line is the whole of "show me this line".
 	currentTime = at
