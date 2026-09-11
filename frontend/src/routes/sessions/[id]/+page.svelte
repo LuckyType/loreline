@@ -26,6 +26,14 @@
  * beside it, and a session with no recording simply ends the column early.
  * Which segment is being spoken is worked out here, once, because both the
  * timeline's dots and the transcript's highlight are answers to it.
+ *
+ * The refreshes the page runs on its own - the job poll, the video poll, the
+ * reloads after a card changed something - report their failures in the same
+ * banner the cards use, through `refresh`. They used to be bare awaits, so a
+ * refetch that failed left the page quietly stale, and a card whose action
+ * had succeeded reported the refetch's failure as its own. One message, kept
+ * until the next refresh succeeds: the job poll runs every 1.5 s, and a
+ * banner that changed on every tick would be noise, not news.
  */
 
 import { onMount } from 'svelte'
@@ -46,6 +54,9 @@ let detail = $state<SessionDetail | null>(null)
 let jobs = $state<ReprocessJob[]>([])
 let videoJobs = $state<VideoJob[]>([])
 let error = $state('')
+// The last background refresh that failed, or ''. Its own slot rather than
+// `error`, so a success can clear it without clearing what a card reported.
+let refreshError = $state('')
 
 const id = $derived(page.params.id ?? '')
 
@@ -193,12 +204,31 @@ async function selectVersion(version: string) {
 	}
 }
 
+/** Run one background refresh and account for it in the banner.
+ *
+ * A failure is shown once, named by what it was refreshing, and stays until
+ * a refresh succeeds; a poll that keeps failing keeps the same message rather
+ * than re-announcing it every tick. Nothing is thrown, so a card that awaited
+ * the refresh after its own action succeeded is not told its action failed. */
+async function refresh(what: string, work: () => Promise<void>) {
+	try {
+		await work()
+		refreshError = ''
+	} catch (err) {
+		refreshError = `${what}: ${err instanceof ApiError ? err.message : 'request failed'}`
+	}
+}
+
 async function refreshJobs() {
-	jobs = await api.listReprocess(id)
+	await refresh('could not refresh the job list', async () => {
+		jobs = await api.listReprocess(id)
+	})
 }
 
 async function reloadDetail() {
-	detail = await api.getSession(id)
+	await refresh('could not reload the session', async () => {
+		detail = await api.getSession(id)
+	})
 }
 
 /** A finished run may have rewritten the selected version's rows, so the queue
@@ -209,8 +239,10 @@ async function reloadAfterJobs() {
 	await reloadDetail()
 	if (selectedVersion !== 'original') {
 		const token = versionRequestToken
-		const items = await api.getTranscriptVersion(id, selectedVersion)
-		if (token === versionRequestToken) versionFeed.items = items
+		await refresh('could not reload the transcript', async () => {
+			const items = await api.getTranscriptVersion(id, selectedVersion)
+			if (token === versionRequestToken) versionFeed.items = items
+		})
 	}
 }
 
@@ -238,7 +270,9 @@ $effect(() => {
 })
 
 async function refreshVideoJobs() {
-	videoJobs = await api.listVideoJobs(id)
+	await refresh('could not refresh the video list', async () => {
+		videoJobs = await api.listVideoJobs(id)
+	})
 }
 
 const videoRunning = $derived(
@@ -281,8 +315,10 @@ onMount(async () => {
 <!-- The window, less the header above and this page's own padding, exactly as
      the Dashboard sizes its dock. Everything below fits inside it or scrolls. -->
 <div class="flex h-[calc(100vh-104px)] flex-col gap-2">
-	{#if error || actionSetup.error}
-		<p class="m-0 shrink-0 text-sm text-destructive">{error || actionSetup.error}</p>
+	{#if error || refreshError || actionSetup.error}
+		<p class="m-0 shrink-0 text-sm text-destructive">
+			{error || refreshError || actionSetup.error}
+		</p>
 	{/if}
 
 	{#if !detail}
