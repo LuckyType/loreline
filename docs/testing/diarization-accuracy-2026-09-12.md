@@ -5,7 +5,10 @@ described. This is that measurement. It needed no new jobs and no reference
 corpus: the GM had already renamed the speakers on a real session, and those
 renames are ground truth for what the machine should have produced.
 
-Read off the live deployment through the API. Nothing was changed.
+Read off the live deployment through the API. Nothing was changed. The
+speakers are pseudonymised here, since this repository is public and the
+people at that table did not publish their names: Player A through Player D
+are stable across every table below.
 
 ## The session
 
