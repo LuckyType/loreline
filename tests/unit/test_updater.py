@@ -193,8 +193,13 @@ async def test_previous_revision_in_a_container_never_asks_git() -> None:
     reason = updater.rollback_unavailable()
     assert reason is not None
     assert "Docker deployment" in reason
-    # The refusal names the way round it, the same rule update's message follows.
+    # The refusal names the way round it, the same rule update's message follows,
+    # and it names it for both shapes a Docker deployment comes in: the compose
+    # file, and the `docker run` line of a single container that has no compose
+    # file to edit.
     assert "image tag" in reason
+    assert "docker run" in reason
+    assert "docker-compose.yml" in reason
 
 
 async def test_update_reports_commits() -> None:
@@ -235,6 +240,12 @@ async def test_update_refuses_in_container() -> None:
     assert "--profile updater" in result.output
     assert "UPDATER_TOKEN" in result.output
     assert "systemctl" not in result.output
+    # And it has to hold for a container that is the whole deployment. A plain
+    # `docker run` has no checkout, no .env and no compose project, so every
+    # instruction above names something that is not on that box; the answer
+    # there is to pull the image again, and it is said in those words.
+    assert "docker pull" in result.output
+    assert "docker run" in result.output
     # Never even tried to run the source-deployment script.
     assert not any(a[0] == "bash" for a in runner.calls)
 
@@ -571,8 +582,13 @@ async def test_autostart_unavailable_in_container() -> None:
 
     autostart = Autostart(unit="loreline", runner=FakeRunner(handle), in_container=True)
 
-    with pytest.raises(AutostartUnavailableError, match="Docker deployment"):
+    with pytest.raises(AutostartUnavailableError, match="Docker deployment") as raised:
         await autostart.is_enabled()
+    # Settings > Client shows this sentence where the toggle would be, so it
+    # has to answer the question the missing toggle raises: a container does
+    # start at boot, through its restart policy rather than through systemd.
+    assert "restart policy" in str(raised.value)
+    assert "unless-stopped" in str(raised.value)
     with pytest.raises(AutostartUnavailableError, match="Docker deployment"):
         await autostart.set_enabled(True)
 

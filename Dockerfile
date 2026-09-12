@@ -1,10 +1,21 @@
-# The production image (see deploy/install.sh and docker-compose.yml) - full
-# UI + backend, and on a Linux Docker host with /dev/snd passed through
-# (on by default in docker-compose.yml), real microphone capture too. Docker
-# Desktop on macOS/Windows runs containers in a Linux VM with no path to the
-# host's native audio devices, so mic capture only ever works on a Linux
-# host. A source+systemd deployment (no Docker at all) is also supported -
-# see deploy/install-source.sh - for boxes where that's a hard requirement.
+# The production image - full UI + backend in one container, which is the
+# whole of a minimal deployment:
+#
+#   docker run -d --name loreline -p 8000:8000 -v loreline-data:/app/data \
+#     ghcr.io/luckytype/loreline:latest
+#
+# docker-compose.yml adds the appliance around it (a reverse proxy, the Docker
+# API window, the optional self-hosted services); deploy/install.sh installs
+# that. A source+systemd deployment (no Docker at all) is also supported - see
+# deploy/install-source.sh - for boxes where that's a hard requirement.
+#
+# Capturing from a microphone attached to the *host* additionally needs
+# /dev/snd passed into the container, which is off by default because the
+# mount is an error on a host that has no sound card: see
+# deploy/mic-passthrough.override.yml. Docker Desktop on macOS/Windows runs
+# containers in a Linux VM with no path to the host's native audio devices, so
+# host mic capture only ever works on a Linux host. Recording through the
+# browser works everywhere and needs none of it.
 
 # --- Stage 1: build the SvelteKit static frontend -----------------------
 FROM node:22-slim AS frontend-builder

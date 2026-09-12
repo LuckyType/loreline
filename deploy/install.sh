@@ -255,7 +255,7 @@ if ((USE_ADVANCED == 1)); then
     ask_yesno "Pass the host microphone (/dev/snd) into the container?\n\nNeeded to record on this device. Say no if this box only orchestrates remote STT." yes &&
       ENABLE_MIC=yes || ENABLE_MIC=no
   else
-    msg_warn "No /dev/snd on this host - microphone capture disabled."
+    msg_warn "No /dev/snd on this host - no host microphone. Record from the browser instead: \"This device's microphone\" in the capture card."
     ENABLE_MIC=no
   fi
   ask_yesno "Enable self-hosted STT (Speaches)?\n\nRuns transcription locally instead of a cloud API. Downloads several GB of models on first start." no &&
@@ -426,19 +426,31 @@ fi
 
 # Mic passthrough is a compose-file concern, not an env var: an override file
 # keeps docker-compose.yml itself untouched (so `git pull` never conflicts).
+#
+# The override adds the mount rather than removing it, which is the opposite of
+# what this script did until the base file stopped mounting /dev/snd
+# unconditionally. That inversion is why the default now starts on a box with
+# no sound card at all instead of failing outright, and it means the file is
+# only written on the hosts that actually record locally.
+#
+# The `off` branch deletes an override this script wrote before, including one
+# in the old shape (`devices: !reset []`, from a box that answered no to this
+# question), because against a base file with no `devices:` key that override
+# now says nothing. An override written by hand is left alone and reported:
+# this script owns the file it writes, not the filename.
 if [[ $ENABLE_MIC == yes ]]; then
-  msg_ok "Microphone passthrough enabled (/dev/snd)"
-else
-  cat >docker-compose.override.yml <<'OVERRIDE'
-# Written by deploy/install.sh: this host has no microphone to pass through
-# (or you chose not to). Delete this file and `docker compose up -d` to
-# re-enable the /dev/snd passthrough from docker-compose.yml.
-services:
-  app:
-    devices: !reset []
-OVERRIDE
+  cp deploy/mic-passthrough.override.yml docker-compose.override.yml
   own docker-compose.override.yml
-  msg_warn "Microphone passthrough disabled (wrote docker-compose.override.yml)"
+  msg_ok "Microphone passthrough enabled (wrote docker-compose.override.yml)"
+elif [[ -f docker-compose.override.yml ]]; then
+  if grep -q 'deploy/install.sh\|mic-passthrough' docker-compose.override.yml; then
+    rm -f docker-compose.override.yml
+    msg_ok "Microphone passthrough disabled (removed docker-compose.override.yml)"
+  else
+    msg_warn "Left your docker-compose.override.yml alone - check it does not pass /dev/snd through, since this host has no microphone"
+  fi
+else
+  msg_info "Microphone passthrough disabled - record from a browser instead (README, \"Recording from a laptop\")"
 fi
 
 # --- bring it up ------------------------------------------------------------
@@ -569,5 +581,6 @@ if [[ $(git -C "$APP_DIR" rev-parse --is-shallow-repository 2>/dev/null) == true
 fi
 [[ $ENABLE_STT == no ]] && echo -e "  Local STT    sudo docker compose --profile local-stt up -d"
 [[ $ENABLE_DIAR == no ]] && echo -e "  Diarization  sudo docker compose --profile diarization up -d\n               (then add COMPOSE_PROFILES=diarization to .env, or updates won't rebuild it)"
+[[ $ENABLE_MIC == no ]] && echo -e "  Microphone   no /dev/snd passed through; record from the browser instead,\n               or: cp deploy/mic-passthrough.override.yml docker-compose.override.yml"
 echo -e "  Bluetooth    bash deploy/setup-bluetooth-audio.sh${CL}"
 echo ""

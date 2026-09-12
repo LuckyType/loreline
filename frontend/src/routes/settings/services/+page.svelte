@@ -161,10 +161,33 @@ onDestroy(() => timer && clearInterval(timer))
 {/if}
 
 {#if services.length === 0 && !error}
+	<!-- The empty state is two different facts wearing one shape, and the old
+	     wording knew only one of them: an app with no Docker API at all, and an
+	     app with one that matched no container. It also read as "you are not on
+	     Docker", which is wrong for the single container this page is now most
+	     likely to be opened from. So it names what is missing, what it would
+	     have been for, and the one thing to check in the other case. -->
 	<Card>
 		<CardContent class="py-6 text-sm text-muted-foreground">
-			No services to show. This page needs the Docker API - it's wired up automatically in the
-			Docker Compose deployment, and unavailable in a source install.
+			<p class="m-0">
+				No containers to show. This page manages this stack's own containers, and it needs a Docker
+				API to do that: <code>LORELINE_DOCKER_API</code>, which the appliance stack in
+				<code>docker-compose.yml</code>
+				points at a socket proxy that can only list containers, read their logs and start or stop
+				them.
+			</p>
+			<p class="m-0 mt-2">
+				A single container started with <code>docker run</code>, and a source install, have neither,
+				and nothing else in Loreline needs one: cloud transcription, import, campaigns and exports
+				all work without this page. Self-hosted STT and diarization are started from the host there
+				instead.
+			</p>
+			<p class="m-0 mt-2">
+				If this is the appliance stack and the list is still empty, its containers are running under
+				a different compose project name than the one this app looks for (<code
+					>COMPOSE_PROJECT_NAME</code
+				>, "loreline" by default).
+			</p>
 		</CardContent>
 	</Card>
 {:else}

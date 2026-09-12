@@ -64,12 +64,24 @@ _UPDATE_TIMEOUT = httpx.Timeout(1830.0, connect=2.0)
 # from the button itself that the updater profile exists. It also offered
 # `loreline-update.timer`, which is a systemd unit and so is exactly as absent
 # from a container as the one the first sentence just said was missing.
+#
+# It also has to hold for a container that is the whole deployment. A plain
+# `docker run` has no checkout, no .env and no compose project, so a message
+# offering only deploy/update.sh and a compose profile names two things that do
+# not exist on that box - which reads as "you are holding it wrong" rather than
+# as an instruction. The image is the unit of update there, and pulling it again
+# is the whole procedure, so that case is answered first and in its own terms.
 _CONTAINER_MESSAGE = (
     "Running in a Docker deployment, and no updater service is configured, so "
     "there is nothing here that may restart this container: the app is refused "
     "the Docker socket on purpose, since that is effectively root on the host. "
-    "Two ways forward. Update from the host with deploy/update.sh, which is the "
-    "default and stays it. Or, to make this button work, run "
+    "Update it from the host instead. A single container started with "
+    "`docker run` is updated by pulling the image again and starting a new "
+    "container from it (`docker pull ghcr.io/luckytype/loreline:latest`, then "
+    "the same run command): sessions, settings and keys live in the data volume "
+    "rather than in the container, so nothing is lost. A compose checkout has "
+    "deploy/update.sh, which is the default there and stays it. To make this "
+    "button itself work, that checkout can run "
     "`docker compose --profile updater up -d` on the host after putting "
     "UPDATER_TOKEN and UPDATER_REPO_DIR in .env, then recreate this container "
     "so it picks the token up - see Updating in the README for what that "
@@ -98,12 +110,16 @@ _BUSY_MESSAGE = (
 # updater service only ever moves forward to whatever the registry publishes,
 # and takes no argument that could name anything else; and the image has no
 # git checkout to reset. What the host can do is named here, since a greyed-out
-# button that says nothing teaches nobody the way round it.
+# button that says nothing teaches nobody the way round it - and it is named
+# without assuming a compose file, since a `docker run` deployment has none and
+# pins the same tag on its own command line.
 _ROLLBACK_CONTAINER_MESSAGE = (
     "Rollback is not available in a Docker deployment: the updater service only "
-    "moves forward to the newest published image. To run an older release, pin its "
-    "image tag (ghcr.io/luckytype/loreline:<version>) in docker-compose.yml on the "
-    "host and recreate the app container."
+    "moves forward to the newest published image, and the image carries no git "
+    "checkout to reset. To run an older release, pin its image tag "
+    "(ghcr.io/luckytype/loreline:<version>) wherever this container was started "
+    "from - the `docker run` command line, or docker-compose.yml on the host - "
+    "and recreate the container."
 )
 _FAILED_MESSAGE = (
     "The updater service reported a failed update without saying why. "

@@ -53,7 +53,10 @@ services:
       XDG_RUNTIME_DIR: /run/user/<UID>
 ```
 
-`<UID>` is the user whose session owns the paired device.
+`<UID>` is the user whose session owns the paired device. One override file per
+project, so if this box also passes `/dev/snd` through, merge the two rather
+than replacing one with the other: `deploy/mic-passthrough.override.yml` is the
+`devices:` half, and `deploy/install.sh` copies it to this same filename.
 
 **That user needs a lingering session with the right WirePlumber profile.**
 WirePlumber's Bluetooth monitor starts only once logind reports an active seat,
