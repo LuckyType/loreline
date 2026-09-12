@@ -48,7 +48,18 @@ class Autostart:
 
     def _ensure_available(self) -> None:
         if self._in_container:
-            msg = f"systemd unit {self._unit!r} is not available in a Docker deployment"
+            # The second half is what makes this an answer rather than a
+            # refusal. Settings > Client shows this sentence where the toggle
+            # would be, and "not available" on its own leaves a reader thinking
+            # a Docker deployment cannot start at boot at all, when in fact it
+            # already does and the setting simply lives on the container.
+            msg = (
+                f"systemd unit {self._unit!r} is not available in a Docker deployment. "
+                "A container starts at boot through its restart policy instead: "
+                "`--restart unless-stopped` on the docker run command line, or "
+                "`restart: unless-stopped` in docker-compose.yml, which the bundled "
+                "stack already sets."
+            )
             raise AutostartUnavailableError(msg)
 
     async def is_enabled(self) -> bool:

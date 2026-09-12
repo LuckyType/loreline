@@ -15,8 +15,10 @@ htmlcov/
 data/
 *.local
 
-# Per-host compose tweaks written by deploy/install.sh (e.g. disabling the
-# /dev/snd passthrough on a box with no microphone).
+# Per-host compose tweaks. deploy/install.sh writes this one when the host has
+# a microphone to pass through (deploy/mic-passthrough.override.yml is the
+# template it copies); ignoring it is what keeps that choice out of git pull's
+# way.
 docker-compose.override.yml
 
 # Local diarization model weights (mounted read-only into the diarization
