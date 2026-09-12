@@ -5,7 +5,10 @@ described. This is that measurement. It needed no new jobs and no reference
 corpus: the GM had already renamed the speakers on a real session, and those
 renames are ground truth for what the machine should have produced.
 
-Read off the live deployment through the API. Nothing was changed.
+Read off the live deployment through the API. Nothing was changed. The
+speakers are pseudonymised here, since this repository is public and the
+people at that table did not publish their names: Player A through Player D
+are stable across every table below.
 
 ## The session
 
@@ -28,10 +31,10 @@ the same: one dominant label plus a small satellite.
 
 | Person | Rows | Labels |
 | --- | --- | --- |
-| Patrik | 55 | Speaker 1 (46) and Speaker 3 (9) |
-| Oli | 41 | Speaker 7 (40) and Speaker 8 (1) |
-| Tobias | 27 | Speaker 5 (16) and Speaker 11 (11) |
-| Kotti | 15 | Speaker 9 |
+| Player A | 55 | Speaker 1 (46) and Speaker 3 (9) |
+| Player B | 41 | Speaker 7 (40) and Speaker 8 (1) |
+| Player C | 27 | Speaker 5 (16) and Speaker 11 (11) |
+| Player D | 15 | Speaker 9 |
 | unnamed | 9 total | Speakers 0, 2, 4 and 10, two or three rows each |
 
 The four unnamed labels hold 9 rows between them, 6 percent of the transcript.
@@ -46,7 +49,7 @@ giving the service a session scoped speaker bank. That fix holds: labels are
 stable across the session. What is left is that a short or acoustically odd
 utterance earns its own cluster rather than joining the speaker it belongs to.
 
-A one row satellite like Oli's Speaker 8 is the clearest case: a single
+A one row satellite like Player B's Speaker 8 is the clearest case: a single
 utterance whose embedding was noisy enough to miss its own speaker by whatever
 margin the clustering threshold uses.
 
