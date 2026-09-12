@@ -28,11 +28,13 @@ import type {
 	ProviderModelsRequest,
 	PreviouslyOnRequest,
 	ProviderTestResult,
+	ClaimRequest,
 	ReprocessJob,
 	ReprocessRequest,
 	RevisionResponse,
 	SceneRequest,
 	SceneResult,
+	SetupState,
 	SearchResults,
 	ServiceLogs,
 	ServiceState,
@@ -158,6 +160,19 @@ export const api = {
 			body: JSON.stringify({ password }),
 		}),
 	logout: () => request<OkResponse>('/api/auth/logout', { method: 'POST' }),
+
+	// --- first run ---
+	// The one call that works on an instance nobody has claimed yet: everything
+	// else there answers 403 until this one's sibling below has run. It carries
+	// no secret in either direction - in particular never the setup code, which
+	// is printed in the instance's startup log and nowhere else.
+	setupState: () => request<SetupState>('/api/setup/state'),
+	claim: (body: ClaimRequest) =>
+		request<SetupState>('/api/setup/claim', {
+			method: 'POST',
+			body: JSON.stringify(body),
+		}),
+	completeSetup: () => request<SetupState>('/api/setup/complete', { method: 'POST' }),
 
 	// --- system ---
 	health: () => request<Health>('/api/system/healthz'),

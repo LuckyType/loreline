@@ -13,6 +13,7 @@ import { Badge } from '$lib/components/ui/badge'
 import { Button } from '$lib/components/ui/button'
 import { loginUrlWithNext } from '$lib/loginRedirect'
 import { initMagicBento } from '$lib/magicBento'
+import { setup } from '$lib/setup.svelte'
 import { authed, health, logsWs, transcriptWs } from '$lib/stores'
 import { theme } from '$lib/theme.svelte'
 import type { ConnectionStatus } from '$lib/ws'
@@ -150,6 +151,12 @@ async function logout() {
 	goto('/login')
 }
 
+// The two pages that render without the shell: the login form, and the
+// first-run wizard. Both are whole screens of their own, and neither has any
+// use for a Logout button or a health dot.
+const BARE_PAGES = ['/login', '/setup']
+const bare = $derived(BARE_PAGES.includes(page.url.pathname))
+
 // The health poll only runs while there is a session to poll with. On /login
 // every tick would be a guaranteed 401, and once a 401 has flipped `authed`
 // the same is true anywhere else, so the interval stops there and starts
@@ -157,9 +164,22 @@ async function logout() {
 // deep link's first health call is what decides whether the visitor is signed
 // in, rather than this component assuming either way.
 //
+// An unclaimed instance is the third case, and it is a 403 rather than a 401:
+// nothing but the setup routes answers until somebody claims it, so polling
+// waits for the setup state to say which of the three states this is. The
+// redirect below is what gets the visitor somewhere they can act.
+//
 // Capabilities are served without a session and fetched once per page load,
 // but nothing on the login form reads them, so they wait for the shell too.
-const shouldPoll = $derived($authed && page.url.pathname !== '/login')
+const shouldPoll = $derived($authed && !bare && setup.ready && !setup.unclaimed)
+
+// Nobody owns this instance yet, so wherever the visitor was heading, the one
+// thing they can do is claim it. Waits for `ready` because acting on an
+// unknown state would either bounce a signed-in reader to a wizard or let a
+// page fire a screenful of 403s.
+$effect(() => {
+	if (setup.ready && setup.unclaimed && page.url.pathname !== '/setup') goto('/setup')
+})
 
 function startPolling(): () => void {
 	void poll()
@@ -177,7 +197,12 @@ $effect(() => {
 	return untrack(startPolling)
 })
 
-onMount(() => initMagicBento())
+onMount(() => {
+	// Before anything else asks the API a question: an unclaimed instance
+	// answers this and nothing else.
+	void setup.load()
+	return initMagicBento()
+})
 
 // The class on <html> picks the palette. app.html's inline script sets it
 // before the first paint; this keeps it current afterwards, for a pick on
@@ -228,7 +253,7 @@ function wsLabel(status: ConnectionStatus, liveWord: string): string {
 	onvisibilitychange={() => void clientMic.refreshWakeLock()}
 />
 
-{#if page.url.pathname === '/login'}
+{#if bare}
 	{@render children()}
 {:else}
 	<div class="flex min-h-screen flex-col">

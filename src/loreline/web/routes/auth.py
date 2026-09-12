@@ -10,7 +10,7 @@ from loreline.web.auth import (
     COOKIE_NAME,
     client_address,
     client_uses_https,
-    issue_token,
+    set_session_cookie,
     verify_password,
 )
 from loreline.web.deps import get_state
@@ -42,20 +42,9 @@ async def login(request: Request, body: LoginRequest, response: Response) -> OkR
         state.login_limiter.record_failure(key)
         raise HTTPException(status_code=HTTP_401_UNAUTHORIZED, detail="invalid password")
     state.login_limiter.record_success(key)
-    token = issue_token(settings)
-    response.set_cookie(
-        COOKIE_NAME,
-        token,
-        httponly=True,
-        samesite="lax",
-        # Set only for a browser that reached us over TLS, which on this
-        # deployment means through the bundled Caddy: marking it unconditionally
-        # would stop the cookie being sent at all on the plain-HTTP LAN path
-        # this app primarily supports. See client_uses_https for why the
-        # forwarded scheme is only believed from a configured proxy.
-        secure=client_uses_https(request, settings),
-        max_age=settings.jwt_ttl_seconds,
-    )
+    # Shared with the first-run claim, which also signs a browser in: see
+    # set_session_cookie for why Secure is conditional rather than always on.
+    set_session_cookie(response, request, settings)
     return OkResponse()
 
 

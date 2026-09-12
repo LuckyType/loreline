@@ -49,8 +49,9 @@ from loreline.updater import Autostart, Updater
 from loreline.updater.process import CommandRunner
 from loreline.video import VideoManager, VideoStore
 from loreline.video.client import ClientFactory as VideoClientFactory
-from loreline.web.auth import LoginRateLimiter, ensure_jwt_secret
+from loreline.web.auth import LoginRateLimiter, ensure_auth_password, ensure_jwt_secret
 from loreline.web.deps import read_action_defaults
+from loreline.web.first_run import FirstRunGate
 from loreline.web.routes import (
     audio,
     auth,
@@ -62,10 +63,12 @@ from loreline.web.routes import (
     reprocess,
     search,
     sessions,
+    setup,
     system,
     transcript_ws,
     video,
 )
+from loreline.web.setup import announce_setup_code
 from loreline.web.spa import SpaStaticFiles, spa_directory
 
 # The version the OpenAPI document declares about itself, and deliberately not
@@ -150,6 +153,10 @@ def _build_state(
     db = Database(settings.db_path)
     secrets = SecretStore(settings.secrets_path)
     ensure_jwt_secret(settings, secrets)
+    # The password before the setup code, because whether a code is needed at
+    # all is decided by whether one of the two sources produced a password.
+    ensure_auth_password(settings, secrets)
+    announce_setup_code(settings, secrets)
     provider_repo = ProviderRepository(db)
     glossary_repo = GlossaryRepository(db)
     campaign_repo = CampaignRepository(db)
@@ -416,6 +423,7 @@ def create_app(
         sessions,
         reprocess,
         video,
+        setup,
         transcript_ws,
         logs_ws,
     ):
@@ -424,4 +432,10 @@ def create_app(
     spa = spa_directory()
     if spa is not None:
         app.mount("/", SpaStaticFiles(directory=spa, html=True), name="spa")
+    # Outermost, so it sees every request before any router does - including
+    # the WebSocket routes, which a dependency on an APIRouter would not cover
+    # and which carry a session's audio and its live transcript. It reads the
+    # same ``settings`` object the claim mutates, so claiming opens the gate
+    # without a restart. See loreline.web.first_run.
+    app.add_middleware(FirstRunGate, settings=settings)
     return app

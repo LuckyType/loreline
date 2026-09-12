@@ -3465,6 +3465,97 @@
           }
         }
       }
+    },
+    "/api/setup/state": {
+      "get": {
+        "tags": [
+          "setup"
+        ],
+        "summary": "Setup State",
+        "description": "Which state this instance is in and which steps remain.\n\nUnauthenticated on purpose: an unclaimed instance has no way to\nauthenticate anybody, and this is what the browser reads to decide whether\nto send the visitor to the wizard. It never carries the setup code, and\nnothing that would let a caller learn a credential, an endpoint or a\nsession - only whether configuration exists.",
+        "operationId": "setup_state_api_setup_state_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SetupState"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/setup/claim": {
+      "post": {
+        "tags": [
+          "setup"
+        ],
+        "summary": "Claim",
+        "description": "Take ownership of an unclaimed instance and sign the browser in.\n\nThe setup code is what makes this safe to expose. Without one, the first\nstranger to reach the box on the LAN or the tailnet would own the\ntranscripts and the provider keys, so a wrong code is refused with the\nsame per-client backoff the login route uses - the same limiter object, so\na brute force cannot get a fresh budget by switching between the two\nroutes, and the same ``client_address`` key, so a reverse proxy does not\nturn every browser at the table into one shared bucket.\n\nA successful claim leaves the browser signed in. Bouncing to the login form\nto retype the password chosen one second earlier is a step that exists only\nbecause the code was written in the other order.",
+        "operationId": "claim_api_setup_claim_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ClaimRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SetupState"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/setup/complete": {
+      "post": {
+        "tags": [
+          "setup"
+        ],
+        "summary": "Complete",
+        "description": "Record that the wizard has been finished, or skipped through.\n\nEvery step after the claim is optional, so this says \"stop asking\", not\n\"everything is configured\". A GM who skipped both still lands on a working\ndashboard, and the steps stay reachable from Settings.\n\nRefused while unclaimed, even though it is trivial. ``require_auth`` is a\nno-op on an instance with no password, so without this the one route the\ngate deliberately lets through would let a stranger mark the wizard\nfinished and quietly remove the prompt to finish it.",
+        "operationId": "complete_api_setup_complete_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SetupState"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
+      }
     }
   },
   "components": {
@@ -4130,6 +4221,30 @@
         ],
         "title": "CaptureSourceKind",
         "description": "Which microphone a capture is listening to.\n\n``DEVICE`` is a sound card on the machine running Loreline, opened through\nPortAudio. ``CLIENT`` is the **client microphone**: the browser that\nstarted the session, capturing with ``getUserMedia`` and streaming the\nframes over ``WS /ws/audio/capture`` (see ``docs/adr/0010``). The two are\none seam apart and identical below it - the same frames, the same VAD, the\nsame WAV, the same transcript - so this only ever decides which source the\ncapture factory builds, and after that which sentence the dashboard says.\n\n``DEVICE`` is the default, so every stored default, every script and every\ncaller written before a browser could record keeps working unchanged."
+      },
+      "ClaimRequest": {
+        "properties": {
+          "setup_code": {
+            "type": "string",
+            "title": "Setup Code"
+          },
+          "password": {
+            "type": "string",
+            "title": "Password"
+          },
+          "password_confirm": {
+            "type": "string",
+            "title": "Password Confirm"
+          }
+        },
+        "type": "object",
+        "required": [
+          "setup_code",
+          "password",
+          "password_confirm"
+        ],
+        "title": "ClaimRequest",
+        "description": "Claiming an unclaimed instance: the setup code, and the chosen password.\n\nThe password arrives twice because it is stored and never shown again, so a\ntypo here locks the instance out with no recovery but a shell on the host.\nThe check is server-side as well as on the form: the guarantee is worth\nmore than the one field it costs."
       },
       "DeviceSetting": {
         "properties": {
@@ -6332,6 +6447,35 @@
         ],
         "title": "SessionStatus",
         "description": "Lifecycle state of a capture session."
+      },
+      "SetupState": {
+        "properties": {
+          "state": {
+            "type": "string",
+            "enum": [
+              "claimed",
+              "unclaimed",
+              "open"
+            ],
+            "title": "State"
+          },
+          "provider_configured": {
+            "type": "boolean",
+            "title": "Provider Configured"
+          },
+          "wizard_complete": {
+            "type": "boolean",
+            "title": "Wizard Complete"
+          }
+        },
+        "type": "object",
+        "required": [
+          "state",
+          "provider_configured",
+          "wizard_complete"
+        ],
+        "title": "SetupState",
+        "description": "What the first run still has to do, for an unauthenticated caller.\n\nDeliberately thin. This is the one route an unclaimed instance answers\nwithout a session, so everything it carries is readable by anything that\ncan reach the port: three booleans about whether configuration exists,\nnever any of the configuration itself, and above all never the setup code."
       },
       "SpeakerNamesUpdate": {
         "properties": {
