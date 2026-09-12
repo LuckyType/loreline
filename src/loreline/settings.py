@@ -143,7 +143,29 @@ class Settings(BaseSettings):
     # --- Auth ---
     auth_password: str = Field(
         default="",
-        description="Single shared web-UI password. Empty disables auth (dev only).",
+        description=(
+            "Single shared web-UI password. Set here it always wins over the one the "
+            "first run stored, which is the only way back into an instance whose "
+            "password was mistyped. Empty means the password comes from the store, or "
+            "from nowhere - see first_run_setup for which of the two."
+        ),
+    )
+    # The switch that tells an unconfigured instance from an open one. Empty
+    # ``auth_password`` has meant "auth off" since the first commit and still
+    # does, which is exactly why a fresh deployment cannot be recognised from
+    # it: a box with no password is either a dev machine that wants none or a
+    # brand new one that has not been claimed yet, and those two want opposite
+    # treatment. On (the default) a passwordless instance answers only the
+    # setup routes until somebody claims it with the setup code printed in its
+    # log; off is the deliberate way back to an open box, and is what the test
+    # suite runs under.
+    first_run_setup: bool = Field(
+        default=True,
+        description=(
+            "Gate an instance that has no password behind the first-run claim at "
+            "/setup. False leaves a passwordless instance wide open, which is what a "
+            "dev box and the test suite want."
+        ),
     )
     jwt_secret: str = Field(
         default=DEFAULT_JWT_SECRET,

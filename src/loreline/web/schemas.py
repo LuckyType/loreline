@@ -25,6 +25,38 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class SetupState(BaseModel):
+    """What the first run still has to do, for an unauthenticated caller.
+
+    Deliberately thin. This is the one route an unclaimed instance answers
+    without a session, so everything it carries is readable by anything that
+    can reach the port: three booleans about whether configuration exists,
+    never any of the configuration itself, and above all never the setup code.
+    """
+
+    state: Literal["claimed", "unclaimed", "open"]
+    """Which of the three states this instance is in. See loreline.web.setup."""
+    provider_configured: bool
+    """Whether any provider row exists yet; the wizard's second step."""
+    wizard_complete: bool
+    """Whether somebody has finished (or skipped through) the wizard, which is
+    what stops it asking again. Says nothing about whether the steps were done."""
+
+
+class ClaimRequest(BaseModel):
+    """Claiming an unclaimed instance: the setup code, and the chosen password.
+
+    The password arrives twice because it is stored and never shown again, so a
+    typo here locks the instance out with no recovery but a shell on the host.
+    The check is server-side as well as on the form: the guarantee is worth
+    more than the one field it costs.
+    """
+
+    setup_code: str
+    password: str
+    password_confirm: str
+
+
 def _credential(value: str | None) -> str | None:
     """A credential as it will be sent, or None when there is none to send.
 

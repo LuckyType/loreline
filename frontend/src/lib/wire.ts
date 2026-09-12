@@ -194,3 +194,12 @@ export type AlertChannelWrite = Schemas['AlertChannelWrite']
 export type AlertTestResult = Complete<Schemas['AlertTestResult']>
 /** Every acknowledgement-only route answers with this. */
 export type OkResponse = Complete<Schemas['OkResponse']>
+
+// --- first run (GET /api/setup/state, POST /api/setup/claim) ----------------
+
+export type SetupState = Complete<Schemas['SetupState']>
+/** Which of the three states an instance is in: claimed (a password is in
+ *  force), unclaimed (waiting to be claimed with its setup code), or open (a
+ *  dev box whose operator turned the gate off). See src/loreline/web/setup.py. */
+export type SetupStateKind = SetupState['state']
+export type ClaimRequest = Schemas['ClaimRequest']

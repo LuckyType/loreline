@@ -230,12 +230,20 @@ async def test_an_unparseable_forwarded_client_falls_back_to_the_peer(
 
 # Deliberately unauthenticated: the liveness probe (which says only that the
 # process is up - /healthz and its snapshot are behind auth), the static
-# capability config the login screen needs to render, and the login/logout pair.
+# capability config the login screen needs to render, the login/logout pair,
+# and the two first-run routes. The last two cannot be behind auth by
+# definition: an unclaimed instance has no password, so there is nobody to
+# authenticate, and these are what the browser reads and posts to give it one.
+# What keeps them safe is the setup code, not a session - see
+# loreline.web.setup, and tests/integration/test_web_first_run.py for what they
+# refuse and what they never reveal.
 PUBLIC_OPERATIONS = {
     ("/api/system/livez", "get"),
     ("/api/capabilities", "get"),
     ("/api/auth/login", "post"),
     ("/api/auth/logout", "post"),
+    ("/api/setup/state", "get"),
+    ("/api/setup/claim", "post"),
 }
 
 

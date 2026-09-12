@@ -69,6 +69,38 @@ read once from its catalog surface, fail-soft, with an explicit status, so silen
 mistaken for absence. The pickers, the video list and the staleness gate project that answer.
 _Avoid_: live fetch, vendor list (each was one projection's own reader)
 
+## The instance itself
+
+**Claimed / unclaimed / open**: The three states an installation can be in, and the one thing
+the app must never have to guess. Claimed is a password in force, from `LORELINE_AUTH_PASSWORD`
+or from the secret store, and is today's behaviour exactly. Unclaimed is `first_run_setup` on
+with no password from either source: only the setup routes and `livez` answer, everything else
+is 403, and the browser is sent to the wizard from anywhere. Open is `first_run_setup` off with
+no password, which is the dev box and the test suite. An empty password has meant "auth off"
+since the first commit, so a fresh deployment is not recognisable from it, which is why the
+gate is its own setting rather than an inference. See `docs/adr/0011`.
+_Avoid_: "no auth" (that is open and unclaimed at once, which is the confusion)
+
+**Setup code**: The one secret standing between a brand new instance and whoever reaches it
+first. Minted once while unclaimed, persisted through `SecretStore` so a restart shows the same
+one, logged at every startup while unclaimed, and deleted on a successful claim. It appears in
+that log line and nowhere else: never in `GET /api/setup/state`, never in an error body, never
+in a log line after the claim. Grouped as `ABCD-EFGH` for reading aloud, and compared with the
+case and the grouping folded away.
+_Avoid_: pairing code, install token
+
+**Claim**: The transition out of unclaimed: the setup code plus a password given twice, which
+stores the password, retires the code and issues the session cookie, so the browser lands signed
+in rather than at a login form. Refused with the login route's own backoff, keyed by
+`client_address` so a reverse proxy does not make one bucket of the whole table. A typo here
+locks the instance out, and the only way back is `LORELINE_AUTH_PASSWORD` on the host, which
+always wins over the stored one.
+
+**Wizard**: `/setup`, rendered bare like `/login`: the claim, then a provider, then which of the
+three recording routes this deployment actually offers. Everything after the claim is skippable
+and resumable, and every step is somewhere it already lived (Settings > Providers, the capture
+card), so a GM who skips it all lands on a dashboard that works.
+
 ## Browser
 
 **Action setup**: One store per browser session holding the provider rows, the stored action
