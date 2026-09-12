@@ -1,0 +1,26 @@
+# Copy this to docker-compose.override.yml, in the directory holding
+# docker-compose.yml, to record on a microphone attached to the Docker host:
+#
+#   cp deploy/mic-passthrough.override.yml docker-compose.override.yml
+#   docker compose up -d
+#
+# deploy/install.sh does that for you when it finds /dev/snd on the host, and
+# deploy/update.sh writes it once on a box that was installed before the
+# passthrough moved out of docker-compose.yml, so an existing recorder keeps
+# its microphone across that update. Delete the copy and `docker compose up -d`
+# again to turn it off; .gitignore covers it, so the choice survives git pull.
+#
+# Linux hosts only, and only for a device that shows up under /dev/snd. Docker
+# Desktop on macOS and Windows runs containers in a Linux VM with no path to
+# the host's own audio hardware, so this cannot work there whatever it says.
+# A Bluetooth mic is not under /dev/snd either - it lives in the host's
+# PipeWire/PulseAudio session; run deploy/setup-bluetooth-audio.sh for that
+# one, which needs the two extra mounts docker-compose.yml describes.
+#
+# Neither is a dead end: "This device's microphone" in the capture card
+# records through the browser instead, on any host (README, "Recording from a
+# laptop").
+services:
+  app:
+    devices:
+      - /dev/snd:/dev/snd

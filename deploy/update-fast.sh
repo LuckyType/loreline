@@ -87,6 +87,42 @@ if [[ ${STAGE} != apply ]]; then
 git fetch --quiet origin
 git pull --ff-only origin main
 
+# The /dev/snd passthrough used to be a line in docker-compose.yml and is now
+# an override file, because the unconditional mount failed outright on every
+# host without a sound card. That inversion has one casualty if nothing is done
+# here: a box that *was* recording locally has no override file, so this update
+# would take its microphone away without saying so.
+#
+# Decided from git rather than by probing /dev/snd, which means the answer is
+# the same whether this runs on the host or inside the updater container (where
+# no sound device is mounted and a probe would say no): if the compose file
+# this box was running mounted the device, and nothing overrode it, then it was
+# recording locally and it still should be. Written once - after this the
+# override file exists, so the condition is false forever.
+#
+# Captured into a variable rather than piped into `grep -q`, which would
+# SIGPIPE `git show` and, under `set -o pipefail`, fail the update.
+PREV_COMPOSE="$(git show "${PREV_COMMIT}:docker-compose.yml" 2>/dev/null || true)"
+if [[ ${PREV_COMPOSE} == *"/dev/snd:/dev/snd"* ]]; then
+  if [[ ! -f docker-compose.override.yml ]]; then
+    cp deploy/mic-passthrough.override.yml docker-compose.override.yml
+    echo "note: this box passed the host microphone through, and that setting has moved"
+    echo "      out of docker-compose.yml. Wrote docker-compose.override.yml to keep it."
+    echo "      Delete that file and re-run this script to record from a browser instead."
+  elif grep -q 'Written by deploy/install.sh' docker-compose.override.yml &&
+    grep -q 'reset' docker-compose.override.yml; then
+    # The other side of the same move: the override deploy/install.sh used to
+    # write on a box with no microphone exists only to take the mount away
+    # again. There is nothing left for it to take, and an override that resets
+    # a key the base file no longer has is a line nobody should have to reason
+    # about later. The box keeps exactly the behaviour it had - no device.
+    rm -f docker-compose.override.yml
+    echo "note: removed the docker-compose.override.yml that disabled the /dev/snd"
+    echo "      passthrough. docker-compose.yml no longer mounts it, so that file had"
+    echo "      nothing left to switch off. Nothing about this box changes."
+  fi
+fi
+
 # Which image `app` resolves to, asked of Compose rather than read out of the
 # YAML, so interpolation and any docker-compose.override.yml are already
 # applied. Recorded before and after the pull, because comparing the two image
