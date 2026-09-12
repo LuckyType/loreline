@@ -328,3 +328,22 @@ async def test_completing_needs_a_session_once_there_is_one(auth_client: AsyncCl
     assert (await auth_client.post("/api/setup/complete")).status_code == 401
     await auth_client.post("/api/auth/login", json={"password": "hunter2"})
     assert (await auth_client.post("/api/setup/complete")).status_code == 200
+
+
+async def test_the_wizard_cannot_be_marked_finished_before_it_is_claimed(
+    unclaimed: AsyncClient,
+) -> None:
+    """The gate lets the setup routes through and there is nobody to
+    authenticate yet, so this one has to refuse on its own."""
+    assert (await unclaimed.post("/api/setup/complete")).status_code == 409
+
+
+async def test_the_wizard_page_is_served_while_unclaimed(unclaimed: AsyncClient) -> None:
+    """The wizard is a page of the SPA, so an instance that refused to serve
+    its own front end could never be claimed from a browser at all."""
+    for path in ("/", "/setup"):
+        resp = await unclaimed.get(path)
+        # 404 only where the build has not been made, which is a checkout
+        # without `npm run build` rather than the gate refusing.
+        assert resp.status_code in (200, 404), path
+        assert resp.status_code != 403, path

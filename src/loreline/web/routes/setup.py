@@ -120,6 +120,16 @@ async def complete(request: Request) -> SetupState:
     Every step after the claim is optional, so this says "stop asking", not
     "everything is configured". A GM who skipped both still lands on a working
     dashboard, and the steps stay reachable from Settings.
+
+    Refused while unclaimed, even though it is trivial. ``require_auth`` is a
+    no-op on an instance with no password, so without this the one route the
+    gate deliberately lets through would let a stranger mark the wizard
+    finished and quietly remove the prompt to finish it.
     """
-    await get_state(request).settings_repo.set(SETUP_COMPLETE_KEY, "1")
+    state = get_state(request)
+    if setup_required(state.settings):
+        raise HTTPException(
+            status_code=HTTP_409_CONFLICT, detail="claim this instance before finishing its setup"
+        )
+    await state.settings_repo.set(SETUP_COMPLETE_KEY, "1")
     return await _state(request)

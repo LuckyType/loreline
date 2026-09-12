@@ -3536,7 +3536,7 @@
           "setup"
         ],
         "summary": "Complete",
-        "description": "Record that the wizard has been finished, or skipped through.\n\nEvery step after the claim is optional, so this says \"stop asking\", not\n\"everything is configured\". A GM who skipped both still lands on a working\ndashboard, and the steps stay reachable from Settings.",
+        "description": "Record that the wizard has been finished, or skipped through.\n\nEvery step after the claim is optional, so this says \"stop asking\", not\n\"everything is configured\". A GM who skipped both still lands on a working\ndashboard, and the steps stay reachable from Settings.\n\nRefused while unclaimed, even though it is trivial. ``require_auth`` is a\nno-op on an instance with no password, so without this the one route the\ngate deliberately lets through would let a stranger mark the wizard\nfinished and quietly remove the prompt to finish it.",
         "operationId": "complete_api_setup_complete_post",
         "responses": {
           "200": {

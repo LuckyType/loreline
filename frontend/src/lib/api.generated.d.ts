@@ -1552,6 +1552,11 @@ export interface paths {
          *     Every step after the claim is optional, so this says "stop asking", not
          *     "everything is configured". A GM who skipped both still lands on a working
          *     dashboard, and the steps stay reachable from Settings.
+         *
+         *     Refused while unclaimed, even though it is trivial. ``require_auth`` is a
+         *     no-op on an instance with no password, so without this the one route the
+         *     gate deliberately lets through would let a stranger mark the wizard
+         *     finished and quietly remove the prompt to finish it.
          */
         post: operations["complete_api_setup_complete_post"];
         delete?: never;
