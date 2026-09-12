@@ -51,18 +51,22 @@ import Dropdown from '$lib/Dropdown.svelte'
 import { modelInfoFor } from '$lib/modelCatalog.svelte'
 import { optionFor } from '$lib/modelInfo'
 import ModelPicker from '$lib/ModelPicker.svelte'
+import ProviderChoiceList from '$lib/ProviderChoiceList.svelte'
 import {
-	capabilities,
+	apiKeyLabel,
+	choicesForHosting,
+	providerCatalog,
+	type ProviderChoice,
+} from '$lib/providerCatalog'
+import {
 	inlineDiarizationFor,
 	interactionsFor,
 	isHiddenModel,
 	reasoningEffortsFor,
-	requiresBaseUrl,
 } from '$lib/capabilities.svelte'
 import { capabilityBadges } from '$lib/types'
 import type {
 	ActionDefaults,
-	AuthKind,
 	Complete,
 	HealthStatus,
 	Hosting,
@@ -74,63 +78,9 @@ import type {
 	ProviderTestResult,
 } from '$lib/wire'
 
-/**
- * Copy the capability config does not carry, and only that: what this kind's
- * base-URL box should suggest, and the one-line pitch in the wizard's list. Label, hosting, key URL and base URL
- * come from /api/capabilities - keeping a second copy of those here is what
- * let the two drift apart in the first place.
- */
-interface ProviderPresentation {
-	/** Only for a kind the operator has to point somewhere. */
-	baseUrlPlaceholder?: string
-	note: string
-}
-
-// Also the wizard's running order, which stays put whether or not the config
-// loaded.
-const PRESENTATION: Record<ProviderKind, ProviderPresentation> = {
-	deepgram: { note: 'Streaming WS · inline diarization.' },
-	assemblyai: { note: 'Streaming WS · inline diarization.' },
-	openai: { note: 'Realtime transcription and session summaries.' },
-	gemini: { note: 'API key · diarization · word timestamps.' },
-	openrouter: { note: 'One key for many vendors. Transcription, summaries and video.' },
-	xai: { note: 'Streaming WS · inline diarization. Summaries and Grok Imagine video.' },
-	openai_compat: {
-		baseUrlPlaceholder: 'http://localhost:8000/v1',
-		note: 'Speaches, whisper.cpp, Ollama, LM Studio, vLLM. Transcription and/or summaries.',
-	},
-}
-
-/** One row of the wizard's provider list: the served facts, joined to the copy. */
-interface ProviderChoice {
-	kind: ProviderKind
-	label: string
-	/** Null when the config never loaded - such a row shows under both hosting
-	 *  steps rather than disappearing from the wizard entirely. */
-	hosting: Hosting | null
-	auth: AuthKind
-	keyUrl: string | null
-	baseUrlPlaceholder: string | null
-	note: string
-}
-
-const catalog = $derived(
-	(Object.keys(PRESENTATION) as ProviderKind[]).map((kind): ProviderChoice => {
-		const spec = capabilities.provider(kind)
-		const copy = PRESENTATION[kind]
-		// A surface the config leaves without an address is one only the operator can supply.
-		const needsBaseUrl = spec ? requiresBaseUrl(spec) : !!copy.baseUrlPlaceholder
-		return {
-			kind,
-			label: spec?.label ?? kind,
-			hosting: spec?.hosting ?? null,
-			auth: spec?.auth ?? 'optional',
-			keyUrl: spec?.key_url ?? null,
-			baseUrlPlaceholder: needsBaseUrl ? (copy.baseUrlPlaceholder ?? '') : null,
-			note: copy.note,
-		}
-	}),
-)
+// The vendor list, its order and its copy live in $lib/providerCatalog: the
+// first-run wizard asks the same question and must offer the same answers.
+const catalog = $derived(providerCatalog())
 
 /** OpenRouter's own defaults - see OpenRouterRouting in $lib/types. The
  *  backend drops any field still sitting here, so this is also "send nothing". */
@@ -294,13 +244,8 @@ function uniqueName(base: string, excludeId: string | null): string {
 const effectiveName = $derived(
 	form.name.trim() || (selected ? uniqueName(selected.label, editing) : ''),
 )
-const wizardChoices = $derived(catalog.filter((c) => c.hosting === null || c.hosting === hosting))
-// 'optional' is a self-hosted endpoint that may or may not check a key.
-const apiKeyLabel = $derived(
-	`${selected?.auth === 'optional' ? 'API key (optional)' : 'API key'}${
-		editing ? ' - blank = keep current' : ''
-	}`,
-)
+const wizardChoices = $derived(choicesForHosting(catalog, hosting))
+const keyLabel = $derived(apiKeyLabel(selected, !!editing))
 // The row this wizard session actually acts on - the one Save and Load
 // models read from and write to, never a same-kind sibling. Read fresh from
 // the store rather than captured once in edit(), so it reflects a key saved
@@ -1060,18 +1005,7 @@ onMount(load)
 				>
 				<Button variant="outline" size="sm" onclick={() => (step = 1)}>← Back</Button>
 			</div>
-			<div class="mt-2 flex flex-col gap-1.5">
-				{#each wizardChoices as meta (meta.kind)}
-					<Button
-						variant="outline"
-						class="h-auto flex-col items-start gap-0.5 py-2"
-						onclick={() => pickProvider(meta)}
-					>
-						<strong>{meta.label}</strong>
-						<span class="text-xs font-normal text-muted-foreground">{meta.note}</span>
-					</Button>
-				{/each}
-			</div>
+			<ProviderChoiceList choices={wizardChoices} onpick={pickProvider} />
 		{:else if selected}
 			{@const sel = selected}
 			<div class="flex items-center justify-between">
@@ -1164,7 +1098,7 @@ onMount(load)
 				{#if sel.auth !== 'none'}
 					<div class="flex flex-col gap-2">
 						<div class="flex items-center justify-between">
-							<Label for="apikey">{apiKeyLabel}</Label>
+							<Label for="apikey">{keyLabel}</Label>
 							{#if sel.keyUrl}
 								<a
 									href={sel.keyUrl}

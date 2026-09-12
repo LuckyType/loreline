@@ -1,15 +1,21 @@
 <script lang="ts">
 import type { Snippet } from 'svelte'
 import { page } from '$app/state'
+import { setup } from '$lib/setup.svelte'
 
 let { children }: { children: Snippet } = $props()
 
-const tabs = [
+// The first-run wizard is skippable at every step after the claim, so it has
+// to be findable again afterwards. Here rather than on the dashboard because
+// this is where somebody comes looking for the things it sets up, and it
+// disappears for good once the wizard has been finished or skipped through.
+const tabs = $derived([
 	{ href: '/settings/client', label: 'Client' },
 	{ href: '/settings/providers', label: 'Providers' },
 	{ href: '/settings/alerts', label: 'Alerting' },
 	{ href: '/settings/services', label: 'Services' },
-]
+	...(setup.unfinished ? [{ href: '/setup', label: 'Finish setup' }] : []),
+])
 </script>
 
 <!-- No "Settings" heading above the tabs: the left nav already says which page
