@@ -39,6 +39,25 @@ Open <http://localhost:8000> and the app takes it from there: it asks for a
 password, then for one transcription provider and its API key, then how you
 want to record.
 
+Before the password it asks for a **setup code**, and that code is printed by
+the container rather than shown on the page:
+
+```bash
+docker logs loreline          # the docker run above
+docker compose logs app       # the compose form below
+```
+
+Read it there and paste it in. It exists because the instance is claimed by
+whoever answers that page first, and without the code that is anyone who can
+reach the port: the code is the one thing a stranger on the LAN or the tailnet
+cannot see. A restart prints it again, and it stops existing the moment the
+instance is claimed. Run the container in the foreground (drop `-d`) and it is
+simply on the terminal in front of you.
+
+A forgotten password is recovered only from the host: set
+`LORELINE_AUTH_PASSWORD` on the container and start it again, which wins over
+the stored one.
+
 Two things worth knowing, because neither is obvious and both are good news:
 
 - **No GPU, no sound card, no model downloads.** Every STT and diarization
@@ -80,6 +99,30 @@ That is a complete deployment, not a demo mode. [Deployment](#deployment) below
 is the same app dressed as an appliance: a reverse proxy on 80 and 443, a
 microphone attached to the host, self-hosted transcription and diarization, and
 updates on a timer. Reach for it when you want those, not to get started.
+
+**What one container gives up**, said plainly, because each of these is a thing
+you will eventually look for and not find:
+
+- **Settings > Services is empty.** That page manages this stack's own
+  containers through a Docker API, and one container has none to manage. The
+  page says so rather than showing an error, and nothing else depends on it.
+- **The Update button has nothing to hand the job to.** The app is refused the
+  Docker socket on purpose, so it cannot replace itself. Updating here is
+  `docker pull ghcr.io/luckytype/loreline:latest` and then the same `docker run`
+  again: the data is in the volume, not in the container, so nothing is lost.
+  The button says this too.
+- **No TLS.** Plain HTTP means the login password crosses the LAN in the clear
+  and the session cookie is not marked `Secure` - which is correct rather than
+  broken, since the flag matches the connection. It also means no browser
+  microphone from any machine except the one running the container, until a
+  proxy with a certificate every device trusts is put in front. That is
+  [Recording from a laptop](#recording-from-a-laptop), and it is worth reading
+  [One setting that fails silently](#one-setting-that-fails-silently) at the
+  same time.
+- **No self-hosted STT or diarization.** Both are separate services with model
+  downloads of their own, and both live in the appliance stack. Cloud
+  transcription, cloud summaries, speaker labels from the STT vendor, import,
+  campaigns, search and exports are all here.
 
 ## What it does
 
