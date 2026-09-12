@@ -157,6 +157,13 @@ services:
     #   XDG_RUNTIME_DIR: /run/user/1000
     restart: unless-stopped
 
+  # Follow-up, deliberately not done here: `docker-proxy` and `caddy` could sit
+  # behind a compose profile, so that a deployment wanting neither could skip
+  # them without editing this file. They are not, because a profile takes
+  # effect on the next `docker compose up -d` on every box that already has
+  # them running, and that command would then stop a service nobody asked it to
+  # stop. Whoever does it has to ship the migration with it.
+  #
   # Lets Settings > Services list the stack, read container logs, and
   # start/stop the optional services - without handing the app the raw Docker
   # socket, which is root-equivalent on the host. Allowlists five endpoints by

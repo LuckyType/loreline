@@ -26,6 +26,11 @@ let rollingBack = $state(false)
 let updateResult = $state<UpdateResult | null>(null)
 let autostart = $state<boolean | null>(null)
 let autostartBusy = $state(false)
+// Why there is no toggle, in the deployment's own words. A container has no
+// systemd unit to enable and starts at boot through its restart policy
+// instead, which is what the server's 503 says; the row used to show a bare
+// "unavailable", which is the shape of a dead control rather than an answer.
+let autostartReason = $state('')
 // Bumped every time a toggle attempt settles (success or failure), win or
 // lose. The <Switch> below is keyed on it purely to force a remount on every
 // settle - see the {#key} block for why that's needed even when `autostart`
@@ -157,8 +162,10 @@ async function loadOps() {
 	}
 	try {
 		autostart = (await api.getAutostart()).enabled
-	} catch {
+		autostartReason = ''
+	} catch (err) {
 		autostart = null
+		autostartReason = err instanceof ApiError ? err.message : ''
 	}
 }
 
@@ -366,6 +373,11 @@ onDestroy(stopMeter)
 				{/key}
 			{/if}
 		</div>
+		<!-- Same shape as the rollback reason above: where a control cannot
+		     exist, the sentence saying why takes its place under the row. -->
+		{#if autostart === null && autostartReason}
+			<p class="text-xs text-muted-foreground">{autostartReason}</p>
+		{/if}
 		{#if opsMessage}
 			<p class="mt-2 text-sm text-muted-foreground">{opsMessage}</p>
 		{/if}
