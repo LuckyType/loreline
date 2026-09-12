@@ -442,7 +442,10 @@ order. Without them no certificate is ever issued, and the failure is opaque:
 `tailscale serve` reports nothing useful and the browser simply refuses the
 microphone as before.
 
-Then, on the box, with Tailscale installed and logged in:
+Then, on the box, with Tailscale installed and logged in, run
+`deploy/tailscale-https.sh` from the checkout: it checks the box, waits for the
+admin console toggles, finds the name, enables the proxy and verifies the
+result over HTTPS before handing you to the laptop. By hand, it is:
 
 ```bash
 tailscale status --json | grep -i certdomains   # the *.ts.net name to use
