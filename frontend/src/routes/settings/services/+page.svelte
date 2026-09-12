@@ -172,8 +172,9 @@ onDestroy(() => timer && clearInterval(timer))
 			<p class="m-0">
 				No containers to show. This page manages this stack's own containers, and it needs a Docker
 				API to do that: <code>LORELINE_DOCKER_API</code>, which the appliance stack in
-				<code>docker-compose.yml</code> points at a socket proxy that can only list containers, read
-				their logs and start or stop them.
+				<code>docker-compose.yml</code>
+				points at a socket proxy that can only list containers, read their logs and start or stop
+				them.
 			</p>
 			<p class="m-0 mt-2">
 				A single container started with <code>docker run</code>, and a source install, have neither,
@@ -183,8 +184,9 @@ onDestroy(() => timer && clearInterval(timer))
 			</p>
 			<p class="m-0 mt-2">
 				If this is the appliance stack and the list is still empty, its containers are running under
-				a different compose project name than the one this app looks for
-				(<code>COMPOSE_PROJECT_NAME</code>, "loreline" by default).
+				a different compose project name than the one this app looks for (<code
+					>COMPOSE_PROJECT_NAME</code
+				>, "loreline" by default).
 			</p>
 		</CardContent>
 	</Card>
