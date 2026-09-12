@@ -1478,6 +1478,88 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/setup/state": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Setup State
+         * @description Which state this instance is in and which steps remain.
+         *
+         *     Unauthenticated on purpose: an unclaimed instance has no way to
+         *     authenticate anybody, and this is what the browser reads to decide whether
+         *     to send the visitor to the wizard. It never carries the setup code, and
+         *     nothing that would let a caller learn a credential, an endpoint or a
+         *     session - only whether configuration exists.
+         */
+        get: operations["setup_state_api_setup_state_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/setup/claim": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Claim
+         * @description Take ownership of an unclaimed instance and sign the browser in.
+         *
+         *     The setup code is what makes this safe to expose. Without one, the first
+         *     stranger to reach the box on the LAN or the tailnet would own the
+         *     transcripts and the provider keys, so a wrong code is refused with the
+         *     same per-client backoff the login route uses - the same limiter object, so
+         *     a brute force cannot get a fresh budget by switching between the two
+         *     routes, and the same ``client_address`` key, so a reverse proxy does not
+         *     turn every browser at the table into one shared bucket.
+         *
+         *     A successful claim leaves the browser signed in. Bouncing to the login form
+         *     to retype the password chosen one second earlier is a step that exists only
+         *     because the code was written in the other order.
+         */
+        post: operations["claim_api_setup_claim_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/setup/complete": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Complete
+         * @description Record that the wizard has been finished, or skipped through.
+         *
+         *     Every step after the claim is optional, so this says "stop asking", not
+         *     "everything is configured". A GM who skipped both still lands on a working
+         *     dashboard, and the steps stay reachable from Settings.
+         */
+        post: operations["complete_api_setup_complete_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -1882,6 +1964,23 @@ export interface components {
          * @enum {string}
          */
         CaptureSourceKind: "device" | "client";
+        /**
+         * ClaimRequest
+         * @description Claiming an unclaimed instance: the setup code, and the chosen password.
+         *
+         *     The password arrives twice because it is stored and never shown again, so a
+         *     typo here locks the instance out with no recovery but a shell on the host.
+         *     The check is server-side as well as on the form: the guarantee is worth
+         *     more than the one field it costs.
+         */
+        ClaimRequest: {
+            /** Setup Code */
+            setup_code: string;
+            /** Password */
+            password: string;
+            /** Password Confirm */
+            password_confirm: string;
+        };
         /**
          * DeviceSetting
          * @description The persisted default audio input device (device index as a string, or null).
@@ -2975,6 +3074,26 @@ export interface components {
          * @enum {string}
          */
         SessionStatus: "idle" | "capturing" | "stopping" | "completed" | "error";
+        /**
+         * SetupState
+         * @description What the first run still has to do, for an unauthenticated caller.
+         *
+         *     Deliberately thin. This is the one route an unclaimed instance answers
+         *     without a session, so everything it carries is readable by anything that
+         *     can reach the port: three booleans about whether configuration exists,
+         *     never any of the configuration itself, and above all never the setup code.
+         */
+        SetupState: {
+            /**
+             * State
+             * @enum {string}
+             */
+            state: "claimed" | "unclaimed" | "open";
+            /** Provider Configured */
+            provider_configured: boolean;
+            /** Wizard Complete */
+            wizard_complete: boolean;
+        };
         /**
          * SpeakerNamesUpdate
          * @description Per-session speaker rename map ({original diarization label: display name}).
@@ -5692,6 +5811,79 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    setup_state_api_setup_state_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SetupState"];
+                };
+            };
+        };
+    };
+    claim_api_setup_claim_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ClaimRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SetupState"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    complete_api_setup_complete_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SetupState"];
                 };
             };
         };
