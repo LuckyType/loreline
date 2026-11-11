@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, Request, Response
 from fastapi.exceptions import HTTPException
 from starlette.status import HTTP_401_UNAUTHORIZED, HTTP_429_TOO_MANY_REQUESTS
@@ -38,7 +40,8 @@ async def login(request: Request, body: LoginRequest, response: Response) -> OkR
         raise HTTPException(
             status_code=HTTP_429_TOO_MANY_REQUESTS, detail="too many attempts, try again shortly"
         )
-    if not verify_password(body.password, settings):
+    # In a thread: checking a stored password is a deliberately slow hash.
+    if not await asyncio.to_thread(verify_password, body.password, settings):
         state.login_limiter.record_failure(key)
         raise HTTPException(status_code=HTTP_401_UNAUTHORIZED, detail="invalid password")
     state.login_limiter.record_success(key)

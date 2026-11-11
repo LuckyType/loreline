@@ -79,8 +79,15 @@ def ensure_auth_password(settings: Settings, store: SecretStore) -> None:
     if settings.auth_password:
         return
     stored = store.get(AUTH_PASSWORD_NAME)
-    if stored:
-        settings.auth_password = stored
+    if not stored:
+        return
+    if not _is_hashed(stored):
+        # Written by a build that stored the password as typed. Hashed in
+        # place the first time it is read, so the plain text stops being on
+        # disk without the GM having to do anything.
+        stored = hash_password(stored)
+        store.set(AUTH_PASSWORD_NAME, stored)
+    settings.auth_password = stored
 
 
 def store_auth_password(settings: Settings, store: SecretStore, password: str) -> None:
@@ -90,8 +97,9 @@ def store_auth_password(settings: Settings, store: SecretStore, password: str) -
     unclaimed rather than claimed-until-restart, which would be a box the GM
     believes is theirs and is not.
     """
-    store.set(AUTH_PASSWORD_NAME, password)
-    settings.auth_password = password
+    hashed = hash_password(password)
+    store.set(AUTH_PASSWORD_NAME, hashed)
+    settings.auth_password = hashed
 
 
 def auth_enabled(settings: Settings) -> bool:
@@ -228,7 +236,13 @@ def _password_fingerprint(settings: Settings) -> str:
     restarting immediately invalidates every previously-issued cookie,
     instead of leaving them valid for the rest of their TTL (up to 12h).
     """
-    return hashlib.sha256(settings.auth_password.encode()).hexdigest()[:16]
+    # Keyed with the signing secret, not a bare hash. A JWT's payload is
+    # readable by anyone who sees the cookie, and on the plain-HTTP LAN path
+    # that is anyone on the network: an unkeyed digest of the password there
+    # was something to run a wordlist against offline, past the login backoff.
+    return hmac.new(
+        settings.jwt_secret.encode(), settings.auth_password.encode(), hashlib.sha256
+    ).hexdigest()[:16]
 
 
 def issue_token(settings: Settings) -> str:
@@ -272,12 +286,65 @@ def verify_token(token: str, settings: Settings) -> bool:
     return payload.get("pwd") == _password_fingerprint(settings)  # pyright: ignore[reportUnknownMemberType]
 
 
+_SCRYPT_PREFIX = "scrypt$"
+# 2**14 with r=8 is 16 MB and well under a tenth of a second on a Raspberry Pi:
+# a cost a login never notices and a wordlist does.
+_SCRYPT_N = 2**14
+_SCRYPT_R = 8
+_SCRYPT_P = 1
+_SCRYPT_SALT_BYTES = 16
+_SCRYPT_FIELDS = 3  # prefix, salt, digest
+
+
+def _scrypt(password: str, salt: bytes) -> bytes:
+    return hashlib.scrypt(
+        password.encode(), salt=salt, n=_SCRYPT_N, r=_SCRYPT_R, p=_SCRYPT_P, dklen=32
+    )
+
+
+def hash_password(password: str) -> str:
+    """``password`` as the salted scrypt string the secret store keeps.
+
+    The store also holds provider keys, which have to be readable to be used.
+    A password never has to be: only compared. Stored this way a copy of
+    ``secrets.json`` (a backup, a synced folder) no longer hands over the one
+    secret a GM is likely to have reused somewhere else.
+    """
+    salt = token_gen.token_bytes(_SCRYPT_SALT_BYTES)
+    return f"{_SCRYPT_PREFIX}{salt.hex()}${_scrypt(password, salt).hex()}"
+
+
+def _is_hashed(value: str) -> bool:
+    return _parse_hash(value) is not None
+
+
+def _parse_hash(value: str) -> tuple[bytes, bytes] | None:
+    """The salt and digest of a string :func:`hash_password` wrote, else None."""
+    parts = value.split("$")
+    if len(parts) != _SCRYPT_FIELDS or f"{parts[0]}$" != _SCRYPT_PREFIX:
+        return None
+    try:
+        return bytes.fromhex(parts[1]), bytes.fromhex(parts[2])
+    except ValueError:
+        return None
+
+
 def verify_password(password: str, settings: Settings) -> bool:
-    """Constant-time check of the shared password."""
+    """Constant-time check of the shared password.
+
+    The live value is either a hash from the secret store or the plain text an
+    operator put in ``LORELINE_AUTH_PASSWORD``; the second is theirs to manage
+    and is compared as it is. Costs a scrypt round for a stored password, so
+    call it off the event loop.
+    """
     expected = settings.auth_password
     if not expected:
         return False
-    return hmac.compare_digest(password, expected)
+    parsed = _parse_hash(expected)
+    if parsed is None:
+        return hmac.compare_digest(password.encode(), expected.encode())
+    salt, digest = parsed
+    return hmac.compare_digest(_scrypt(password, salt), digest)
 
 
 @dataclass(slots=True)

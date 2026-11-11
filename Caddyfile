@@ -39,13 +39,19 @@
 # LAN, unlike a public-facing on-demand-TLS site where an `ask` endpoint
 # guards against strangers flooding cert issuance for junk hostnames.
 
+# `encode` compresses what compresses: the UI's scripts and styles, and above
+# all the JSON of a long transcript, which is megabytes of word timings. Caddy
+# leaves audio, video and WebSocket traffic alone on its own.
+
 :443 {
 	tls internal {
 		on_demand
 	}
+	encode zstd gzip
 	reverse_proxy app:8000
 }
 
 :80 {
+	encode zstd gzip
 	reverse_proxy app:8000
 }

@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import stat
 import time
 from pathlib import Path
+
+import jwt
 
 from loreline.secrets import SecretStore
 from loreline.settings import DEFAULT_JWT_SECRET, Settings
@@ -112,3 +115,20 @@ def test_login_rate_limiter_forgets_keys_that_have_gone_quiet() -> None:
     # And their counts went with them: a window's silence is a clean slate,
     # which is what sitting out a lockout already bought before the sweep.
     assert limiter.allowed("1.2.3.0")
+
+
+def test_a_token_gives_nothing_to_test_password_guesses_against(tmp_path: Path) -> None:
+    """The password's mark in a token cannot be recomputed without the signing secret.
+
+    A JWT's payload is only encoded, and the cookie crosses a LAN in the clear
+    on the plain-HTTP path. The mark used to be a bare SHA-256 prefix of the
+    password, which let anyone holding one cookie check guesses offline.
+    """
+    settings = Settings(data_dir=tmp_path, auth_password="hunter2", jwt_secret="s" * 32)
+    payload = jwt.decode(issue_token(settings), options={"verify_signature": False})  # pyright: ignore[reportUnknownMemberType]
+
+    assert payload["pwd"] != hashlib.sha256(b"hunter2").hexdigest()[:16]
+    # Same password under another secret is another mark.
+    other = Settings(data_dir=tmp_path, auth_password="hunter2", jwt_secret="t" * 32)
+    other_payload = jwt.decode(issue_token(other), options={"verify_signature": False})  # pyright: ignore[reportUnknownMemberType]
+    assert payload["pwd"] != other_payload["pwd"]

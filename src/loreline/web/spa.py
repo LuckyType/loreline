@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 
 
 _NO_FALLBACK_PREFIXES = ("api/", "ws/")
+_IMMUTABLE_PREFIX = "_app/immutable/"
 
 
 class SpaStaticFiles(StaticFiles):
@@ -33,7 +34,13 @@ class SpaStaticFiles(StaticFiles):
 
     async def get_response(self, path: str, scope: object) -> Response:
         try:
-            return await super().get_response(path, scope)  # type: ignore[arg-type]
+            response = await super().get_response(path, scope)  # type: ignore[arg-type]
+            if path.startswith(_IMMUTABLE_PREFIX):
+                # SvelteKit names everything under here by a hash of its
+                # contents, so a given URL never changes what it serves and a
+                # browser never needs to ask again.
+                response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+            return response
         except HTTPException as exc:
             if exc.status_code == HTTP_404_NOT_FOUND and not path.startswith(_NO_FALLBACK_PREFIXES):
                 return await super().get_response("index.html", scope)  # type: ignore[arg-type]
