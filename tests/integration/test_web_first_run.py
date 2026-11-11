@@ -22,7 +22,7 @@ def unclaimed_settings(tmp_path: Path) -> Settings:
     return Settings(
         data_dir=tmp_path / "data",
         auth_password="",
-        jwt_secret="test-secret",
+        jwt_secret="test-secret-of-a-realistic-length",
         first_run_setup=True,
     )
 
@@ -171,7 +171,7 @@ async def test_the_password_survives_a_restart(unclaimed_settings: Settings) -> 
     restarted = Settings(
         data_dir=unclaimed_settings.data_dir,
         auth_password="",
-        jwt_secret="test-secret",
+        jwt_secret="test-secret-of-a-realistic-length",
         first_run_setup=True,
     )
     app = create_app(restarted)
@@ -198,7 +198,7 @@ async def test_the_environment_password_wins_over_the_stored_one(
     rescued = Settings(
         data_dir=unclaimed_settings.data_dir,
         auth_password="set-on-the-host",
-        jwt_secret="test-secret",
+        jwt_secret="test-secret-of-a-realistic-length",
         first_run_setup=True,
     )
     app = create_app(rescued)

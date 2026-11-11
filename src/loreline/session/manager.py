@@ -27,10 +27,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import errno
 import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Generator
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from functools import partial
 from typing import TYPE_CHECKING, Protocol, cast, runtime_checkable
@@ -1236,6 +1238,21 @@ def _keep_finalizing(step: str, session_id: str) -> Generator[None, None, None]:
         log.exception("session.teardown.failed", step=step, session_id=session_id)
 
 
+# The capture loop's own thread, for the two blocking things it does to every
+# frame: the disk write and the VAD's inference. It used the default executor,
+# which is also where an import's decode, an index rebuild and every other
+# ``to_thread`` in the process run - a handful of those at once and the frames
+# of a live recording queue behind them. One thread is all it needs: the loop
+# awaits each call before making the next, and one session records at a time.
+_CAPTURE_POOL = ThreadPoolExecutor(max_workers=1, thread_name_prefix="loreline-capture")
+
+
+async def _in_capture_thread[T](func: Callable[[], T]) -> T:
+    """Run ``func`` on the capture thread, with this task's log context."""
+    context = contextvars.copy_context()
+    return await asyncio.get_running_loop().run_in_executor(_CAPTURE_POOL, context.run, func)
+
+
 async def _store_audio(write: Callable[[], None], saved_seconds: float) -> None:
     """Run one blocking audio-store write off the loop, naming a full disk.
 
@@ -1247,7 +1264,7 @@ async def _store_audio(write: Callable[[], None], saved_seconds: float) -> None:
     in a test - gets the same treatment.
     """
     try:
-        await asyncio.to_thread(write)
+        await _in_capture_thread(write)
     except OSError as exc:
         if exc.errno != errno.ENOSPC:
             raise
@@ -1325,7 +1342,7 @@ async def _capture_utterances(
                 # every _DISK_CHECK_INTERVAL_S, not once per frame.
                 await disk_watch.check()
             # ONNX inference off the event loop for the same reason.
-            is_speech = await asyncio.to_thread(detector, frame)
+            is_speech = await _in_capture_thread(partial(detector, frame))
             if frames is not None:
                 # After the VAD rather than before it: the streaming path needs
                 # the verdict with the frame, for its liveness watchdog. The

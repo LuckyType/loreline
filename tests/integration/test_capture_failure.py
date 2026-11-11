@@ -126,7 +126,9 @@ async def _await_health(
 
 @pytest.fixture
 def settings(tmp_path: Path) -> Settings:
-    return Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="test-secret")
+    return Settings(
+        data_dir=tmp_path / "data", auth_password="", jwt_secret="test-secret-of-a-realistic-length"
+    )
 
 
 async def test_start_rejects_a_microphone_that_cannot_be_opened(settings: Settings) -> None:

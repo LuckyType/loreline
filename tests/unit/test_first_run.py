@@ -23,7 +23,7 @@ from loreline.web.setup import (
 
 def _settings(tmp_path: Path, **kwargs: object) -> Settings:
     """Settings for a fresh instance; the suite's env default is overridden per test."""
-    return Settings(data_dir=tmp_path / "data", jwt_secret="test-secret", **kwargs)  # pyright: ignore[reportArgumentType]
+    return Settings(data_dir=tmp_path / "data", jwt_secret="t" * 32, **kwargs)  # pyright: ignore[reportArgumentType]
 
 
 # --- the three states -------------------------------------------------------

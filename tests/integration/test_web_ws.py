@@ -28,7 +28,7 @@ _MAX_LINES = 50
 
 @pytest.fixture
 def ws_client(tmp_path: Path) -> Iterator[TestClient]:
-    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="x")
+    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="x" * 32)
     app = create_app(
         settings,
         capture_factory=capture_factory,  # type: ignore[arg-type]
@@ -313,7 +313,7 @@ def test_transcript_ws_carries_what_the_drain_settles(tmp_path: Path) -> None:
             await tearing_down.wait()
             return await super().transcribe(utterance, session_id=session_id, glossary=glossary)
 
-    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="x")
+    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="x" * 32)
     app = create_app(
         settings,
         capture_factory=stopping_capture,  # type: ignore[arg-type]
@@ -377,7 +377,7 @@ def test_logs_ws_carries_the_teardown_of_a_capture_that_died(tmp_path: Path) -> 
     def dying_capture(_req: object, _rate: int) -> tuple[object, object]:
         return _DyingSource(), detector
 
-    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="x")
+    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="x" * 32)
     app = create_app(
         settings,
         capture_factory=dying_capture,  # type: ignore[arg-type]

@@ -847,7 +847,7 @@ class TestVideoRoutes:
                 return httpx.Response(200, content=b"\x00\x00\x00 ftypmp42")
             return httpx.Response(200, json={"id": "gen_1", "status": "completed"})
 
-        settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="x")
+        settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="x" * 32)
         app = create_app(
             settings,
             video_client_factory=lambda: _client(httpx.MockTransport(handle)),
@@ -1074,7 +1074,7 @@ class TestSceneRoute:
 
     @pytest_asyncio.fixture
     async def client(self, tmp_path: Path) -> AsyncIterator[AsyncClient]:
-        settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="x")
+        settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="x" * 32)
         app = create_app(settings)
         async with LifespanManager(app):
             transport = ASGITransport(app=app)
@@ -1247,7 +1247,7 @@ class TestLiveCaptureGuard:
     async def test_start_rejects_a_reprocess_only_provider(
         self, tmp_path: Path
     ) -> AsyncIterator[None] | None:
-        settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="x")
+        settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="x" * 32)
         app = create_app(settings)
         async with LifespanManager(app):
             transport = ASGITransport(app=app)
@@ -1283,7 +1283,7 @@ class TestInlineDiarizationGuard:
         # Fake capture + STT, so a session that gets *past* the guard does not
         # try to open a real microphone - CI runners have none, and a genuine
         # start would hang the lifespan on PortAudioError.
-        settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="x")
+        settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="x" * 32)
         app = create_app(
             settings,
             capture_factory=capture_factory,  # type: ignore[arg-type]

@@ -30,9 +30,9 @@ def test_ensure_jwt_secret_generates_and_persists(tmp_path: Path) -> None:
 
 def test_ensure_jwt_secret_respects_explicit_value(tmp_path: Path) -> None:
     secrets = SecretStore(tmp_path / "secrets.json")
-    settings = Settings(data_dir=tmp_path, jwt_secret="explicit-secret")
+    settings = Settings(data_dir=tmp_path, jwt_secret="explicit-secret-of-a-realistic-length")
     ensure_jwt_secret(settings, secrets)
-    assert settings.jwt_secret == "explicit-secret"
+    assert settings.jwt_secret == "explicit-secret-of-a-realistic-length"
     assert secrets.get("_jwt_secret") is None
 
 
@@ -45,7 +45,9 @@ def test_ensure_jwt_secret_empty_generates(tmp_path: Path) -> None:
 
 
 def test_token_invalidated_by_password_rotation(tmp_path: Path) -> None:
-    settings = Settings(data_dir=tmp_path, auth_password="old-pw", jwt_secret="shared-secret")
+    settings = Settings(
+        data_dir=tmp_path, auth_password="old-pw", jwt_secret="shared-secret-of-a-realistic-length"
+    )
     token = issue_token(settings)
     assert verify_token(token, settings)
 
@@ -124,11 +126,11 @@ def test_a_token_gives_nothing_to_test_password_guesses_against(tmp_path: Path) 
     on the plain-HTTP path. The mark used to be a bare SHA-256 prefix of the
     password, which let anyone holding one cookie check guesses offline.
     """
-    settings = Settings(data_dir=tmp_path, auth_password="hunter2", jwt_secret="s" * 32)
+    settings = Settings(data_dir=tmp_path, auth_password="hunter2", jwt_secret="s" * 32 * 32)
     payload = jwt.decode(issue_token(settings), options={"verify_signature": False})  # pyright: ignore[reportUnknownMemberType]
 
     assert payload["pwd"] != hashlib.sha256(b"hunter2").hexdigest()[:16]
     # Same password under another secret is another mark.
-    other = Settings(data_dir=tmp_path, auth_password="hunter2", jwt_secret="t" * 32)
+    other = Settings(data_dir=tmp_path, auth_password="hunter2", jwt_secret="t" * 32 * 32)
     other_payload = jwt.decode(issue_token(other), options={"verify_signature": False})  # pyright: ignore[reportUnknownMemberType]
     assert payload["pwd"] != other_payload["pwd"]

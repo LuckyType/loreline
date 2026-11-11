@@ -66,7 +66,7 @@ def _settings(tmp_path: Path) -> Settings:
     return Settings(
         data_dir=tmp_path / "data",
         auth_password=_PASSWORD,
-        jwt_secret="test-secret",
+        jwt_secret="test-secret-of-a-realistic-length",
         docker_api="",
         updater_token="",
         trusted_proxies="",

@@ -147,7 +147,9 @@ async def fake_diarizers(_config: DiarizationConfig) -> DiarizationProvider:
 
 @pytest.fixture
 def session_settings(tmp_path: Path) -> Settings:
-    return Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="test-secret")
+    return Settings(
+        data_dir=tmp_path / "data", auth_password="", jwt_secret="test-secret-of-a-realistic-length"
+    )
 
 
 @pytest_asyncio.fixture
@@ -429,7 +431,7 @@ async def test_start_disabled_provider_conflicts(session_client: AsyncClient) ->
 async def test_merge_concatenates_audio(tmp_path: Path) -> None:
     """Merging sessions that all have stored audio also merges the WAVs, so
     the merged session stays re-processable and downloadable."""
-    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t")
+    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t" * 32)
     app = create_app(
         settings,
         capture_factory=capture_factory,  # type: ignore[arg-type]
@@ -521,7 +523,7 @@ async def test_session_detail_reports_zero_duration_for_a_headeronly_wav(
     an audio_path - just a bare header, indistinguishable from a real
     recording by path alone. The reported duration says so as 0, which is
     what lets the frontend tell the two apart."""
-    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t")
+    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t" * 32)
     app = create_app(
         settings,
         capture_factory=_silent_capture_factory,  # type: ignore[arg-type]
@@ -602,7 +604,7 @@ async def test_startup_rebuilds_orphaned_index(
         return any  # a frame with any nonzero byte counts as speech
 
     monkeypatch.setattr("loreline.session.recovery._default_detector", any_byte_detector)
-    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t")
+    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t" * 32)
 
     def make_app() -> FastAPI:
         return create_app(
@@ -643,7 +645,7 @@ async def test_startup_rebuilds_orphaned_index(
 
 
 async def test_merge_and_delete_sessions(tmp_path: Path) -> None:
-    settings = Settings(data_dir=tmp_path / "d", auth_password="", jwt_secret="t")
+    settings = Settings(data_dir=tmp_path / "d", auth_password="", jwt_secret="t" * 32)
     app = create_app(settings)
     async with LifespanManager(app):
         ctx = app.state.ctx  # pyright: ignore[reportAny]
@@ -792,7 +794,7 @@ async def test_merge_takes_each_source_s_newest_re_transcription(tmp_path: Path)
     away every re-transcription of every part - the exact thing the parts were
     re-transcribed for - and left nothing on the merged row to say so.
     """
-    settings = Settings(data_dir=tmp_path / "d", auth_password="", jwt_secret="t")
+    settings = Settings(data_dir=tmp_path / "d", auth_password="", jwt_secret="t" * 32)
     app = create_app(settings)
     async with LifespanManager(app):
         ctx = app.state.ctx  # pyright: ignore[reportAny]
@@ -857,7 +859,7 @@ async def test_merge_stamps_each_part_with_the_provider_that_produced_it(tmp_pat
     the re-transcription job's provider when that is the text taken, and the
     capture's when it is not.
     """
-    settings = Settings(data_dir=tmp_path / "d", auth_password="", jwt_secret="t")
+    settings = Settings(data_dir=tmp_path / "d", auth_password="", jwt_secret="t" * 32)
     app = create_app(settings)
     async with LifespanManager(app):
         ctx = app.state.ctx  # pyright: ignore[reportAny]
@@ -914,7 +916,7 @@ async def test_transcript_version_lookup_tells_a_typo_from_a_run_in_flight(tmp_p
     flight: the session page lists it and lets the GM select it the moment it
     is queued, so that one has to stay readable, on export as well.
     """
-    settings = Settings(data_dir=tmp_path / "d", auth_password="", jwt_secret="t")
+    settings = Settings(data_dir=tmp_path / "d", auth_password="", jwt_secret="t" * 32)
     app = create_app(settings)
     async with LifespanManager(app):
         ctx = app.state.ctx  # pyright: ignore[reportAny]
@@ -968,7 +970,7 @@ async def test_transcript_version_lookup_tells_a_typo_from_a_run_in_flight(tmp_p
 async def test_merge_ends_where_the_merged_audio_does(tmp_path: Path) -> None:
     """With merged audio the parts advance by their audio length, so that is
     what the merged session runs to - the transcript may stop short of it."""
-    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t")
+    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t" * 32)
     app = create_app(
         settings,
         capture_factory=capture_factory,  # type: ignore[arg-type]

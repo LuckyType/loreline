@@ -78,7 +78,7 @@ class Harness(NamedTuple):
 @pytest_asyncio.fixture
 async def harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Harness]:
     monkeypatch.setattr("loreline.session.importing.default_detector", _any_byte_detector)
-    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t")
+    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t" * 32)
     app = build_app(settings)
     async with LifespanManager(app):
         transport = ASGITransport(app=app)
@@ -247,7 +247,7 @@ async def test_a_recording_past_the_size_limit_is_refused_with_413(
     """The ceiling exists so one request cannot fill the disk."""
     monkeypatch.setattr("loreline.session.importing.default_detector", _any_byte_detector)
     settings = Settings(
-        data_dir=tmp_path / "data", auth_password="", jwt_secret="t", import_max_mb=1
+        data_dir=tmp_path / "data", auth_password="", jwt_secret="t" * 32, import_max_mb=1
     )
     app = build_app(settings)
     async with LifespanManager(app):
@@ -269,7 +269,7 @@ async def test_a_recording_past_the_hour_limit_is_refused_with_422(
     settings = Settings(
         data_dir=tmp_path / "data",
         auth_password="",
-        jwt_secret="t",
+        jwt_secret="t" * 32,
         import_max_hours=1.0 / 3600,  # one second
     )
     app = build_app(settings)

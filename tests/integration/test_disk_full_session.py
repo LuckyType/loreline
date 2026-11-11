@@ -154,7 +154,9 @@ async def _await_alert(sent: list[Alert], title: str) -> Alert:
 
 @pytest.fixture
 def settings(tmp_path: Path) -> Settings:
-    return Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="test-secret")
+    return Settings(
+        data_dir=tmp_path / "data", auth_password="", jwt_secret="test-secret-of-a-realistic-length"
+    )
 
 
 async def test_a_recording_session_warns_before_the_disk_fills(tmp_path: Path) -> None:
@@ -162,7 +164,7 @@ async def test_a_recording_session_warns_before_the_disk_fills(tmp_path: Path) -
     tight = Settings(
         data_dir=tmp_path / "data",
         auth_password="",
-        jwt_secret="test-secret",
+        jwt_secret="test-secret-of-a-realistic-length",
         disk_alert_threshold_mb=10**9,  # a petabyte: no filesystem clears this
     )
     sent: list[Alert] = []

@@ -31,7 +31,7 @@ def app(tmp_path: Path) -> FastAPI:
     session has come from re-processing jobs, and this module is about what
     summarize does with them, not about producing them.
     """
-    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="x")
+    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="x" * 32)
     return create_app(
         settings,
         capture_factory=capture_factory,  # type: ignore[arg-type]

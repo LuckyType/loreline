@@ -100,7 +100,7 @@ async def test_a_forwarded_https_claim_from_an_untrusted_peer_is_ignored(
     settings = Settings(
         data_dir=tmp_path / "data",
         auth_password="hunter2",
-        jwt_secret="test-secret",
+        jwt_secret="test-secret-of-a-realistic-length",
         trusted_proxies="172.16.0.0/12",
     )
     async with _login_client(settings, peer="192.168.1.50") as client:
@@ -114,7 +114,7 @@ async def test_a_forwarded_https_claim_from_the_proxy_marks_the_cookie_secure(
     settings = Settings(
         data_dir=tmp_path / "data",
         auth_password="hunter2",
-        jwt_secret="test-secret",
+        jwt_secret="test-secret-of-a-realistic-length",
         trusted_proxies="10.0.0.0/8, 127.0.0.0/8",
     )
     async with _login_client(settings) as client:  # peer 127.0.0.1, a listed proxy
@@ -128,7 +128,7 @@ async def test_the_proxy_reporting_plain_http_leaves_the_cookie_unsecured(
     settings = Settings(
         data_dir=tmp_path / "data",
         auth_password="hunter2",
-        jwt_secret="test-secret",
+        jwt_secret="test-secret-of-a-realistic-length",
         trusted_proxies="127.0.0.0/8",
     )
     async with _login_client(settings) as client:
@@ -163,7 +163,7 @@ def _proxied_settings(tmp_path: Path) -> Settings:
     return Settings(
         data_dir=tmp_path / "data",
         auth_password="hunter2",
-        jwt_secret="test-secret",
+        jwt_secret="test-secret-of-a-realistic-length",
         trusted_proxies="127.0.0.0/8",
     )
 
@@ -203,7 +203,7 @@ async def test_the_forwarded_client_is_ignored_when_the_peer_is_not_a_proxy(
     settings = Settings(
         data_dir=tmp_path / "data",
         auth_password="hunter2",
-        jwt_secret="test-secret",
+        jwt_secret="test-secret-of-a-realistic-length",
     )
     async with _login_client(settings, peer="192.168.1.50") as client:
         for attempt in range(5):
