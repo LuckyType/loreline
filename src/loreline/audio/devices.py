@@ -12,6 +12,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from loreline.logging import get_logger
+
+log = get_logger(__name__)
+
 # When a software audio server (PipeWire/PulseAudio) is present, PortAudio's
 # ALSA host API also enumerates its plain software-routing PCM aliases
 # alongside the real hardware devices - every one of them ultimately reaching
@@ -51,7 +55,11 @@ def list_input_devices() -> list[InputDevice]:
     """Return available input devices via PortAudio.
 
     Returns an empty list if ``sounddevice`` (the ``audio`` extra) is not
-    installed or no audio backend is available. Filters out ALSA's software
+    installed or no audio backend is available. That includes a PortAudio that
+    is installed and cannot start: importing sounddevice initializes it, and a
+    build with the PulseAudio host API fails that step with ``PortAudioError``
+    on a host where no sound server is running. The error class lives in the
+    module that just failed to import, so it cannot be named here. Filters out ALSA's software
     passthrough aliases (see ``_ALSA_ALIAS_NAMES``) and PulseAudio/PipeWire
     ``*.monitor`` sources - a loopback tap of what a sink is *playing back*,
     not a microphone - so the list only shows genuinely distinct devices.
@@ -59,6 +67,9 @@ def list_input_devices() -> list[InputDevice]:
     try:
         import sounddevice as sd  # noqa: PLC0415
     except (ImportError, OSError):  # pragma: no cover - host without audio backend
+        return []
+    except Exception as exc:
+        log.warning("audio.devices.backend_unavailable", error=str(exc))
         return []
 
     try:
