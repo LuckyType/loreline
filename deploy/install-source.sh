@@ -37,7 +37,7 @@ NPM_CACHE_DIR="${APP_DIR}/.cache/npm"
 
 # Sync dependencies (expects the repo checked out at APP_DIR).
 sudo -u "${SERVICE_USER}" env -C "${APP_DIR}" "UV_CACHE_DIR=${UV_CACHE_DIR}" \
-  uv sync --frozen --extra audio --extra providers
+  uv sync --frozen --extra audio
 
 # Build the web UI (static SPA served by the backend itself).
 sudo -u "${SERVICE_USER}" env -C "${APP_DIR}/frontend" "npm_config_cache=${NPM_CACHE_DIR}" npm ci

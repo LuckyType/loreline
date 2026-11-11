@@ -45,7 +45,11 @@ RUN npm run build
 # comes from uv here rather than the base image.
 FROM ubuntu:26.04 AS base
 
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
+# Pinned rather than `latest`: this binary resolves and installs everything
+# below, so an unpinned tag is the one input to this image that the lockfile
+# and the 14-day cooldown in pyproject.toml say nothing about. Dependabot
+# bumps it (see .github/dependabot.yml).
+COPY --from=ghcr.io/astral-sh/uv:0.11.32 /uv /uvx /usr/local/bin/
 
 ENV UV_LINK_MODE=copy \
     UV_COMPILE_BYTECODE=1 \
@@ -67,15 +71,21 @@ RUN apt-get update \
         ca-certificates libportaudio2 libgomp1 libpulse0 ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-# Install dependencies first (cached layer). audio + providers match what a
-# real device install gets (see deploy/install.sh, deploy/update.sh).
+# Install dependencies first (cached layer). The audio extra matches what a
+# real device install gets (see deploy/install-source.sh).
+#
+# The cache mount keeps uv's download cache out of the image. With
+# UV_LINK_MODE=copy every wheel is copied into .venv, so a cache left in the
+# layer is a second, never-read copy of torch and onnxruntime.
 COPY .python-version pyproject.toml uv.lock ./
 RUN uv python install
-RUN uv sync --frozen --no-install-project --no-dev --extra audio --extra providers
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-install-project --no-dev --extra audio
 
 # Install the project.
 COPY . .
-RUN uv sync --frozen --no-dev --extra audio --extra providers
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev --extra audio
 
 # Built SPA from the frontend stage - create_app() only mounts the web UI at
 # "/" when frontend/build/index.html exists (see loreline.web.spa).
@@ -104,4 +114,15 @@ ENV LORELINE_BUILD_COMMIT=${LORELINE_BUILD_COMMIT} \
 
 EXPOSE 8000
 ENV LORELINE_HOST=0.0.0.0
-CMD ["uv", "run", "loreline", "run"]
+
+# Asks the one route that says "the process is serving" and nothing about the
+# deployment, so an unclaimed instance and one with a provider down are both
+# healthy here. Python rather than curl because the image has no curl.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+    CMD ["/app/.venv/bin/python", "-c", "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.environ.get('LORELINE_PORT', '8000') + '/api/system/livez', timeout=4)"]
+
+# The venv's own entry point, not `uv run`: `uv run` syncs the environment
+# before it starts, dev group included, so every new container downloaded
+# ruff, pyright and pytest from PyPI and could not start without a network.
+# Same command deploy/loreline.service runs.
+CMD ["/app/.venv/bin/loreline", "run"]

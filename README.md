@@ -336,7 +336,7 @@ bash deploy/install-source.sh
 overridable through environment variables. The script creates the system user in
 the `audio` group, installs `libportaudio2` and `libgomp1` for the `audio`
 extra, `ffmpeg` for importing recordings, plus `nodejs` and `npm`, runs
-`uv sync --extra audio --extra providers`,
+`uv sync --extra audio`,
 builds the SvelteKit UI into `frontend/build`, and installs the systemd unit and
 `deploy/sudoers.d/loreline`. Without that frontend build the app serves nothing
 at `/`. The sudoers rule grants the service user passwordless `systemctl` for
