@@ -21,7 +21,7 @@ import asyncio
 import contextlib
 import time
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from typing import TYPE_CHECKING
 
 import httpx
@@ -58,6 +58,7 @@ if TYPE_CHECKING:
         SessionRepository,
         TranscriptRepository,
     )
+    from loreline.persistence.audio_store import StoredUtterances
     from loreline.secrets import SecretStore
     from loreline.stt.base import STTBackend
     from loreline.web.schemas import ReprocessRequest
@@ -791,11 +792,15 @@ class ReprocessManager:
             ),
             diarizer=diarizer,
         )
+        utterances: StoredUtterances | None = None
         try:
-            # Blocking file I/O (a whole session's utterances) off the event loop.
-            utterances = await asyncio.to_thread(self._audio_store.read_utterances, job.session_id)
+            # Opened off the event loop (it reads the index), and read one
+            # utterance at a time by the feed rather than whole up front.
+            utterances = await asyncio.to_thread(self._audio_store.open_utterances, job.session_id)
             written = await self._drive(router, bus, utterances, job, started_mono, cancel)
         finally:
+            if utterances is not None:
+                utterances.close()
             await _aclose(backend)
             await _aclose(diarizer)
         if router.dropped:
@@ -889,7 +894,7 @@ class ReprocessManager:
         self,
         router: SttRouter,
         bus: EventBus[TranscriptEvent],
-        utterances: list[Utterance],
+        utterances: Iterable[Utterance],
         job: ReprocessJob,
         started_mono: float,
         cancel: _CancelRequest,
@@ -945,7 +950,7 @@ async def _run_then_close(
         await bus.aclose()
 
 
-async def _aiter(items: list[Utterance], cancel: _CancelRequest) -> AsyncIterator[Utterance]:
+async def _aiter(items: Iterable[Utterance], cancel: _CancelRequest) -> AsyncIterator[Utterance]:
     """Feed the router the stored recording, one utterance at a time, until it
     runs out or the GM asks it to stop.
 
@@ -965,7 +970,13 @@ async def _aiter(items: list[Utterance], cancel: _CancelRequest) -> AsyncIterato
     the difference between a run that was cut short and one that had already
     handed over its last utterance when the press arrived.
     """
-    for item in items:
+    # Each one is pulled in a thread: a stored utterance is read from the WAV
+    # when it is asked for, and that read is file I/O.
+    feed = iter(items)
+    while True:
+        item = await asyncio.to_thread(next, feed, None)
+        if item is None:
+            return
         if cancel.requested:
             cancel.stopped = True
             return

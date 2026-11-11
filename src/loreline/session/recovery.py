@@ -46,6 +46,12 @@ async def recover_orphaned_indexes(
     on the next startup. WAVs without a session row (stray files) and the
     active session's own recording are left alone.
     """
+    # First, and cheap: a recording whose process died with utterances already
+    # indexed left a journal, which is the index. Only a WAV with neither file
+    # needs the VAD pass below.
+    adopted = await asyncio.to_thread(audio_store.consolidate_journals, skip=active_session_id())
+    if adopted:
+        log.info("audio.recovery.journals_consolidated", count=adopted)
     orphans = audio_store.orphaned_wavs()
     if not orphans:
         return 0
