@@ -11,6 +11,7 @@
 		"gen:api": "uv run loreline openapi > openapi.json && npm run gen:types",
 		"gen:types": "openapi-typescript openapi.json -o src/lib/api.generated.d.ts --default-non-nullable false",
 		"check:api": "npm run gen:types -- --check",
+		"test": "vitest run",
 		"lint": "biome format . && eslint .",
 		"format": "biome format --write ."
 	},
@@ -41,7 +42,8 @@
 		"tw-animate-css": "^1.4.0",
 		"typescript": "^5.6.3",
 		"typescript-eslint": "^8.13.0",
-		"vite": "^5.4.10"
+		"vite": "^5.4.10",
+		"vitest": "^3.2.7"
 	},
 	"dependencies": {
 		"@lucide/svelte": "^1.34.0"

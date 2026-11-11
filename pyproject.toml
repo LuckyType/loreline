@@ -178,7 +178,13 @@ venv = ".venv"
 testpaths = ["tests"]
 pythonpath = ["."]
 asyncio_mode = "auto"
-addopts = "-ra --strict-markers --cov=loreline --cov-report=term-missing"
+# Parallel by default (pytest-xdist): most tests build their own app and their
+# own database under tmp_path, so they share nothing, and the suite takes a
+# quarter of the time. `-n 0` turns it off for a debugger or `-s`.
+#
+# Coverage is not on by default. It costs about a third of a run, and the
+# number is only read in CI, which asks for it there (see ci.yml).
+addopts = "-ra --strict-markers -n auto"
 
 [tool.coverage.run]
 source = ["loreline"]

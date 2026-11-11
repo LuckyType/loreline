@@ -1,0 +1,68 @@
+# Keeps the five places this repo names a version from going stale unnoticed.
+#
+# Weekly and grouped, so a week is one pull request per ecosystem rather than
+# one per package. The 14-day cooldown is the same rule pyproject.toml's
+# `exclude-newer` and frontend/.npmrc's `min-release-age` already apply to a
+# fresh lock: nothing is proposed until it has been public for two weeks.
+version: 2
+updates:
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 14
+    groups:
+      python:
+        patterns: ["*"]
+
+  - package-ecosystem: npm
+    directories:
+      - /
+      - /frontend
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 14
+    groups:
+      npm-minor:
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 14
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: docker
+    directories:
+      - /
+      - /services/diarization
+      - /services/updater
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 14
+
+  - package-ecosystem: docker-compose
+    directories:
+      - /
+      - /services/speaches
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 14
+
+  - package-ecosystem: pip
+    directory: /services/diarization
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 14
+    groups:
+      diarization:
+        patterns: ["*"]

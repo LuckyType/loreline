@@ -178,10 +178,17 @@ function editKeydown(e: KeyboardEvent, label: string) {
 	<!-- The mark is padded inwards rather than bled outwards with a negative
 	     margin: this box scrolls, so a row wider than it would put a
 	     horizontal scrollbar under every transcript on the site, and the
-	     bar down its left edge would be clipped away with the overflow. -->
+	     bar down its left edge would be clipped away with the overflow.
+
+	     content-visibility lets the browser skip layout and paint for rows
+	     that are off screen, which is nearly all of them: an evening is a few
+	     thousand rows and they are all in the document, so that find-in-page,
+	     seeking and the scroll position keep working without a virtual list.
+	     The intrinsic size is a one-line row's height until a row has been
+	     seen once, after which the browser remembers its real one. -->
 	<div
 		class={cn(
-			'flex items-baseline gap-2.5 rounded-md px-2 py-1',
+			'flex items-baseline gap-2.5 rounded-md px-2 py-1 [content-visibility:auto] [contain-intrinsic-size:auto_1.75rem]',
 			active && 'bg-primary/10 [box-shadow:inset_2px_0_0_var(--color-primary)]',
 		)}
 		data-active={active ? 'true' : undefined}
