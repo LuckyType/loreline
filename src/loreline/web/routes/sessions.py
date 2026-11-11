@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING, Annotated, NamedTuple
 
 from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
@@ -25,12 +25,9 @@ from starlette.status import (
 from loreline.audio.decode import IMPORTABLE_SUFFIXES, DecodeError
 from loreline.export import (
     EXPORTERS,
-    canonical_transcript,
     final_rows,
-    has_version,
     relabel_speakers,
     to_txt,
-    variant_view,
 )
 from loreline.llm import LLMError, extract_entities, summarize_transcript
 from loreline.models import (
@@ -94,12 +91,10 @@ _MERGE_MIN_SESSIONS = 2
 _UPLOAD_CHUNK = 1 << 20
 
 
-async def _require_version(
-    state: AppState, session_id: str, events: Sequence[TranscriptEvent], version: str
-) -> None:
+async def _require_version(state: AppState, session_id: str, version: str) -> None:
     """Raise a 404 naming ``version`` unless it is a transcript this session has.
 
-    :func:`has_version` answers from the rows, and for a version that has run
+    ``has_version`` answers from the rows, and for a version that has run
     the rows are the version. They are not the whole story for a
     re-transcription still in flight: the session page lists it and lets the
     GM select it the moment it is queued, and it has no rows until its first
@@ -108,7 +103,7 @@ async def _require_version(
     session counts too; a job id from another session does not, any more
     than a typo does.
     """
-    if has_version(events, version):
+    if await state.transcripts.has_version(session_id, version):
         return
     job = await state.reprocess_jobs.get(version)
     if job is not None and job.session_id == session_id and job.operation == "transcribe":
@@ -128,9 +123,8 @@ async def _version_rows(state: AppState, session_id: str, version: str) -> list[
     not exist would return a plausible file under the wrong name, which is
     exactly the failure this replaced (see :func:`export_session`).
     """
-    events = await state.transcripts.for_session(session_id)
-    await _require_version(state, session_id, events, version)
-    return final_rows(variant_view(events, version))
+    await _require_version(state, session_id, version)
+    return final_rows(await state.transcripts.version_view(session_id, version))
 
 
 class _BestRows(NamedTuple):
@@ -162,16 +156,14 @@ async def _best_available_rows(state: AppState, session: Session) -> _BestRows:
     with B used to land in the merge stamped A, naming a provider that never
     heard those words.
     """
-    events = await state.transcripts.for_session(session.id)
     for job in await state.reprocess_jobs.for_session(session.id):  # newest first
         if job.operation != "transcribe" or job.status is not JobStatus.DONE:
             continue
-        rows = final_rows(variant_view(events, job.id))
+        rows = final_rows(await state.transcripts.version_view(session.id, job.id))
         if rows:
             return _BestRows(rows, job.provider_id)
-    return _BestRows(
-        final_rows(canonical_transcript(events)), session.primary_provider or session.id
-    )
+    original = await state.transcripts.version_view(session.id)
+    return _BestRows(final_rows(original), session.primary_provider or session.id)
 
 
 class SessionDetail(BaseModel):
@@ -390,7 +382,7 @@ async def get_session(request: Request, session_id: str) -> SessionDetail:
     session = await state.sessions.get(session_id)
     if session is None:
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="session not found")
-    transcript = canonical_transcript(await state.transcripts.for_session(session_id))
+    transcript = await state.transcripts.version_view(session_id)
     audio_duration_s = None
     if session.audio_path and state.audio_store.exists(session_id):
         # Blocking file I/O (reads the WAV header only) off the event loop.
@@ -415,12 +407,11 @@ async def get_transcript_version(
     state = get_state(request)
     if await state.sessions.get(session_id) is None:
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="session not found")
-    events = await state.transcripts.for_session(session_id)
     # A typo is a 404 here for the same reason it is on export: an empty
     # transcript looks exactly like a version that captured nothing, and this
     # route answered every misspelt version id with one.
-    await _require_version(state, session_id, events, version)
-    return variant_view(events, version)
+    await _require_version(state, session_id, version)
+    return await state.transcripts.version_view(session_id, version)
 
 
 @router.delete("/{session_id}/transcript")

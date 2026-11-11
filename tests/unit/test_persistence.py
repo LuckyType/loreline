@@ -6,10 +6,14 @@ import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 
+import aiosqlite
+import pytest
 import pytest_asyncio
 
+from loreline.export import has_version, variant_rows, variant_view
 from loreline.models import (
     DEFAULT_GLOSSARY_CAMPAIGN,
+    Campaign,
     Glossary,
     JobStatus,
     OpenRouterRouting,
@@ -24,6 +28,7 @@ from loreline.models import (
     Word,
 )
 from loreline.persistence import (
+    CampaignRepository,
     Database,
     GlossaryRepository,
     ProviderRepository,
@@ -33,6 +38,9 @@ from loreline.persistence import (
     VideoRepository,
 )
 from loreline.persistence.database import MIGRATIONS
+from loreline.persistence.repositories import (
+    _INLINE_ROW_LIMIT,  # pyright: ignore[reportPrivateUsage]
+)
 from loreline.web.deps import ACTION_DEFAULTS_KEY
 from loreline.web.schemas import ActionDefaults
 
@@ -794,3 +802,110 @@ async def test_v25_adds_the_scene_columns_to_an_existing_database(db: Database) 
     assert migrated.prompt == "a wizard walks into a tavern"
     assert migrated.scene_model is None
     assert migrated.scene_source is None
+
+
+def _row(source: str, start: float, *, final: bool = True) -> TranscriptEvent:
+    return TranscriptEvent(
+        session_id="s1",
+        source=source,
+        text=f"{source} at {start}",
+        start_ts=start,
+        end_ts=start + 1,
+        is_final=final,
+    )
+
+
+async def test_a_version_read_agrees_with_the_filter_it_replaced(db: Database) -> None:
+    """The queries are the SQL form of the export module's rules, row for row.
+
+    Reading one version used to mean loading every version and filtering in
+    Python. The filter is still the definition, so each query is held to it:
+    the original with a failover (two provider ids), a raw re-transcription, a
+    re-transcription with a diarized copy, and a version nobody produced.
+    """
+    await SessionRepository(db).create(Session(id="s1", started_at=time.time()))
+    transcripts = TranscriptRepository(db)
+    sources = [
+        "p1",
+        "p2",
+        "gap",
+        "reprocess:a",
+        "reprocess:b",
+        "diarize:b",
+        "diarize:original",
+        "Reprocess:a",  # a provider id, not a tag: the prefix is case-sensitive
+    ]
+    for index, source in enumerate(sources * 2):
+        await transcripts.add(_row(source, float(index)))
+    everything = await transcripts.for_session("s1")
+
+    for version in ("original", "a", "b", "missing"):
+        assert await transcripts.version_rows("s1", version) == variant_rows(everything, version)
+        assert await transcripts.version_view("s1", version) == variant_view(everything, version)
+        assert await transcripts.has_version("s1", version) is has_version(everything, version)
+    assert await transcripts.has_version_rows("s1", "a")
+    assert not await transcripts.has_version_rows("s1", "original")
+    assert not await transcripts.has_version_rows("s1", "missing")
+
+
+async def test_a_long_version_is_built_off_the_loop_and_reads_back_the_same(db: Database) -> None:
+    """Past the inline limit the events are built in a thread; the answer is unchanged."""
+    await SessionRepository(db).create(Session(id="s1", started_at=time.time()))
+    transcripts = TranscriptRepository(db)
+    words = [Word(text="roll", start=0.0, end=0.2, speaker="Speaker 1")]
+    for index in range(_INLINE_ROW_LIMIT + 5):
+        await transcripts.add(_row("p1", float(index)).model_copy(update={"words": words}))
+
+    rows = await transcripts.version_view("s1")
+
+    assert [row.start_ts for row in rows] == [float(i) for i in range(_INLINE_ROW_LIMIT + 5)]
+    assert rows[-1].words == words
+
+
+async def test_a_campaigns_sessions_come_back_in_play_order(db: Database) -> None:
+    sessions = SessionRepository(db)
+    campaigns = CampaignRepository(db)
+    await campaigns.create(Campaign(id="c1", name="Curse", created_at=1.0))
+    await sessions.create(Session(id="late", started_at=20.0))
+    await sessions.create(Session(id="early", started_at=10.0))
+    await sessions.create(Session(id="other", started_at=15.0))
+    await campaigns.assign("late", "c1")
+    await campaigns.assign("early", "c1")
+
+    assert [s.id for s in await sessions.for_campaign("c1")] == ["early", "late"]
+    assert await sessions.for_campaign("nobody") == []
+
+
+async def test_a_migration_that_fails_half_way_leaves_nothing_behind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A script either lands whole with its version, or not at all.
+
+    The failure this pins down: two statements, the first applied, the process
+    dies (here: the second raises), and every later start trips over the first
+    one having already run. With the script in one transaction the retry
+    starts from a schema that never saw the first statement.
+    """
+    path = tmp_path / "db.sqlite"
+    async with Database(path):
+        pass
+    broken = [
+        *MIGRATIONS,
+        "ALTER TABLE campaigns ADD COLUMN half_done TEXT;\nALTER TABLE no_such_table ADD COLUMN x;",
+    ]
+    monkeypatch.setattr("loreline.persistence.database.MIGRATIONS", broken)
+
+    with pytest.raises(aiosqlite.Error):
+        await Database(path).connect()
+
+    monkeypatch.setattr(
+        "loreline.persistence.database.MIGRATIONS",
+        [*MIGRATIONS, "ALTER TABLE campaigns ADD COLUMN half_done TEXT;"],
+    )
+    async with Database(path) as db:
+        async with db.connection.execute("SELECT MAX(version) FROM schema_version;") as cur:
+            row = await cur.fetchone()
+        assert row is not None
+        assert row[0] == len(MIGRATIONS) + 1
+        async with db.connection.execute("SELECT half_done FROM campaigns;") as cur:
+            assert await cur.fetchall() == []
