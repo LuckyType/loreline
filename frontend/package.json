@@ -30,7 +30,7 @@
 		"eslint": "^9.14.0",
 		"eslint-config-prettier": "^9.1.0",
 		"eslint-plugin-svelte": "^2.46.0",
-		"globals": "^15.12.0",
+		"globals": "^17.13.0",
 		"knip": "^6.32.2",
 		"openapi-typescript": "^7.13.0",
 		"shadcn-svelte": "^1.5.0",
