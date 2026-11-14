@@ -52,7 +52,7 @@ jobs:
       # whose history is measured in tens of megabytes, against a build that is
       # measured in tens of minutes, so this is not a trade worth agonising
       # over.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
