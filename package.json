@@ -11,6 +11,6 @@
 		"release:dry": "commit-and-tag-version --dry-run"
 	},
 	"devDependencies": {
-		"commit-and-tag-version": "^12.6.0"
+		"commit-and-tag-version": "^13.3.0"
 	}
 }
