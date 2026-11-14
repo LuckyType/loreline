@@ -15,8 +15,6 @@ from http import HTTPStatus
 from typing import cast
 
 import httpx
-from openrouter.components.chatrequest import ChatRequestReasoning
-from openrouter.components.providerpreferences import ProviderPreferences
 from pydantic import ValidationError
 
 from loreline.capabilities import Endpoint, surface_for
@@ -146,18 +144,16 @@ def routing_payload(config: ProviderConfig) -> dict[str, object] | None:
     if config.kind is not ProviderKind.OPENROUTER or config.routing is None:
         return None
     routing: OpenRouterRouting = config.routing
-    # Assembled through the SDK's generated ProviderPreferences so the field
-    # names and value literals are checked against OpenRouter's spec rather
-    # than spelled out here. Only fields the GM moved off their default are
-    # set, and `exclude_unset` keeps the rest out of the body.
-    preferences = ProviderPreferences()
+    # Spelled out rather than built through OpenRouter's SDK: these are three
+    # fields whose values ``OpenRouterRouting`` already constrains, and the SDK
+    # they were once borrowed from capped pydantic for the whole project.
+    payload: dict[str, object] = {}
     if routing.sort is not None:
-        preferences.sort = routing.sort  # pyright: ignore[reportAttributeAccessIssue]
+        payload["sort"] = routing.sort
     if routing.data_collection == "deny":
-        preferences.data_collection = "deny"
+        payload["data_collection"] = "deny"
     if routing.zdr:
-        preferences.zdr = True
-    payload = preferences.model_dump(exclude_unset=True, exclude_none=True)
+        payload["zdr"] = True
     return payload or None
 
 
@@ -181,12 +177,7 @@ def apply_reasoning_effort(
     if not effort:
         return
     if kind is ProviderKind.OPENROUTER:
-        # Built through the SDK's generated model rather than a hand-written
-        # dict: the nested-vs-flat distinction below is exactly the kind of
-        # shape mistake an endpoint accepts silently, and this makes it a type
-        # error instead. `exclude_unset` keeps the body to what we actually set.
-        reasoning = ChatRequestReasoning(effort=effort)  # pyright: ignore[reportArgumentType]
-        payload["reasoning"] = reasoning.model_dump(exclude_unset=True, exclude_none=True)
+        payload["reasoning"] = {"effort": effort}
     else:
         payload["reasoning_effort"] = effort
 

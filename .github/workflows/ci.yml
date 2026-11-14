@@ -24,7 +24,13 @@ jobs:
         run: uv python install 3.12
 
       - name: Sync (base + dev)
-        run: uv sync --frozen --no-extra audio --no-extra providers
+        run: uv sync --frozen --no-extra audio
+
+      # `uv sync --frozen` installs what the lockfile says without asking
+      # whether it still matches pyproject.toml, so a dependency edited in one
+      # and not the other would pass everything below.
+      - name: Lockfile matches pyproject.toml
+        run: uv lock --check
 
       - name: Ruff lint
         run: uv run ruff check --output-format=github .
@@ -36,7 +42,7 @@ jobs:
         run: uv run pyright
 
       - name: Pytest
-        run: uv run pytest
+        run: uv run pytest --cov=loreline --cov-report=term-missing
 
       # The frontend's wire types are generated from this document, so a
       # schema change that was not regenerated would reach the browser as an
@@ -62,8 +68,10 @@ jobs:
 
   audio-tests:
     # Heavy native deps (numpy/torch/silero) kept off the fast lint job; this job
-    # installs the audio + providers extras and runs the tests that importorskip
-    # without them (real Silero VAD framing, OpenAI Realtime resampler).
+    # installs the audio extra and runs the tests that importorskip without it
+    # (real Silero VAD framing, OpenAI Realtime resampler). The whole suite
+    # rather than only those: code that takes one path with numpy and another
+    # without is exactly what a second run with it installed is for.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -76,12 +84,12 @@ jobs:
       # sounddevice's wheel links against the system PortAudio at import time
       # (it doesn't bundle it on Linux) and silero-vad's onnxruntime needs
       # OpenMP. Without these the extras install fine but `import sounddevice`
-      # raises OSError, so the capture tests skip instead of actually running.
+      # raises OSError, so the device listing is never asked of a real PortAudio.
       - name: Install native audio libraries
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libportaudio2 libgomp1
-      - name: Sync (with audio + providers extras)
-        run: uv sync --frozen --extra audio --extra providers
-      - name: Pytest (full suite with native + provider extras)
+      - name: Sync (with the audio extra)
+        run: uv sync --frozen --extra audio
+      - name: Pytest (full suite with the native extra)
         run: uv run pytest
 
   arm64-smoke:
@@ -89,12 +97,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-qemu-action@v4
       - name: Import smoke on linux/arm64
         run: |
           docker run --rm --platform linux/arm64 -v "$PWD":/app -w /app \
             ghcr.io/astral-sh/uv:python3.12-bookworm-slim \
-            bash -c "uv sync --frozen --no-extra audio --no-extra providers && \
+            bash -c "uv sync --frozen --no-extra audio && \
                      uv run loreline version && \
                      uv run python -c 'import loreline.web.app; print(\"arm64 import ok\")'"
 
@@ -113,4 +121,16 @@ jobs:
       - run: npm ci
       - run: npm run lint
       - run: npm run check
+      - run: npm test
       - run: npm run build
+
+  shell:
+    # deploy/ is what installs and updates a real device, and none of it runs
+    # anywhere in this pipeline. shellcheck at least reads it: an unquoted
+    # path or a variable that is never set is found here rather than halfway
+    # through somebody's update.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: shellcheck --severity=warning deploy/*.sh scripts/*.sh

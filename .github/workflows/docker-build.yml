@@ -1,0 +1,57 @@
+# Does the production image still build, and does it start?
+#
+# docker-publish.yml builds it too, but only after a merge, for two platforms
+# and for the registry. This is the question a pull request needs answered
+# before that: one platform, nothing pushed, and only when something the image
+# is made from has changed.
+name: Docker build
+
+on:
+  pull_request:
+    paths:
+      - Dockerfile
+      - .dockerignore
+      - pyproject.toml
+      - uv.lock
+      - .python-version
+      - frontend/package.json
+      - frontend/package-lock.json
+      - .github/workflows/docker-build.yml
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          tags: loreline:ci
+          cache-from: type=gha,scope=pr-build
+          cache-to: type=gha,mode=max,scope=pr-build
+
+      # With no network at all, on purpose. An image that reaches for a package
+      # index when it starts builds fine and runs fine on a connected runner;
+      # it is a device coming back up without its uplink that finds out.
+      - name: The container starts offline and answers
+        run: |
+          docker run -d --name loreline --network none loreline:ci
+          for _ in $(seq 1 30); do
+            if docker exec loreline /app/.venv/bin/python -c \
+              "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/system/livez', timeout=2)" \
+              2>/dev/null; then
+              echo "up"
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs loreline
+          exit 1

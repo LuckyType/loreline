@@ -8,7 +8,10 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+# requirements.txt is compiled from requirements.in with every version and
+# hash pinned (`uv pip compile requirements.in --universal --generate-hashes
+# -o requirements.txt`), so two builds of this image install the same bytes.
+RUN pip install --no-cache-dir --require-hashes -r requirements.txt
 
 COPY app.py ./
 

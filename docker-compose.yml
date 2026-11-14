@@ -243,8 +243,12 @@ services:
   diarization:
     build: ./services/diarization
     profiles: ["diarization"]
+    # Published on loopback only. The app reaches this over the compose
+    # network and needs no host port at all; the service has no login, so a
+    # port on every interface was an open diarizer for the whole LAN. Set
+    # DIARIZATION_BIND=0.0.0.0 to serve a Loreline running on another machine.
     ports:
-      - "8001:8001"
+      - "${DIARIZATION_BIND:-127.0.0.1}:8001:8001"
     environment:
       - DIAR_SEGMENTATION_MODEL=/models/sherpa-onnx-pyannote-segmentation-3-0/model.onnx
       - DIAR_EMBEDDING_MODEL=/models/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx

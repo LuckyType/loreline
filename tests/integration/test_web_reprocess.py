@@ -59,7 +59,7 @@ async def _reachable_diarizer(endpoint: str) -> HealthReport:
 
 @pytest_asyncio.fixture
 async def client(tmp_path: Path) -> AsyncIterator[AsyncClient]:
-    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t")
+    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t" * 32)
     app = create_app(
         settings,
         capture_factory=capture_factory,  # type: ignore[arg-type]
@@ -139,7 +139,7 @@ async def test_export_returns_the_version_it_was_asked_for(tmp_path: Path) -> No
     and pressing Export on that version handed back the live capture under the
     new version's name, with nothing saying so.
     """
-    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t")
+    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t" * 32)
     app = create_app(
         settings,
         capture_factory=capture_factory,  # type: ignore[arg-type]
@@ -205,7 +205,7 @@ async def test_reprocess_transcribe_names_the_model_it_runs(tmp_path: Path) -> N
     Required rather than optional: the provider row holds no model, so a job
     with none would have nothing to run - and the row's `model` column would go
     back to claiming null while a constant inside a connector decided."""
-    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t")
+    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t" * 32)
     captured: dict[str, str | None] = {}
 
     def factory(config: ProviderConfig, secrets: SecretStore, model: str | None) -> FakeBackend:
@@ -254,7 +254,7 @@ async def test_a_reprocess_job_builds_its_connector_for_stored_audio(tmp_path: P
     universal-3-5-pro is the streaming socket. Every other test in this file
     injects a fake factory and would never notice the two swapping over.
     """
-    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t")
+    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t" * 32)
     app = create_app(
         settings,
         capture_factory=capture_factory,  # type: ignore[arg-type]
@@ -272,7 +272,7 @@ async def test_reprocess_applies_the_glossary_unless_switched_off(tmp_path: Path
     option existed; off hands the backend no glossary at all. Either way the
     choice is recorded on the job row, like `model`, so a stored version can be
     read as glossary-biased or not."""
-    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t")
+    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t" * 32)
     seen: list[object] = []
 
     def factory(
@@ -326,7 +326,7 @@ async def test_reprocess_job(tmp_path: Path) -> None:
     # Needs the raw repo (not just the HTTP client) to check the alternate
     # transcript is persisted, so build the app directly like
     # test_diarize_session_relabels_globally does below.
-    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t")
+    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t" * 32)
     app = create_app(
         settings,
         capture_factory=capture_factory,  # type: ignore[arg-type]
@@ -461,7 +461,7 @@ async def _whole_session_diarizers(_config: DiarizationConfig) -> DiarizationPro
 
 
 async def test_diarize_session_relabels_globally(tmp_path: Path) -> None:
-    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t")
+    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t" * 32)
     app = create_app(
         settings,
         capture_factory=capture_factory,  # type: ignore[arg-type]
@@ -619,7 +619,7 @@ async def test_diarize_job_translates_a_diarizer_error_status_for_the_gm(tmp_pat
     async def failing_diarizers(_config: DiarizationConfig) -> DiarizationProvider:
         return _FailingDiarizer(error)
 
-    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t")
+    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t" * 32)
     app = create_app(
         settings,
         capture_factory=capture_factory,  # type: ignore[arg-type]
@@ -652,7 +652,7 @@ async def test_diarize_job_leaves_an_unreachable_diarizer_error_as_is(tmp_path: 
     async def unreachable_diarizers(_config: DiarizationConfig) -> DiarizationProvider:
         return _FailingDiarizer(httpx.ConnectError("Connection refused"))
 
-    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t")
+    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t" * 32)
     app = create_app(
         settings,
         capture_factory=capture_factory,  # type: ignore[arg-type]
@@ -686,7 +686,7 @@ async def test_a_timed_out_diarization_says_so_instead_of_saying_nothing(
     async def timing_out_diarizers(_config: DiarizationConfig) -> DiarizationProvider:
         return _FailingDiarizer(httpx.ReadTimeout(""))
 
-    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t")
+    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t" * 32)
     app = create_app(
         settings,
         capture_factory=capture_factory,  # type: ignore[arg-type]
@@ -731,7 +731,7 @@ async def test_diarizing_against_a_service_that_is_not_answering_is_refused(
         probed.append(endpoint)
         return HealthReport(HealthStatus.UNREACHABLE, "no answer within 2s")
 
-    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t")
+    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t" * 32)
     app = create_app(
         settings,
         capture_factory=capture_factory,  # type: ignore[arg-type]
@@ -809,7 +809,7 @@ async def test_a_diarization_left_blank_runs_at_the_stored_default_endpoint(
         built.append(config)
         return _WholeSessionDiarizer()
 
-    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t")
+    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t" * 32)
     app = create_app(
         settings,
         capture_factory=capture_factory,  # type: ignore[arg-type]
@@ -922,7 +922,7 @@ async def test_a_job_row_says_whether_its_rows_carry_speakers(tmp_path: Path) ->
     turns it on, and a diarize pass says so on its own row while leaving the
     version it relabeled saying what that version's own rows say.
     """
-    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t")
+    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t" * 32)
     app = create_app(
         settings,
         capture_factory=capture_factory,  # type: ignore[arg-type]
@@ -1033,7 +1033,7 @@ async def test_transcribe_job_diarizes_under_its_own_bank_and_forgets_only_that(
     it from Speaker 0. The job must diarize, and delete, under a bank id of
     its own instead (see ``loreline.reprocess.jobs._JobBankDiarizer``).
     """
-    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t")
+    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t" * 32)
     seen: list[str | None] = []
     forgotten: list[str] = []
 
@@ -1082,7 +1082,7 @@ async def test_delete_transcript_version(tmp_path: Path) -> None:
     exist is reachable by no reader. Every other version, and the original,
     is left alone.
     """
-    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t")
+    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t" * 32)
     app = create_app(
         settings,
         capture_factory=capture_factory,  # type: ignore[arg-type]
@@ -1229,7 +1229,7 @@ async def test_running_job_publishes_its_segment_count(tmp_path: Path) -> None:
     That is what lets the page (and a refresh, or a second browser) show a
     re-transcription filling up instead of a motionless "running".
     """
-    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t")
+    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t" * 32)
     gate = asyncio.Event()
     gate.set()  # open for the live capture below; closed before the job runs
 
@@ -1287,7 +1287,7 @@ async def test_reprocess_fails_with_the_vendors_reason_when_credit_runs_out(
     finished "done" with nothing in it. Now the job carries what the vendor
     said, which is what the session page shows next to the failed run.
     """
-    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t")
+    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t" * 32)
     live = [FakeBackend]  # the capture itself must still work
 
     def factory(config: ProviderConfig, secrets: SecretStore, model: str | None) -> FakeBackend:
@@ -1348,7 +1348,7 @@ async def test_a_run_that_lost_every_utterance_to_failures_is_a_failed_job(
     reason in the row the session page reads, and the version log says how
     many were lost.
     """
-    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t")
+    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t" * 32)
     live = [FakeBackend]  # the capture itself must still work
 
     def factory(config: ProviderConfig, secrets: SecretStore, model: str | None) -> FakeBackend:
@@ -1427,7 +1427,7 @@ class _Gated(NamedTuple):
 
 @pytest_asyncio.fixture
 async def gated(tmp_path: Path) -> AsyncIterator[_Gated]:
-    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t")
+    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t" * 32)
     gate = asyncio.Event()
     gate.set()  # open for the live capture; the run under test closes it
 
@@ -1559,7 +1559,7 @@ async def test_cancelling_a_queued_job_stops_it_before_it_runs(tmp_path: Path) -
     staying None is the proof it never ran - the run sets it before it does
     anything else at all.
     """
-    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t")
+    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t" * 32)
     app = create_app(
         settings,
         capture_factory=capture_factory,  # type: ignore[arg-type]
@@ -1671,7 +1671,7 @@ async def test_cancelling_a_diarize_job_interrupts_the_call_it_is_stuck_in(
             return _BlockingDiarizer(released)
         return FakeDiarizer()
 
-    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t")
+    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="t" * 32)
     app = create_app(
         settings,
         capture_factory=capture_factory,  # type: ignore[arg-type]

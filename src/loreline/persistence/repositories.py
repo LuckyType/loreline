@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from typing import TYPE_CHECKING, cast
@@ -37,6 +38,11 @@ from loreline.models import (
 
 if TYPE_CHECKING:
     from loreline.persistence.database import Database
+
+# Below this many rows a transcript read builds its events inline: a thread
+# hop costs more than validating a few dozen rows, and most reads during a
+# live session are that small.
+_INLINE_ROW_LIMIT = 200
 
 
 class ProviderRepository:
@@ -238,6 +244,14 @@ class SessionRepository:
             rows = await cur.fetchall()
         return [_row_to_session(r) for r in rows]
 
+    async def for_campaign(self, campaign_id: str) -> list[Session]:
+        """One campaign's sessions, oldest first - the order they were played in."""
+        async with self._db.connection.execute(
+            "SELECT * FROM sessions WHERE campaign_id = ? ORDER BY started_at;", (campaign_id,)
+        ) as cur:
+            rows = await cur.fetchall()
+        return [_row_to_session(r) for r in rows]
+
     async def finish(self, session_id: str, status: SessionStatus) -> None:
         await self._db.connection.execute(
             "UPDATE sessions SET status = ?, ended_at = ? WHERE id = ?;",
@@ -263,7 +277,10 @@ class SessionRepository:
         so this sweeps it for every session about to be failed here - or a
         reloaded history would show a half-typed line as settled text forever.
         """
-        interrupted = [s.id for s in await self.list() if s.status is SessionStatus.CAPTURING]
+        async with self._db.connection.execute(
+            "SELECT id FROM sessions WHERE status = ?;", (SessionStatus.CAPTURING.value,)
+        ) as cur:
+            interrupted: list[str] = [row["id"] for row in await cur.fetchall()]
 
         await self._db.connection.execute(
             "UPDATE sessions SET status = ?, ended_at = ? WHERE status = ?;",
@@ -373,12 +390,95 @@ class TranscriptRepository:
         await self._db.connection.commit()
 
     async def for_session(self, session_id: str) -> list[TranscriptEvent]:
+        """Every row of every version of a session, oldest first.
+
+        The whole table for one session, which is rarely what a caller wants:
+        a session re-transcribed four times is five transcripts, and reading
+        all of them to show one is five times the work. A caller that knows
+        which version it is after uses :meth:`version_rows` or
+        :meth:`version_view`, which ask SQLite for that version alone.
+        """
+        return await self._select("session_id = ?", (session_id,))
+
+    async def version_rows(self, session_id: str, version: str) -> list[TranscriptEvent]:
+        """One version's raw rows, ignoring any diarized relabeling.
+
+        The query form of :func:`loreline.export.variant_rows`, and it has to
+        stay the same rule: the original is every row no job tagged (a live
+        capture that failed over carries more than one provider id, so it is
+        defined by what it is not), and any other version is its job's rows.
+        ``GLOB`` rather than ``LIKE`` because ``LIKE`` folds ASCII case and the
+        Python rule does not.
+        """
+        if version == ORIGINAL_VERSION:
+            return await self._select(
+                "session_id = ? AND source NOT GLOB ? AND source NOT GLOB ?",
+                (session_id, f"{REPROCESS_SOURCE_PREFIX}*", f"{DIARIZE_SOURCE_PREFIX}*"),
+            )
+        return await self._select(
+            "session_id = ? AND source = ?",
+            (session_id, f"{REPROCESS_SOURCE_PREFIX}{version}"),
+        )
+
+    async def version_view(
+        self, session_id: str, version: str = ORIGINAL_VERSION
+    ) -> list[TranscriptEvent]:
+        """The version to show, export or summarize: its diarized copy if it has one.
+
+        The query form of :func:`loreline.export.variant_view`. A diarization
+        pass stores a fully relabeled copy of the version it ran over, and that
+        copy supersedes the raw rows here.
+        """
+        diarized = await self._select(
+            "session_id = ? AND source = ?",
+            (session_id, f"{DIARIZE_SOURCE_PREFIX}{version}"),
+        )
+        return diarized or await self.version_rows(session_id, version)
+
+    async def has_version(self, session_id: str, version: str) -> bool:
+        """Whether ``version`` is one this session has rows for.
+
+        The query form of :func:`loreline.export.has_version`, original
+        included: a session that captured nothing still has an empty original.
+        """
+        if version == ORIGINAL_VERSION:
+            return True
         async with self._db.connection.execute(
-            "SELECT * FROM transcript_segments WHERE session_id = ? ORDER BY start_ts;",
-            (session_id,),
+            "SELECT 1 FROM transcript_segments WHERE session_id = ? AND source IN (?, ?) LIMIT 1;",
+            (
+                session_id,
+                f"{REPROCESS_SOURCE_PREFIX}{version}",
+                f"{DIARIZE_SOURCE_PREFIX}{version}",
+            ),
         ) as cur:
-            rows = await cur.fetchall()
-        return [_row_to_event(r) for r in rows]
+            return await cur.fetchone() is not None
+
+    async def has_version_rows(self, session_id: str, version: str) -> bool:
+        """Whether a re-transcription wrote at least one raw row of its own."""
+        async with self._db.connection.execute(
+            "SELECT 1 FROM transcript_segments WHERE session_id = ? AND source = ? LIMIT 1;",
+            (session_id, f"{REPROCESS_SOURCE_PREFIX}{version}"),
+        ) as cur:
+            return await cur.fetchone() is not None
+
+    async def _select(self, where: str, params: tuple[object, ...]) -> list[TranscriptEvent]:
+        """Read the matching rows and build their events off the event loop.
+
+        ``where`` is one of the fixed conditions above, never caller text.
+
+        The build is the expensive half and the reason for the thread: a row
+        carries its word timings as JSON, so a four-hour version is tens of
+        thousands of ``Word`` models. Done inline that held the loop for over a
+        second, in a process whose loop is also what drains the microphone.
+        """
+        async with self._db.connection.execute(
+            f"SELECT * FROM transcript_segments WHERE {where} ORDER BY start_ts;",
+            params,
+        ) as cur:
+            rows = list(await cur.fetchall())
+        if len(rows) < _INLINE_ROW_LIMIT:
+            return [_row_to_event(r) for r in rows]
+        return await asyncio.to_thread(lambda: [_row_to_event(r) for r in rows])
 
     async def delete_source(self, session_id: str, source: str) -> None:
         """Remove all segments for a (session, source) - supports replace-in-place."""

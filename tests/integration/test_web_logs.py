@@ -51,7 +51,7 @@ class ChattyBackend(FakeBackend):
 
 @pytest.fixture
 def client(tmp_path: Path) -> Iterator[TestClient]:
-    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="x")
+    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="x" * 32)
     app = create_app(
         settings,
         capture_factory=capture_factory,  # type: ignore[arg-type]
@@ -157,7 +157,7 @@ def test_a_failed_run_writes_the_reason_and_the_traceback(tmp_path: Path) -> Non
     failed run's file recorded the fact of an exception as ``exc_info=True``
     and not one line of it.
     """
-    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="x")
+    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="x" * 32)
     live = [ChattyBackend]  # the capture itself must still work
 
     def factory(config: ProviderConfig, secrets: SecretStore, model: str | None) -> FakeBackend:

@@ -42,3 +42,23 @@ async def test_the_audio_worklet_is_served_as_javascript(client: AsyncClient) ->
     assert resp.status_code == 200
     assert "javascript" in resp.headers["content-type"]
     assert "registerProcessor" in resp.text
+
+
+async def test_hashed_assets_are_cached_for_good_and_the_shell_is_not(client: AsyncClient) -> None:
+    """A file named by its content hash never changes; the page that names it does.
+
+    The shell has to be revalidated on every visit, or a browser would keep
+    asking for the previous build's hashed files after an update.
+    """
+    directory = spa_directory()
+    assert directory is not None
+    asset = next((directory / "_app" / "immutable").rglob("*.js"))
+
+    hashed = await client.get("/" + asset.relative_to(directory).as_posix())
+    shell = await client.get("/")
+    missing = await client.get("/_app/immutable/no-such-file.js")
+
+    assert hashed.status_code == 200
+    assert "immutable" in hashed.headers["cache-control"]
+    assert "immutable" not in shell.headers.get("cache-control", "")
+    assert "immutable" not in missing.headers.get("cache-control", "")

@@ -456,7 +456,7 @@ async def test_alert_channels_crud_and_test(
 
 
 async def test_ops_endpoints_require_auth(tmp_path: Path) -> None:
-    secured = Settings(data_dir=tmp_path / "data", auth_password="secret", jwt_secret="k")
+    secured = Settings(data_dir=tmp_path / "data", auth_password="secret", jwt_secret="k" * 32)
     app = create_app(secured, command_runner=FakeRunner())
     async with (
         LifespanManager(app),

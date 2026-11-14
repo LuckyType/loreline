@@ -65,8 +65,6 @@ jobs:
         run: echo "described=$(git describe --tags --always)" >>"$GITHUB_OUTPUT"
 
       # binfmt handlers, so the runner can execute arm64 binaries at all.
-      # (ci.yml's arm64-smoke job still pins this action at v3. Bumping it is
-      # unrelated to publishing images, so it is left alone here.)
       - uses: docker/setup-qemu-action@v4
         with:
           platforms: arm64

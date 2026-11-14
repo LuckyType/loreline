@@ -6,7 +6,7 @@ from pathlib import Path
 
 from loreline.secrets import SecretStore
 from loreline.settings import Settings
-from loreline.web.auth import AUTH_PASSWORD_NAME, ensure_auth_password
+from loreline.web.auth import AUTH_PASSWORD_NAME, ensure_auth_password, verify_password
 from loreline.web.first_run import is_blocked
 from loreline.web.setup import (
     MIN_PASSWORD_LENGTH,
@@ -23,7 +23,7 @@ from loreline.web.setup import (
 
 def _settings(tmp_path: Path, **kwargs: object) -> Settings:
     """Settings for a fresh instance; the suite's env default is overridden per test."""
-    return Settings(data_dir=tmp_path / "data", jwt_secret="test-secret", **kwargs)  # pyright: ignore[reportArgumentType]
+    return Settings(data_dir=tmp_path / "data", jwt_secret="t" * 32, **kwargs)  # pyright: ignore[reportArgumentType]
 
 
 # --- the three states -------------------------------------------------------
@@ -61,8 +61,28 @@ def test_a_stored_password_is_loaded_onto_the_live_settings(tmp_path: Path) -> N
     store.set(AUTH_PASSWORD_NAME, "from-the-store")
     settings = _settings(tmp_path, auth_password="", first_run_setup=True)
     ensure_auth_password(settings, store)
-    assert settings.auth_password == "from-the-store"
+    assert verify_password("from-the-store", settings)
     assert not setup_required(settings)
+
+
+def test_a_password_stored_as_typed_is_hashed_the_first_time_it_is_read(tmp_path: Path) -> None:
+    """An instance claimed by an older build stops keeping its password in the clear."""
+    store = SecretStore(tmp_path / "secrets.json")
+    store.set(AUTH_PASSWORD_NAME, "typed-long-ago")
+    settings = _settings(tmp_path, auth_password="", first_run_setup=True)
+
+    ensure_auth_password(settings, store)
+
+    stored = store.get(AUTH_PASSWORD_NAME)
+    assert stored is not None
+    assert "typed-long-ago" not in stored
+    assert verify_password("typed-long-ago", settings)
+    assert not verify_password("something-else", settings)
+    # And a second start reads the same hash rather than hashing the hash.
+    again = _settings(tmp_path, auth_password="", first_run_setup=True)
+    ensure_auth_password(again, store)
+    assert store.get(AUTH_PASSWORD_NAME) == stored
+    assert verify_password("typed-long-ago", again)
 
 
 def test_the_environment_password_wins_over_the_stored_one(tmp_path: Path) -> None:
@@ -154,8 +174,10 @@ def test_claiming_stores_the_password_and_destroys_the_code(tmp_path: Path) -> N
     settings = _settings(tmp_path, auth_password="", first_run_setup=True)
     ensure_setup_code(settings, store)
     claim_instance(settings, store, "a-good-password")
-    assert settings.auth_password == "a-good-password"
-    assert store.get(AUTH_PASSWORD_NAME) == "a-good-password"
+    assert verify_password("a-good-password", settings)
+    stored = store.get(AUTH_PASSWORD_NAME)
+    assert stored is not None
+    assert "a-good-password" not in stored  # a salted hash, never the password
     assert store.get(SETUP_CODE_NAME) is None
     assert instance_claimed(settings)
     assert not setup_required(settings)

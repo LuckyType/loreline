@@ -31,7 +31,9 @@ os.environ.setdefault("LORELINE_FIRST_RUN_SETUP", "false")
 
 @pytest.fixture
 def settings(tmp_path: Path) -> Settings:
-    return Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="test-secret")
+    return Settings(
+        data_dir=tmp_path / "data", auth_password="", jwt_secret="test-secret-of-a-realistic-length"
+    )
 
 
 @pytest_asyncio.fixture
@@ -49,7 +51,7 @@ def auth_settings(tmp_path: Path) -> Settings:
     return Settings(
         data_dir=tmp_path / "data",
         auth_password="hunter2",
-        jwt_secret="test-secret",
+        jwt_secret="test-secret-of-a-realistic-length",
     )
 
 

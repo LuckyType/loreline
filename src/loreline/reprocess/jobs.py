@@ -21,7 +21,7 @@ import asyncio
 import contextlib
 import time
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from typing import TYPE_CHECKING
 
 import httpx
@@ -29,7 +29,7 @@ import httpx
 from loreline.bus import EventBus
 from loreline.diarization.merge import assign_speakers
 from loreline.diarization.remote import probe_diarizer
-from loreline.export import final_rows, variant_rows
+from loreline.export import final_rows
 from loreline.health import HealthReport, HealthStatus, classify_request_error
 from loreline.logging import bind_log_context, get_logger
 from loreline.models import (
@@ -58,6 +58,7 @@ if TYPE_CHECKING:
         SessionRepository,
         TranscriptRepository,
     )
+    from loreline.persistence.audio_store import StoredUtterances
     from loreline.secrets import SecretStore
     from loreline.stt.base import STTBackend
     from loreline.web.schemas import ReprocessRequest
@@ -361,8 +362,7 @@ class ReprocessManager:
                 msg = f"unknown provider {req.provider_id!r}"
                 raise ProviderNotFoundError(msg)
         elif req.target != ORIGINAL_VERSION:
-            events = await self._transcripts.for_session(req.session_id)
-            if not variant_rows(events, req.target):
+            if not await self._transcripts.has_version_rows(req.session_id, req.target):
                 msg = f"unknown transcript version {req.target!r}"
                 raise TargetNotFoundError(msg)
         diarization = await self._resolve_endpoint(req.diarization)
@@ -792,11 +792,15 @@ class ReprocessManager:
             ),
             diarizer=diarizer,
         )
+        utterances: StoredUtterances | None = None
         try:
-            # Blocking file I/O (a whole session's utterances) off the event loop.
-            utterances = await asyncio.to_thread(self._audio_store.read_utterances, job.session_id)
+            # Opened off the event loop (it reads the index), and read one
+            # utterance at a time by the feed rather than whole up front.
+            utterances = await asyncio.to_thread(self._audio_store.open_utterances, job.session_id)
             written = await self._drive(router, bus, utterances, job, started_mono, cancel)
         finally:
+            if utterances is not None:
+                utterances.close()
             await _aclose(backend)
             await _aclose(diarizer)
         if router.dropped:
@@ -852,11 +856,10 @@ class ReprocessManager:
             await _aclose(diarizer)
         if not segments:
             return 0
-        events = await self._transcripts.for_session(job.session_id)
         # Finals only: a diarize job writes a permanent copy of the version it
         # relabels, and an interim or a gap marker from a capture still running
         # has no business being made permanent.
-        base = final_rows(variant_rows(events, job.target))
+        base = final_rows(await self._transcripts.version_rows(job.session_id, job.target))
         source = f"{DIARIZE_SOURCE_PREFIX}{job.target}"
         relabeled = [
             assign_speakers(event, segments).model_copy(update={"source": source}) for event in base
@@ -891,7 +894,7 @@ class ReprocessManager:
         self,
         router: SttRouter,
         bus: EventBus[TranscriptEvent],
-        utterances: list[Utterance],
+        utterances: Iterable[Utterance],
         job: ReprocessJob,
         started_mono: float,
         cancel: _CancelRequest,
@@ -947,7 +950,7 @@ async def _run_then_close(
         await bus.aclose()
 
 
-async def _aiter(items: list[Utterance], cancel: _CancelRequest) -> AsyncIterator[Utterance]:
+async def _aiter(items: Iterable[Utterance], cancel: _CancelRequest) -> AsyncIterator[Utterance]:
     """Feed the router the stored recording, one utterance at a time, until it
     runs out or the GM asks it to stop.
 
@@ -967,7 +970,13 @@ async def _aiter(items: list[Utterance], cancel: _CancelRequest) -> AsyncIterato
     the difference between a run that was cut short and one that had already
     handed over its last utterance when the press arrived.
     """
-    for item in items:
+    # Each one is pulled in a thread: a stored utterance is read from the WAV
+    # when it is asked for, and that read is file I/O.
+    feed = iter(items)
+    while True:
+        item = await asyncio.to_thread(next, feed, None)
+        if item is None:
+            return
         if cancel.requested:
             cancel.stopped = True
             return

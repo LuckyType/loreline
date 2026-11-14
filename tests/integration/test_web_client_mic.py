@@ -55,7 +55,7 @@ def _app(tmp_path: Path, **mic_kwargs: float) -> Generator[TestClient]:
     capture factory, because they have to be looking at the same one: the
     socket writes into it and the factory reads the source out of it.
     """
-    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="x")
+    settings = Settings(data_dir=tmp_path / "data", auth_password="", jwt_secret="x" * 32)
     mic = ClientMic(preflight_fresh_s=30.0, **mic_kwargs)
 
     def capture_factory(
@@ -90,7 +90,9 @@ def _create_provider(client: TestClient) -> str:
 def test_an_unauthenticated_browser_cannot_stream(tmp_path: Path) -> None:
     """The socket carries audio into the recording, so it is behind the cookie."""
     settings = Settings(
-        data_dir=tmp_path / "data", auth_password="hunter2", jwt_secret="test-secret"
+        data_dir=tmp_path / "data",
+        auth_password="hunter2",
+        jwt_secret="test-secret-of-a-realistic-length",
     )
     app = create_app(settings)
     with TestClient(app) as client:

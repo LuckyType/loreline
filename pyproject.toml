@@ -11,12 +11,7 @@ keywords = ["stt", "transcription", "diarization", "tabletop", "rpg"]
 dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.34",
-    # Ceiling imposed by the openrouter SDK, which pins pydantic<2.13.
-    "pydantic>=2.9,<2.13",
-    # Floor kept 14+ days behind head on purpose - see [tool.uv] exclude-newer
-    # below. This SDK ships multiple releases a day, so a tight floor here
-    # would fight the cooldown on every lock.
-    "openrouter>=1.1.74",
+    "pydantic>=2.9",
     "pydantic-settings>=2.5",
     "structlog>=24.4",
     "httpx>=0.27",
@@ -47,12 +42,13 @@ audio = [
     "torch>=2.0",
     "torchaudio>=2.0",
 ]
-# Provider SDKs, installed as connectors land.
-providers = [
-    "deepgram-sdk>=3.7",
-    "assemblyai>=0.35",
-    "openai>=1.50",
-]
+# Empty on purpose, and kept on purpose. It once held the vendors' SDKs, none
+# of which was ever imported: every connector speaks httpx and websockets
+# directly. The name stays because a source deployment updates itself by
+# running the deploy/update-source.sh it already had in memory against the
+# pyproject.toml it just pulled, and that older script still asks for
+# `--extra providers`; a missing extra would fail the update.
+providers = []
 persistence = [
     "aiosqlite>=0.20",  # kept as alias; also a base dependency
 ]
@@ -97,7 +93,7 @@ loreline = "loreline.cli:app"
 # yanked within days; a rolling 14-day cooldown means a fresh attack can never
 # land in a fresh lock. Any dependency whose own floor fights this (it ships
 # too fast for a 14+ day-old version to satisfy the floor) needs its floor
-# lowered instead of an exemption here - see the openrouter comment above.
+# lowered instead of an exemption here.
 # ----------------------------------------------------------------------------
 [tool.uv]
 exclude-newer = "14 days"
@@ -118,6 +114,7 @@ dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
     "pytest-cov>=5.0",
+    "pytest-xdist>=3.6",
     # Floor kept 14+ days behind head on purpose - see [tool.uv] exclude-newer.
     "prek>=0.4.14",
     "asgi-lifespan>=2.1",
@@ -181,7 +178,13 @@ venv = ".venv"
 testpaths = ["tests"]
 pythonpath = ["."]
 asyncio_mode = "auto"
-addopts = "-ra --strict-markers --cov=loreline --cov-report=term-missing"
+# Parallel by default (pytest-xdist): most tests build their own app and their
+# own database under tmp_path, so they share nothing, and the suite takes a
+# quarter of the time. `-n 0` turns it off for a debugger or `-s`.
+#
+# Coverage is not on by default. It costs about a third of a run, and the
+# number is only read in CI, which asks for it there (see ci.yml).
+addopts = "-ra --strict-markers -n auto"
 
 [tool.coverage.run]
 source = ["loreline"]

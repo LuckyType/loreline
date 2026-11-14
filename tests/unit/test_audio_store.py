@@ -149,3 +149,96 @@ def test_rebuild_index_abort_writes_nothing(tmp_path: Path) -> None:
     )
     assert result is None
     assert not store.index_path("s").exists()
+
+
+def test_a_recording_in_progress_is_indexed_by_an_appended_journal(tmp_path: Path) -> None:
+    """Marking an utterance appends one line; the sidecar is written on close.
+
+    The sidecar used to be rewritten whole per utterance, which is the square
+    of the session in bytes. What has to stay true is that the index on disk is
+    current after every utterance, and that close leaves the one sidecar every
+    other reader was written against.
+    """
+    store = AudioStore(tmp_path)
+    writer = store.writer("s", sample_rate=_SR)
+    writer.append_frame(_pcm(1, 10))
+    assert not store.has_index("s")  # no utterance yet: still a WAV the VAD sweep owns
+
+    for index in range(3):
+        writer.append_frame(_pcm(index + 1, 10))
+        writer.mark_utterance(
+            Utterance(pcm=_pcm(index + 1, 10), start=float(index), end=index + 0.5)
+        )
+        assert not store.index_path("s").exists()
+        assert len(store.journal_path("s").read_text().splitlines()) == index + 2  # + header
+        assert [u.start for u in store.read_utterances("s")] == [float(i) for i in range(index + 1)]
+
+    writer.close()
+
+    assert store.index_path("s").exists()
+    assert not store.journal_path("s").exists()
+    assert len(store.read_utterances("s")) == 3
+
+
+def test_a_journal_torn_by_a_crash_ends_at_its_last_whole_line(tmp_path: Path) -> None:
+    store = AudioStore(tmp_path)
+    writer = store.writer("s", sample_rate=_SR)
+    for index in range(2):
+        writer.append_frame(_pcm(index + 1, 10))
+        writer.mark_utterance(
+            Utterance(pcm=_pcm(index + 1, 10), start=float(index), end=index + 0.5)
+        )
+    with store.journal_path("s").open("a") as journal:
+        journal.write('{"start": 2.0, "end"')  # the process died mid-append
+
+    assert [u.start for u in store.read_utterances("s")] == [0.0, 1.0]
+    assert store.orphaned_wavs() == []
+
+    # The next start turns what survived into an ordinary sidecar.
+    assert store.consolidate_journals() == 1
+    assert store.index_path("s").exists()
+    assert not store.journal_path("s").exists()
+    assert [u.start for u in store.read_utterances("s")] == [0.0, 1.0]
+    writer.close()  # test cleanup only
+
+
+def test_consolidating_leaves_the_session_being_recorded_alone(tmp_path: Path) -> None:
+    store = AudioStore(tmp_path)
+    writer = store.writer("live", sample_rate=_SR)
+    writer.append_frame(_pcm(1, 10))
+    writer.mark_utterance(Utterance(pcm=_pcm(1, 10), start=0.0, end=0.5))
+
+    assert store.consolidate_journals(skip="live") == 0
+    assert store.journal_path("live").exists()
+    writer.close()
+
+
+def test_deleting_a_session_takes_its_journal(tmp_path: Path) -> None:
+    store = AudioStore(tmp_path)
+    writer = store.writer("s", sample_rate=_SR)
+    writer.append_frame(_pcm(1, 10))
+    writer.mark_utterance(Utterance(pcm=_pcm(1, 10), start=0.0, end=0.5))
+
+    store.delete("s")
+
+    assert not store.journal_path("s").exists()
+    assert not store.exists("s")
+    writer.close()
+    store.delete("s")
+
+
+def test_stored_utterances_are_read_one_at_a_time(tmp_path: Path) -> None:
+    store = AudioStore(tmp_path)
+    with store.writer("s", sample_rate=_SR) as writer:
+        writer.append_frame(_pcm(0, 50))
+        writer.append_frame(_pcm(1, 100))
+        writer.mark_utterance(Utterance(pcm=_pcm(1, 100), start=0.5, end=1.1))
+        writer.append_frame(_pcm(2, 80))
+        writer.mark_utterance(Utterance(pcm=_pcm(2, 80), start=1.5, end=2.0))
+
+    with store.open_utterances("s") as utterances:
+        assert len(utterances) == 2
+        feed = iter(utterances)
+        assert next(feed).pcm == _pcm(1, 100)
+        assert next(feed).pcm == _pcm(2, 80)
+        assert next(feed, None) is None

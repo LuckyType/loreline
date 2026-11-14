@@ -143,9 +143,7 @@ async def _ordered_sessions(state: AppState, campaign_id: str) -> list[Session]:
     "what did I record last", and a campaign answers "what happened, and then
     what happened", which is a story and reads forwards.
     """
-    sessions = [s for s in await state.sessions.list() if s.campaign_id == campaign_id]
-    sessions.sort(key=lambda s: s.started_at)
-    return sessions
+    return await state.sessions.for_campaign(campaign_id)
 
 
 @router.get("/{campaign_id}/sessions")

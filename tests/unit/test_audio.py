@@ -1,43 +1,48 @@
-"""Tests for the audio chunker and capture recovery.
-
-Requires the ``audio`` extra (sounddevice) for the capture-recovery test;
-skipped otherwise (see the base CI job, which runs without it).
-"""
+"""Tests for the audio chunker and capture recovery."""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+import sys
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 
 from loreline.audio import Utterance, VadChunker
 
 if TYPE_CHECKING:
+    from types import ModuleType
+
     from pytest import MonkeyPatch
 
 SPEECH = b"\x01\x01"
 SILENCE = b"\x00\x00"
 
 
-def _require_sounddevice() -> Any:
-    """Return the ``sounddevice`` module, or skip if it can't be used here.
+class _PortAudioError(Exception):
+    """Stands in for ``sounddevice.PortAudioError``."""
 
-    Not ``pytest.importorskip``: that only catches ``ImportError``, but
-    sounddevice raises ``OSError("PortAudio library not found")`` at import
-    time when the native library is absent - its wheel doesn't bundle
-    PortAudio on Linux. So on a host without libportaudio2 (a bare CI runner,
-    for one) importorskip lets the OSError through and the test *fails*
-    instead of skipping.
+
+def _fake_sounddevice(monkeypatch: MonkeyPatch, open_stream: Any) -> None:
+    """Put a ``sounddevice`` in place whose streams are opened by ``open_stream``.
+
+    These tests used to patch the real module and skip where it could not be
+    imported. Importing it initializes PortAudio, which fails outright on a
+    host whose PortAudio has a PulseAudio backend and no sound server, and
+    nothing below needs a device: only what the capture does when an open
+    fails. So the module is a stand-in, as in tests/unit/test_capture_rate.py,
+    and the tests run in every lane.
     """
-    try:
-        # sounddevice ships only with the `audio` extra, which the base CI job
-        # deliberately installs without, so an unresolved import here is
-        # expected rather than a mistake. (Don't start this comment with
-        # "pyright:" - that's reserved for directives and errors out.)
-        import sounddevice  # noqa: PLC0415 # pyright: ignore[reportMissingImports]
-    except (ImportError, OSError) as exc:  # pragma: no cover - env-dependent
-        pytest.skip(f"sounddevice unavailable: {exc}")
-    return sounddevice
+
+    def query_devices(*_args: object) -> dict[str, float]:
+        return {"default_samplerate": 16000.0}
+
+    sd = SimpleNamespace(
+        PortAudioError=_PortAudioError,
+        RawInputStream=open_stream,
+        query_devices=query_devices,
+    )
+    monkeypatch.setitem(sys.modules, "sounddevice", cast("ModuleType", sd))
 
 
 def _is_speech(frame: bytes) -> bool:
@@ -95,8 +100,6 @@ def test_chunker_manual_flush() -> None:
 async def test_capture_recovers_from_stale_portaudio_state(monkeypatch: MonkeyPatch) -> None:
     """A first ``PortAudioError`` on open triggers one reinit-and-retry (see
     ``loreline.audio.portaudio``), which then succeeds without raising."""
-    sd = _require_sounddevice()
-
     from loreline.audio.capture import SoundDeviceSource  # noqa: PLC0415
 
     calls = {"open": 0, "reinit": 0}
@@ -112,13 +115,13 @@ async def test_capture_recovers_from_stale_portaudio_state(monkeypatch: MonkeyPa
         calls["open"] += 1
         if calls["open"] == 1:
             msg = "Error opening RawInputStream: Internal PortAudio error [PaErrorCode -9986]"
-            raise sd.PortAudioError(msg)
+            raise _PortAudioError(msg)
         return FakeStream()
 
     def fake_reinitialize() -> None:
         calls["reinit"] += 1
 
-    monkeypatch.setattr(sd, "RawInputStream", fake_open)
+    _fake_sounddevice(monkeypatch, fake_open)
     monkeypatch.setattr("loreline.audio.portaudio.reinitialize", fake_reinitialize)
 
     source = SoundDeviceSource(device=0, sample_rate=16000)
@@ -132,19 +135,17 @@ async def test_capture_recovers_from_stale_portaudio_state(monkeypatch: MonkeyPa
 async def test_capture_propagates_persistent_portaudio_failure(monkeypatch: MonkeyPatch) -> None:
     """A second failure (post-reinit) is a real problem, not staleness - it must
     still propagate instead of being silently swallowed."""
-    sd = _require_sounddevice()
-
     from loreline.audio.capture import SoundDeviceSource  # noqa: PLC0415
 
     def always_fails(**_kwargs: object) -> None:
         msg = "device unavailable"
-        raise sd.PortAudioError(msg)
+        raise _PortAudioError(msg)
 
-    monkeypatch.setattr(sd, "RawInputStream", always_fails)
+    _fake_sounddevice(monkeypatch, always_fails)
     monkeypatch.setattr("loreline.audio.portaudio.reinitialize", lambda: None)
 
     source = SoundDeviceSource(device=0, sample_rate=16000)
-    with pytest.raises(sd.PortAudioError):
+    with pytest.raises(_PortAudioError):
         async for _ in source.frames():
             pass
 
@@ -180,3 +181,29 @@ def test_rolling_pcm_returns_what_is_left_of_a_span_that_aged_out() -> None:
     assert round(clip_start, 6) == 1.3
     assert buffer.slice(9.0, 9.5) == (b"", 0.0)  # entirely outside the window
     assert buffer.slice(1.4, 1.4) == (b"", 0.0)  # an empty span is not an error
+
+
+def test_a_portaudio_that_cannot_start_lists_no_devices(monkeypatch: MonkeyPatch) -> None:
+    """Importing sounddevice initializes PortAudio, and that can fail.
+
+    A PortAudio built with the PulseAudio host API raises ``PortAudioError``
+    from the import itself where no sound server is running. That is "no audio
+    backend" as much as a missing library is, and the picker's route answered
+    it with a 500 instead of an empty list.
+    """
+    import builtins  # noqa: PLC0415
+
+    from loreline.audio.devices import list_input_devices  # noqa: PLC0415
+
+    real_import = builtins.__import__
+
+    def failing_import(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name == "sounddevice":
+            msg = "Error initializing PortAudio: PulseAudio_Initialize: Can't connect to server"
+            raise _PortAudioError(msg)
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.delitem(sys.modules, "sounddevice", raising=False)
+    monkeypatch.setattr(builtins, "__import__", failing_import)
+
+    assert list_input_devices() == []

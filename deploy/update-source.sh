@@ -21,7 +21,7 @@ echo "previous_commit=${PREV_COMMIT}"
 git fetch --quiet origin
 git pull --ff-only origin main
 
-uv sync --frozen --extra audio --extra providers
+uv sync --frozen --extra audio
 
 (cd frontend && npm ci && npm run build)
 

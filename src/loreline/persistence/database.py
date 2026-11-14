@@ -496,6 +496,14 @@ MIGRATIONS: list[str] = [
     """
     ALTER TABLE campaigns ADD COLUMN players TEXT NOT NULL DEFAULT '[]';
     """,
+    # v27 - find a campaign's sessions without reading every session.
+    #
+    # The campaign page, its documents and its "previously on" all ask for one
+    # campaign's sessions in play order, and the campaign list counts them per
+    # campaign. Without this each of those is a scan of the whole table.
+    """
+    CREATE INDEX idx_sessions_campaign ON sessions(campaign_id, started_at);
+    """,
 ]
 
 
@@ -532,6 +540,13 @@ class Database:
         self._conn = await aiosqlite.connect(self._path)
         self._conn.row_factory = aiosqlite.Row
         await self._conn.execute("PRAGMA journal_mode=WAL;")
+        # NORMAL rather than the default FULL. In WAL mode FULL syncs the log on
+        # every commit, and a streaming session commits a transcript row a few
+        # times a second for hours, on what is usually an SD card. NORMAL syncs
+        # at checkpoints instead: the database cannot be corrupted by a power
+        # cut either way, and what a cut can now cost is the last few commits,
+        # which here are transcript rows the recording can reproduce.
+        await self._conn.execute("PRAGMA synchronous=NORMAL;")
         await self._conn.execute("PRAGMA foreign_keys=ON;")
         self._fts5 = await self._probe_fts5()
         await self._migrate()
@@ -574,8 +589,7 @@ class Database:
             if await cur.fetchone() is not None:
                 return
         log.info("db.fts5.rebuild")
-        await self.connection.executescript(FTS5_MIGRATION)
-        await self.connection.commit()
+        await self._transaction(FTS5_MIGRATION)
 
     async def close(self) -> None:
         if self._conn is not None:
@@ -599,9 +613,39 @@ class Database:
                 log.warning("db.migrate.skipped", version=version, reason="no fts5")
             else:
                 log.info("db.migrate", version=version)
-                await conn.executescript(script)
+                await self._apply(script, version)
+                continue
             await conn.execute("INSERT INTO schema_version (version) VALUES (?);", (version,))
             await conn.commit()
+
+    async def _apply(self, script: str, version: int) -> None:
+        """Run one migration and record it, as a single transaction.
+
+        ``executescript`` runs in autocommit, so a script of several statements
+        used to land one statement at a time with the version recorded after
+        the last. A process killed in between - an update is exactly when a
+        box gets restarted - left the schema half way and the version behind
+        it, and every start after that failed on the statement that had
+        already run ("duplicate column name"). SQLite's DDL is transactional,
+        virtual tables included, so the script and its version row now commit
+        together or not at all.
+        """
+        await self._transaction(
+            f"{script}\nINSERT INTO schema_version (version) VALUES ({version});"
+        )
+
+    async def _transaction(self, script: str) -> None:
+        """Run a script of several statements so that all of it lands or none does."""
+        conn = self.connection
+        await conn.commit()  # nothing of ours may be open when BEGIN runs
+        try:
+            await conn.executescript(f"BEGIN IMMEDIATE;\n{script}\nCOMMIT;")
+        except BaseException:
+            # A failed statement leaves the transaction open; close it so the
+            # connection is usable and nothing partial survives.
+            if conn.in_transaction:
+                await conn.rollback()
+            raise
 
     async def __aenter__(self) -> Self:
         await self.connect()

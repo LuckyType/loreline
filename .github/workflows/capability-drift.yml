@@ -33,7 +33,7 @@ jobs:
         run: uv python install 3.12
 
       - name: Sync (base + dev)
-        run: uv sync --frozen --no-extra audio --no-extra providers
+        run: uv sync --frozen --no-extra audio
 
       # Fails only on things a vendor confirmed (a curated model it no longer
       # lists) or on a date that needs no vendor at all. An unreachable, rate

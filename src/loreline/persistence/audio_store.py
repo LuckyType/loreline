@@ -4,8 +4,9 @@ The full continuous mic stream (including silence/gaps) is written to a single
 mono 16-bit WAV per session via :meth:`SessionAudioWriter.append_frame`, so the
 audio can be re-VAD'd / re-diarized from true source later. A JSON sidecar
 records each voiced utterance's offset into that continuous stream (plus original
-timestamps), so :meth:`AudioStore.read_utterances` reconstructs the exact
-utterances for re-STT without re-running VAD.
+timestamps), so :meth:`AudioStore.open_utterances` reconstructs the exact
+utterances for re-STT without re-running VAD. While a session is being recorded
+that index is an append-only journal; the sidecar is written when it ends.
 """
 
 from __future__ import annotations
@@ -14,12 +15,12 @@ import json
 import os
 import wave
 from pathlib import Path
-from typing import TYPE_CHECKING, Self
+from typing import TYPE_CHECKING, Self, TextIO
 
 from loreline.audio.chunker import SpeechDetector, Utterance, VadChunker
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Iterator, Sequence
     from types import TracebackType
 
 _SAMPLE_WIDTH = 2  # 16-bit
@@ -49,15 +50,55 @@ def _write_index_file(
     os.replace(tmp, path)
 
 
+def _journal_path(index_path: Path) -> Path:
+    """Where a recording in progress keeps its utterance index.
+
+    ``<id>.index.json`` becomes ``<id>.index.jsonl``: one line naming the
+    sample rate, then one line per utterance, appended as each one ends.
+    """
+    return index_path.with_name(index_path.name + "l")
+
+
+def _read_journal(path: Path) -> tuple[int, list[dict[str, float | int]]]:
+    """A journal's sample rate and entries, stopping at the first torn line.
+
+    A process killed mid-append leaves a last line that is not JSON. Everything
+    before it was written whole, so that is where the index ends - the same
+    "at most the final utterance" loss the rewritten sidecar used to promise.
+    """
+    sample_rate = 0
+    entries: list[dict[str, float | int]] = []
+    with path.open(encoding="utf-8") as handle:
+        for number, line in enumerate(handle):
+            try:
+                record = json.loads(line)
+            except ValueError:
+                break
+            if number == 0:
+                sample_rate = int(record["sample_rate"])
+            else:
+                entries.append(record)
+    return sample_rate, entries
+
+
 class SessionAudioWriter:
     """Streaming WAV writer that records utterance boundaries.
 
-    Use as a context manager or call :meth:`close` explicitly. The index
-    sidecar is re-written (atomically) after every marked utterance and the
-    ``wave`` module patches the WAV header on every write, so an unclean death
-    (crash, power loss) loses at most the final in-flight utterance - the
-    recording on disk stays complete and re-processable without a clean
-    ``close``. ``close`` is idempotent and finalises both files.
+    Use as a context manager or call :meth:`close` explicitly. Each marked
+    utterance is appended to a journal beside the WAV and the ``wave`` module
+    patches the WAV header on every write, so an unclean death (crash, power
+    loss) loses at most the final in-flight utterance - the recording on disk
+    stays complete and re-processable without a clean ``close``. ``close`` is
+    idempotent, writes the index sidecar and retires the journal.
+
+    A journal rather than the sidecar rewritten each time, which is what this
+    did before: the sidecar holds every utterance so far, so rewriting it per
+    utterance wrote the square of the session - several hundred megabytes over
+    a four-hour evening, about as much as the audio itself, onto what is
+    usually an SD card. An append costs one line whatever the session's length.
+    Every reader goes through :meth:`AudioStore.load_index`, which reads
+    whichever of the two is there, so a recording still in progress and one
+    whose process died are both readable exactly as before.
     """
 
     def __init__(self, wav_path: Path, index_path: Path, *, sample_rate: int) -> None:
@@ -77,6 +118,8 @@ class SessionAudioWriter:
         self._wav.setsampwidth(_SAMPLE_WIDTH)
         self._wav.setframerate(sample_rate)
         self._closed = False
+        self._journal_path = _journal_path(index_path)
+        self._journal: TextIO | None = None
 
     def append_frame(self, frame: bytes) -> None:
         """Append one raw capture frame to the continuous session WAV."""
@@ -103,7 +146,15 @@ class SessionAudioWriter:
         # WAV first, sidecar second: the persisted index only ever references
         # audio that has already reached the on-disk WAV.
         self._file.flush()
-        _write_index_file(self._index_path, sample_rate=self._sample_rate, entries=self._index)
+        if self._journal is None:
+            # Opened on the first utterance, not at construction, so a session
+            # that never heard one still has no index at all - which is what
+            # marks its WAV as one the startup sweep should run VAD over.
+            self._journal = self._journal_path.open("w", encoding="utf-8")
+            header = {"sample_rate": self._sample_rate, "channels": _CHANNELS}
+            self._journal.write(json.dumps(header) + "\n")
+        self._journal.write(json.dumps(self._index[-1]) + "\n")
+        self._journal.flush()
 
     def close(self) -> None:
         """Finalise the WAV header and write the index sidecar (idempotent)."""
@@ -112,7 +163,11 @@ class SessionAudioWriter:
         self._closed = True
         self._wav.close()  # patches the header; doesn't close the caller-owned file
         self._file.close()
+        if self._journal is not None:
+            self._journal.close()
         _write_index_file(self._index_path, sample_rate=self._sample_rate, entries=self._index)
+        # Only once the sidecar is in place: until then the journal is the index.
+        self._journal_path.unlink(missing_ok=True)
 
     def __enter__(self) -> Self:
         return self
@@ -148,13 +203,60 @@ class AudioStore:
     def index_path(self, session_id: str) -> Path:
         return self._root / f"{session_id}.index.json"
 
+    def journal_path(self, session_id: str) -> Path:
+        return _journal_path(self.index_path(session_id))
+
+    def has_index(self, session_id: str) -> bool:
+        """Whether this session's utterances are indexed, by sidecar or by journal."""
+        return self.index_path(session_id).exists() or self.journal_path(session_id).exists()
+
     def exists(self, session_id: str) -> bool:
-        return self.wav_path(session_id).exists() and self.index_path(session_id).exists()
+        return self.wav_path(session_id).exists() and self.has_index(session_id)
 
     def delete(self, session_id: str) -> None:
         """Remove a session's stored WAV + index sidecar (no-op if absent)."""
         self.wav_path(session_id).unlink(missing_ok=True)
         self.index_path(session_id).unlink(missing_ok=True)
+        self.journal_path(session_id).unlink(missing_ok=True)
+
+    def load_index(self, session_id: str) -> list[dict[str, float | int]]:
+        """A session's utterance entries, from the sidecar or else the journal.
+
+        The sidecar wins when both exist: it is written last and whole, so a
+        journal still beside it is one ``close`` did not get to delete.
+        """
+        index_path = self.index_path(session_id)
+        if index_path.exists():
+            index = json.loads(index_path.read_text())
+            entries: list[dict[str, float | int]] = index["utterances"]
+            return entries
+        return _read_journal(self.journal_path(session_id))[1]
+
+    def consolidate_journals(self, *, skip: str | None = None) -> int:
+        """Turn journals a dead process left behind into sidecars; return how many.
+
+        A journal is complete on its own, so this is tidying rather than
+        recovery: it leaves every finished recording with the one file the
+        rest of the store was written against. ``skip`` is the session being
+        recorded right now, whose journal is still being appended to.
+        """
+        if not self._root.is_dir():
+            return 0
+        done = 0
+        for journal in self._root.glob("*.index.jsonl"):
+            session_id = journal.name.removesuffix(".index.jsonl")
+            if session_id == skip:
+                continue
+            if not self.index_path(session_id).exists():
+                sample_rate, entries = _read_journal(journal)
+                if sample_rate <= 0:
+                    continue  # header never landed; the VAD sweep rebuilds it
+                _write_index_file(
+                    self.index_path(session_id), sample_rate=sample_rate, entries=entries
+                )
+                done += 1
+            journal.unlink(missing_ok=True)
+        return done
 
     def writer(self, session_id: str, *, sample_rate: int) -> SessionAudioWriter:
         return SessionAudioWriter(
@@ -180,9 +282,7 @@ class AudioStore:
         if not self._root.is_dir():
             return []
         return sorted(
-            path.stem
-            for path in self._root.glob("*.wav")
-            if not self.index_path(path.stem).exists()
+            path.stem for path in self._root.glob("*.wav") if not self.has_index(path.stem)
         )
 
     def rebuild_index(
@@ -274,9 +374,7 @@ class AudioStore:
                         part_frames = src.getnframes()
                         while chunk := src.readframes(_COPY_CHUNK_FRAMES):
                             out.writeframes(chunk)
-                    index = json.loads(self.index_path(sid).read_text())
-                    entries: list[dict[str, float | int]] = index["utterances"]
-                    for entry in entries:
+                    for entry in self.load_index(sid):
                         offset_frames = frames_total + int(entry["offset_frames"])
                         n_frames = int(entry["n_frames"])
                         merged_entries.append(
@@ -303,22 +401,64 @@ class AudioStore:
             sample_rate = wav.getframerate()
         return data, sample_rate
 
+    def open_utterances(self, session_id: str) -> StoredUtterances:
+        """Open a session's stored utterances for reading one at a time.
+
+        Raises here, not on the first read, when the audio or its index is
+        missing, so a caller learns that before it has started anything.
+        """
+        return StoredUtterances(self.wav_path(session_id), self.load_index(session_id))
+
     def read_utterances(self, session_id: str) -> list[Utterance]:
-        """Reconstruct the stored utterances from the WAV + index sidecar."""
-        index = json.loads(self.index_path(session_id).read_text())
-        entries: list[dict[str, float | int]] = index["utterances"]
-        with wave.open(str(self.wav_path(session_id)), "rb") as wav:
-            pcm = wav.readframes(wav.getnframes())
-        frame_bytes = _SAMPLE_WIDTH * _CHANNELS
-        utterances: list[Utterance] = []
-        for entry in entries:
-            start_byte = int(entry["offset_frames"]) * frame_bytes
-            end_byte = start_byte + int(entry["n_frames"]) * frame_bytes
-            utterances.append(
-                Utterance(
-                    pcm=pcm[start_byte:end_byte],
-                    start=float(entry["start"]),
-                    end=float(entry["end"]),
-                )
+        """Reconstruct every stored utterance from the WAV + index, in memory.
+
+        Fine for a short recording and for tests. A whole evening is several
+        hundred megabytes this way; anything that walks a session utterance by
+        utterance uses :meth:`open_utterances` instead.
+        """
+        with self.open_utterances(session_id) as utterances:
+            return list(utterances)
+
+
+class StoredUtterances:
+    """A session's utterances, each read from the WAV as it is asked for.
+
+    Reading the recording whole and slicing it held the entire session in
+    memory, and the slices beside it: close to a gigabyte for four hours, on a
+    device that may have two. An utterance is at most half a minute, so reading
+    them one at a time keeps a re-transcription's footprint at one of those
+    whatever the session's length.
+
+    Iterable once, in index order. Reads block (they are file I/O), so iterate
+    off the event loop.
+    """
+
+    def __init__(self, wav_path: Path, entries: list[dict[str, float | int]]) -> None:
+        self._entries = entries
+        self._wav = wave.open(str(wav_path), "rb")  # noqa: SIM115 - closed in close()
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+    def __iter__(self) -> Iterator[Utterance]:
+        for entry in self._entries:
+            self._wav.setpos(min(int(entry["offset_frames"]), self._wav.getnframes()))
+            yield Utterance(
+                pcm=self._wav.readframes(int(entry["n_frames"])),
+                start=float(entry["start"]),
+                end=float(entry["end"]),
             )
-        return utterances
+
+    def close(self) -> None:
+        self._wav.close()
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        self.close()

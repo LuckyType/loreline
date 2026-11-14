@@ -39,11 +39,19 @@ Everything CI runs:
 uv run ruff check .
 uv run ruff format --check .
 uv run pyright
+uv lock --check
 uv run pytest
 uv run loreline check-capabilities --offline
+shellcheck --severity=warning deploy/*.sh scripts/*.sh
 
-cd frontend && npm run lint && npm run check && npm run build
+cd frontend && npm run lint && npm run check && npm test && npm run build
 ```
+
+`pytest` runs in parallel by default (pytest-xdist, `-n auto` in
+`pyproject.toml`); pass `-n 0` for a debugger or `-s`. Coverage is off by
+default and CI asks for it with `--cov=loreline --cov-report=term-missing`.
+`npm test` runs the frontend's unit tests (vitest), which sit beside the module
+they test as `*.test.ts`.
 
 `uv run prek install` wires the git hooks up. prek is a drop-in Rust
 reimplementation of pre-commit and reads the same `.pre-commit-config.yaml`;
