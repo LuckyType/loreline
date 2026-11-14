@@ -18,7 +18,7 @@
 # browser works everywhere and needs none of it.
 
 # --- Stage 1: build the SvelteKit static frontend -----------------------
-FROM node:22-slim AS frontend-builder
+FROM node:25-slim AS frontend-builder
 
 # node:22-slim currently bundles npm 10.9.x. frontend/.npmrc's min-release-age
 # needs npm >= 11.10.0 or it is silently ignored (older npm just warns and
