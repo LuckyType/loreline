@@ -1,5 +1,5 @@
-fastapi>=0.115
+fastapi>=0.162.7
 uvicorn[standard]>=0.34
-python-multipart>=0.0.12
+python-multipart>=0.0.33
 numpy>=2.0
 sherpa-onnx>=1.10
